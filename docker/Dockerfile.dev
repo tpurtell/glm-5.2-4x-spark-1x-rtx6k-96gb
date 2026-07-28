@@ -1,0 +1,58 @@
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.05-py3
+FROM ${BASE_IMAGE}
+
+ARG GLMRT_ROLE=dev
+ARG CUDA_ARCH=120
+ARG TARGET_PLATFORM=linux/amd64
+
+ENV GLMRT_ROLE=${GLMRT_ROLE}
+ENV GLMRT_CUDA_ARCH=${CUDA_ARCH}
+ENV GLMRT_TARGET_PLATFORM=${TARGET_PLATFORM}
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+ENV CARGO_HOME=/opt/cargo
+ENV RUSTUP_HOME=/opt/rustup
+ENV PATH=/opt/cargo/bin:${PATH}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      bash ca-certificates curl git git-lfs jq ripgrep pkg-config \
+      build-essential clang cmake ninja-build python3-venv \
+      rdma-core ibverbs-providers libibverbs-dev perftest \
+      openssh-client netcat-openbsd iproute2 pciutils && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && \
+    rustup component add rustfmt
+
+ENV UV_SYSTEM_PYTHON=1
+
+RUN python3 -m pip install --no-cache-dir uv && \
+    uv pip install --system --break-system-packages --no-cache \
+      pytest \
+      safetensors \
+      huggingface-hub && \
+    uv pip install --system --break-system-packages --no-cache \
+      "nvidia-cutlass-dsl[cu13]==4.6.1" \
+      "apache-tvm-ffi==0.1.12" \
+      "cuda-tile==1.5.0" \
+      "nvidia-cudnn-frontend==1.26.0" \
+      "einops==0.8.2" \
+      "ninja==1.13.0" \
+      "nvidia-ml-py==13.610.43" \
+      "pillow>=11,<13" \
+      "tabulate==0.10.0" \
+      "transformers==5.13.0" \
+      "rich==15.0.0" && \
+    uv pip install --system --break-system-packages --no-cache --no-deps \
+      "b12x==0.30.2" \
+      "flashinfer-python==0.6.14"
+
+WORKDIR /workspace/glmrt
+ENV PYTHONPATH=/workspace/glmrt/python/reference/glmrt_reference:/workspace/glmrt/python/reference
+COPY docker/entrypoint.sh /usr/local/bin/glmrt-entrypoint
+RUN chmod +x /usr/local/bin/glmrt-entrypoint
+
+ENTRYPOINT ["/usr/local/bin/glmrt-entrypoint"]
+CMD ["bash"]

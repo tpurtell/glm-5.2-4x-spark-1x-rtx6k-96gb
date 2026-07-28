@@ -1,0 +1,14 @@
+pub(crate) mod bench_cuda_kernels;
+pub(crate) mod bench_expert_reduction_replay;
+pub(crate) mod bench_protocol_v2_tcp;
+pub(crate) mod bench_rdma;
+pub(crate) mod bench_rdma_reduce;
+pub(crate) mod bench_rdma_ring;
+pub(crate) mod coordinator;
+pub(crate) mod doctor;
+pub(crate) mod expertd;
+pub(crate) mod model_artifacts;
+pub(crate) mod real_full;
+pub(crate) mod scheduler_row_audit;
+pub(crate) mod scheduler_smoke;
+pub(crate) mod transport_capabilities;

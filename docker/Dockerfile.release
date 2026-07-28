@@ -1,0 +1,68 @@
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.05-py3
+FROM ${BASE_IMAGE} AS inference
+
+ARG GLMRT_ROLE
+ARG CUDA_ARCH
+ARG GLMRT_ENGINE_COMMIT=unknown
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV GLMRT_ROLE=${GLMRT_ROLE}
+ENV GLMRT_CUDA_ARCH=${CUDA_ARCH}
+ENV GLMRT_ENGINE_COMMIT=${GLMRT_ENGINE_COMMIT}
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+ENV UV_SYSTEM_PYTHON=1
+ENV PATH=/opt/glmrt/bin:${PATH}
+ENV PYTHONPATH=/opt/glmrt/python/reference/glmrt_reference:/opt/glmrt/python/reference
+ENV GLMRT_NATIVE_LIB=/opt/glmrt/lib/libglmrt_native.so
+ENV GLMRT_VISION_WORKER=/opt/glmrt/python/tools/glmrt_vision_worker.py
+
+LABEL org.opencontainers.image.title="GLMRT inference"
+LABEL org.opencontainers.image.revision=${GLMRT_ENGINE_COMMIT}
+LABEL io.glmrt.role=${GLMRT_ROLE}
+LABEL io.glmrt.cuda_arch=${CUDA_ARCH}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      bash ca-certificates curl jq tini \
+      rdma-core ibverbs-providers libibverbs1 \
+      libnl-3-200 libnl-route-3-200 \
+      iproute2 pciutils netcat-openbsd && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir uv && \
+    uv pip install --system --break-system-packages --no-cache \
+      safetensors \
+      huggingface-hub \
+      "nvidia-cutlass-dsl[cu13]==4.6.1" \
+      "apache-tvm-ffi==0.1.12" \
+      "cuda-tile==1.5.0" \
+      "nvidia-cudnn-frontend==1.26.0" \
+      "einops==0.8.2" \
+      "ninja==1.13.0" \
+      "nvidia-ml-py==13.610.43" \
+      "pillow>=11,<13" \
+      "tabulate==0.10.0" \
+      "transformers==5.13.0" \
+      "rich==15.0.0" && \
+    uv pip install --system --break-system-packages --no-cache --no-deps \
+      "b12x==0.30.2" \
+      "flashinfer-python==0.6.14" && \
+    python3 -c 'import PIL, torch; print(PIL.__version__, torch.__version__)'
+
+COPY .glmrt-release-image/glmrt /opt/glmrt/bin/glmrt
+COPY .glmrt-release-image/libglmrt_native.so /opt/glmrt/lib/libglmrt_native.so
+COPY .glmrt-release-image/THIRD_PARTY_NOTICES.md /opt/glmrt/share/THIRD_PARTY_NOTICES.md
+COPY python /opt/glmrt/python
+COPY scripts/real-full-tcp-serve.sh /opt/glmrt/scripts/real-full-tcp-serve.sh
+COPY docker/release-entrypoint.sh /usr/local/bin/glmrt-release-entrypoint
+
+RUN chmod +x \
+      /opt/glmrt/bin/glmrt \
+      /opt/glmrt/scripts/real-full-tcp-serve.sh \
+      /usr/local/bin/glmrt-release-entrypoint && \
+    python3 -c 'import b12x_mla_capture, b12x_spark_capture, dspark_capture, dspark_body_capture, dspark_head_capture, dspark_update_capture, triton_kv_pack_capture, triton_mlp_capture, triton_router_capture, triton_sampling_capture'
+
+WORKDIR /opt/glmrt
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/glmrt-release-entrypoint"]
+CMD ["glmrt", "--help"]

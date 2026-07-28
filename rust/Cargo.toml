@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/glmrt-api",
+  "crates/glmrt-core",
+  "crates/glmrt-daemon",
+  "crates/glmrt-ffi",
+  "crates/glmrt-loader",
+  "crates/glmrt-transport",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/tpurtell/glmrt"
+
+[workspace.dependencies]
+anyhow = "1"
+async-stream = "0.3"
+axum = { version = "0.7", features = ["macros"] }
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+libc = "0.2"
+libloading = "0.8"
+pyo3 = { version = "0.22", features = ["auto-initialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+uuid = { version = "1", features = ["v4", "serde"] }

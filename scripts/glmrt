@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f /.dockerenv ]]; then
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/glmrt-target}"
+fi
+
+python="${GLMRT_PYTHON:-}"
+if [ -z "$python" ] && [ -x "$repo_root/.venv/bin/python" ]; then
+  python="$repo_root/.venv/bin/python"
+fi
+if [ -z "$python" ]; then
+  python="$(command -v python3 || true)"
+fi
+if [ -n "$python" ] && [ -x "$python" ]; then
+  export GLMRT_PYTHON="$python"
+  export PYO3_PYTHON="${PYO3_PYTHON:-$python}"
+  python_libdir="$("$python" - <<'PY'
+import sysconfig
+print(sysconfig.get_config_var("LIBDIR") or "")
+PY
+)"
+  if [ -n "$python_libdir" ]; then
+    export LD_LIBRARY_PATH="$python_libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
+fi
+exec cargo run --manifest-path "$repo_root/rust/Cargo.toml" -p glmrt-daemon --bin glmrt -- "$@"

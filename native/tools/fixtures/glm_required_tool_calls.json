@@ -1,0 +1,66 @@
+{
+  "name": "glm_required_tool_calls",
+  "model_vocab_size": 154880,
+  "stop_token_ids": [154820, 154827, 154829],
+  "structural_tag": {
+    "type": "structural_tag",
+    "format": {
+      "type": "tags_with_separator",
+      "tags": [
+        {
+          "type": "tag",
+          "begin": "<tool_call>lookup",
+          "content": {
+            "type": "json_schema",
+            "json_schema": {
+              "type": "object",
+              "properties": {
+                "city": {"type": "string"},
+                "units": {"type": "string", "enum": ["metric", "imperial"]}
+              },
+              "required": ["city", "units"],
+              "additionalProperties": false
+            },
+            "style": "glm_xml",
+            "any_order": false
+          },
+          "end": "</tool_call>"
+        },
+        {
+          "type": "tag",
+          "begin": "<tool_call>search",
+          "content": {
+            "type": "json_schema",
+            "json_schema": {
+              "type": "object",
+              "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10}
+              },
+              "required": ["query", "limit"],
+              "additionalProperties": false
+            },
+            "style": "glm_xml",
+            "any_order": false
+          },
+          "end": "</tool_call>"
+        }
+      ],
+      "separator": "",
+      "at_least_one": true,
+      "stop_after_first": false
+    }
+  },
+  "samples": [
+    {
+      "name": "lookup",
+      "text": "<tool_call>lookup<arg_key>city</arg_key><arg_value>Taipei</arg_value><arg_key>units</arg_key><arg_value>metric</arg_value></tool_call>",
+      "token_ids": [154843, 20973, 154847, 8923, 154848, 154849, 77368, 63417, 154850, 154847, 25564, 154848, 154849, 15891, 154850, 154844]
+    },
+    {
+      "name": "search",
+      "text": "<tool_call>search<arg_key>query</arg_key><arg_value>RDMA ring buffers</arg_value><arg_key>limit</arg_key><arg_value>4</arg_value></tool_call>",
+      "token_ids": [154843, 1836, 154847, 1631, 154848, 154849, 36499, 4835, 10053, 27298, 154850, 154847, 9502, 154848, 154849, 19, 154850, 154844]
+    }
+  ]
+}
