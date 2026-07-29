@@ -46,7 +46,7 @@ use crate::commands::real_full::sparse_mlp::route::{
     execute_nvfp4_route_rows_nvfp4_accumulated_streaming_cached,
     preload_bf16_route_projection_group_cache, preload_routed_bf16_projection_cuda_cache,
     preload_routed_quant_projection_cuda_cache, preload_routed_quant_projection_host_cache,
-    preload_routed_quant_projection_scalar_cache,
+    preload_routed_quant_projection_scalar_cache_parallel,
     preload_startup_quantized_bf16_projection_cuda_cache, reduce_mapped_route_shards_cached,
     reduce_mapped_route_shards_cached_host_output, try_begin_packed_w4a16_topk8_prefill_cached,
     PackedW4a16Topk8Route, RouteNvfp4IngressStream, RouteNvfp4IngressStreamChunk,
@@ -850,7 +850,13 @@ impl RealNvfp4ProtocolV2Executor {
         &self,
         preload_cuda: bool,
     ) -> Result<RealNvfp4ResidentPreloadStats> {
+        let preload_started = Instant::now();
         let specs = routed_projection_preload_specs(&self.catalog, self.intermediate_shard)?;
+        eprintln!(
+            "real_nvfp4_preload_stage stage=specs specs={} elapsed_ms={:.3}",
+            specs.len(),
+            preload_started.elapsed().as_secs_f64() * 1_000.0
+        );
         let mut route_cache = self
             .route_caches
             .first()
@@ -870,6 +876,34 @@ impl RealNvfp4ProtocolV2Executor {
             ..Default::default()
         };
         let preload_host_projection_rows = !preload_cuda || cuda_route_validation_enabled();
+        if !preload_host_projection_rows {
+            let mut scalar_requests = Vec::with_capacity(specs.len());
+            for spec in &specs {
+                if !retained_bf16_projection_spec(&self.catalog, spec)?
+                    && !startup_quantized_bf16_projection_spec(&self.catalog, spec)?
+                {
+                    scalar_requests.push(RouteProjectionCachePreloadRequest {
+                        layer_id: spec.layer_id,
+                        expert_id: spec.expert_id,
+                        projection: spec.projection,
+                        row_count: spec.row_count,
+                    });
+                }
+            }
+            if !scalar_requests.is_empty() {
+                let preload = preload_routed_quant_projection_scalar_cache_parallel(
+                    &self.catalog,
+                    &scalar_requests,
+                    &mut route_cache,
+                )?;
+                stats.quant_metadata_bytes += preload.quant_metadata_bytes;
+            }
+            eprintln!(
+                "real_nvfp4_preload_stage stage=scalar-cache entries={} elapsed_ms={:.3}",
+                scalar_requests.len(),
+                preload_started.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
 
         for spec in &specs {
             let retained_bf16 = retained_bf16_projection_spec(&self.catalog, spec)?;
@@ -895,29 +929,24 @@ impl RealNvfp4ProtocolV2Executor {
                 "down_proj" => rows.2 = Some(spec.row_count),
                 projection => bail!("unsupported routed projection {projection}"),
             }
-            if !retained_bf16 && !startup_quantized_bf16 {
-                let preload = if preload_host_projection_rows {
-                    preload_routed_quant_projection_host_cache(
-                        &self.catalog,
-                        spec.layer_id,
-                        spec.expert_id,
-                        spec.projection,
-                        spec.row_count,
-                        &mut route_cache,
-                    )?
-                } else {
-                    preload_routed_quant_projection_scalar_cache(
-                        &self.catalog,
-                        spec.layer_id,
-                        spec.expert_id,
-                        spec.projection,
-                        &mut route_cache,
-                    )?
-                };
+            if !retained_bf16 && !startup_quantized_bf16 && preload_host_projection_rows {
+                let preload = preload_routed_quant_projection_host_cache(
+                    &self.catalog,
+                    spec.layer_id,
+                    spec.expert_id,
+                    spec.projection,
+                    spec.row_count,
+                    &mut route_cache,
+                )?;
                 stats.weight_bytes += preload.weight_bytes;
                 stats.quant_metadata_bytes += preload.quant_metadata_bytes;
             }
         }
+        eprintln!(
+            "real_nvfp4_preload_stage stage=projection-index entries={} elapsed_ms={:.3}",
+            specs.len(),
+            preload_started.elapsed().as_secs_f64() * 1_000.0
+        );
 
         let hidden_dim = self.catalog.facts.hidden_size;
         for ((layer_id, expert_id), (gate_rows, up_rows, down_rows)) in projection_rows_by_expert {
@@ -968,6 +997,11 @@ impl RealNvfp4ProtocolV2Executor {
                 )?;
             }
         }
+        eprintln!(
+            "real_nvfp4_preload_stage stage=route-groups groups={} elapsed_ms={:.3}",
+            experts.len(),
+            preload_started.elapsed().as_secs_f64() * 1_000.0
+        );
 
         if preload_cuda {
             let mut retained_specs = Vec::new();
@@ -1046,6 +1080,11 @@ impl RealNvfp4ProtocolV2Executor {
         stats.cuda_managed_projection_entries = route_stats.cuda_managed_projection_entries;
         stats.cuda_managed_projection_allocations_enabled =
             route_stats.cuda_managed_projection_allocations_enabled;
+        eprintln!(
+            "real_nvfp4_preload_stage stage=cuda-residency projections={} elapsed_ms={:.3}",
+            stats.cuda_projection_groups,
+            preload_started.elapsed().as_secs_f64() * 1_000.0
+        );
         let active_lanes = protocol_v2_verbs_host_execution_lanes()?;
         for execution_lane in 1..active_lanes {
             let auxiliary_cache = route_cache.fork_execution_lane(
@@ -2925,6 +2964,15 @@ fn resident_preload_plan_for_specs(
     specs: &[RouteProjectionPreloadSpec],
     intermediate_shard: Option<ExpertIntermediateShard>,
 ) -> Result<RealNvfp4ResidentPreloadPlan> {
+    let tensor_by_name = catalog
+        .tensors
+        .iter()
+        .map(|tensor| (tensor.name.as_str(), tensor))
+        .collect::<HashMap<_, _>>();
+    let find_tensor = |name: &str| tensor_by_name.get(name).copied();
+    let require_tensor = |name: &str| {
+        find_tensor(name).with_context(|| format!("tensor {name} not found in catalog"))
+    };
     let mut layers = BTreeSet::new();
     let mut projection_sets = BTreeMap::<(usize, usize), BTreeSet<&'static str>>::new();
     let mut plan = RealNvfp4ResidentPreloadPlan {
@@ -2947,7 +2995,7 @@ fn resident_preload_plan_for_specs(
         let input_scale_name = format!("{base_name}.input_scale");
         let weight_scale_2_name = format!("{base_name}.weight_scale_2");
         let shard_count = intermediate_shard.map_or(1_u64, |shard| shard.count as u64);
-        let weight = catalog_tensor(catalog, &weight_name)?;
+        let weight = require_tensor(&weight_name)?;
         if weight.dtype == DType::Bf16 && spec.layer_id == GLM52_MTP_LAYER_ID {
             let retained_bf16 = retained_bf16_projection_spec(catalog, spec)?;
             if retained_bf16 {
@@ -2962,17 +3010,17 @@ fn resident_preload_plan_for_specs(
             continue;
         }
         plan.weight_bytes += weight.byte_length / shard_count;
-        if let Some(weight_scale) = catalog_tensor_opt(catalog, &weight_scale_name) {
+        if let Some(weight_scale) = find_tensor(&weight_scale_name) {
             plan.weight_scale_bytes += weight_scale.byte_length / shard_count;
         } else {
             plan.missing_metadata_tensors += 1;
         }
-        if let Some(input_scale) = catalog_tensor_opt(catalog, &input_scale_name) {
+        if let Some(input_scale) = find_tensor(&input_scale_name) {
             plan.scalar_metadata_bytes += input_scale.byte_length;
         } else {
             plan.missing_metadata_tensors += 1;
         }
-        if let Some(weight_scale_2) = catalog_tensor_opt(catalog, &weight_scale_2_name) {
+        if let Some(weight_scale_2) = find_tensor(&weight_scale_2_name) {
             plan.scalar_metadata_bytes += weight_scale_2.byte_length;
         } else {
             plan.missing_metadata_tensors += 1;
@@ -3548,7 +3596,7 @@ mod tests {
     fn real_nvfp4_protocol_v2_executor_preloads_assigned_projection_cache() {
         let _cuda_reference_override = cuda_reference_kernels_test_override(false);
         let tempdir = tempfile::tempdir().unwrap();
-        let catalog = tiny_expert_catalog_for_layers(tempdir.path(), &[3, 4]);
+        let catalog = preload_expert_catalog_for_layers(tempdir.path(), &[3, 4]);
         let executor = RealNvfp4ProtocolV2Executor::new(catalog, None, None);
 
         let preload = executor
@@ -3564,12 +3612,12 @@ mod tests {
         assert_eq!(preload.projection_row_entries, 6);
         assert_eq!(preload.projection_row_loads, 6);
         assert_eq!(preload.projection_row_hits, 0);
-        assert_eq!(preload.weight_bytes, 8);
-        assert_eq!(preload.quant_metadata_bytes, 56);
+        assert_eq!(preload.weight_bytes, 768);
+        assert_eq!(preload.quant_metadata_bytes, 144);
         if preload.cuda_reference_enabled {
             assert_eq!(preload.cuda_projection_groups, 6);
-            assert_eq!(preload.cuda_weight_bytes, 8);
-            assert_eq!(preload.cuda_weight_scale_bytes, 8);
+            assert_eq!(preload.cuda_weight_bytes, 768);
+            assert_eq!(preload.cuda_weight_scale_bytes, 96);
             assert_eq!(preload.cuda_projection_entries, 6);
             assert_eq!(preload.cuda_projection_uploads, 6);
             assert_eq!(preload.cuda_cache_hits, 0);
@@ -3582,7 +3630,7 @@ mod tests {
             assert_eq!(preload.cuda_cache_hits, 0);
         }
 
-        let layer3 = tiny_request_for_layer(3);
+        let layer3 = preload_request_for_layer(3);
         execute_request(&executor, &layer3).unwrap();
         let route_stats = executor.route_caches[0].lock().unwrap().stats();
         assert_eq!(route_stats.entries, 6);
@@ -3610,7 +3658,7 @@ mod tests {
     #[test]
     fn real_nvfp4_protocol_v2_executor_preloads_cuda_projection_cache_when_available() {
         let tempdir = tempfile::tempdir().unwrap();
-        let catalog = tiny_expert_catalog_for_layers(tempdir.path(), &[3, 4]);
+        let catalog = preload_expert_catalog_for_layers(tempdir.path(), &[3, 4]);
         let executor = RealNvfp4ProtocolV2Executor::new(catalog, None, None);
 
         let preload = match executor.preload_assigned_projections_with_cuda(true) {
@@ -3631,8 +3679,8 @@ mod tests {
 
         assert!(preload.cuda_reference_enabled);
         assert_eq!(preload.cuda_projection_groups, 6);
-        assert_eq!(preload.cuda_weight_bytes, 8);
-        assert_eq!(preload.cuda_weight_scale_bytes, 8);
+        assert_eq!(preload.cuda_weight_bytes, 768);
+        assert_eq!(preload.cuda_weight_scale_bytes, 96);
         assert_eq!(preload.cuda_projection_entries, 6);
         assert_eq!(preload.cuda_projection_uploads, 6);
         assert_eq!(preload.cuda_cache_hits, 0);
@@ -4296,9 +4344,37 @@ mod tests {
     }
 
     fn tiny_expert_catalog_for_layers(root: &std::path::Path, layers: &[usize]) -> TensorCatalog {
+        expert_catalog_for_layers_with_geometry(root, layers, 2, 1)
+    }
+
+    fn preload_expert_catalog_for_layers(
+        root: &std::path::Path,
+        layers: &[usize],
+    ) -> TensorCatalog {
+        // Startup preloading exercises packed kernels whose input widths must be
+        // aligned to the model's 16-value quantization groups.
+        const MINIMUM_PACKED_DIM: usize = 16;
+        expert_catalog_for_layers_with_geometry(
+            root,
+            layers,
+            MINIMUM_PACKED_DIM,
+            MINIMUM_PACKED_DIM,
+        )
+    }
+
+    fn expert_catalog_for_layers_with_geometry(
+        root: &std::path::Path,
+        layers: &[usize],
+        hidden_size: usize,
+        intermediate_size: usize,
+    ) -> TensorCatalog {
         let shard_path = root.join("expert.bin");
         let mut shard_bytes = Vec::new();
         let mut tensors = Vec::new();
+        let packed_hidden_width = hidden_size.div_ceil(2);
+        let packed_intermediate_width = intermediate_size.div_ceil(2);
+        let hidden_scale_width = hidden_size.div_ceil(16);
+        let intermediate_scale_width = intermediate_size.div_ceil(16);
         for layer_id in layers {
             for projection in ["gate_proj", "up_proj"] {
                 push_tensor(
@@ -4308,8 +4384,8 @@ mod tests {
                     projection,
                     "weight",
                     DType::U8,
-                    vec![1, 1],
-                    &[0xaa],
+                    vec![intermediate_size, packed_hidden_width],
+                    &vec![0xaa; intermediate_size * packed_hidden_width],
                 );
                 push_tensor(
                     &mut shard_bytes,
@@ -4318,8 +4394,8 @@ mod tests {
                     projection,
                     "weight_scale",
                     DType::F8E4M3,
-                    vec![1, 1],
-                    &[0x38],
+                    vec![intermediate_size, hidden_scale_width],
+                    &vec![0x38; intermediate_size * hidden_scale_width],
                 );
                 push_tensor(
                     &mut shard_bytes,
@@ -4349,8 +4425,8 @@ mod tests {
                 "down_proj",
                 "weight",
                 DType::U8,
-                vec![2, 1],
-                &[0x0a, 0x0a],
+                vec![hidden_size, packed_intermediate_width],
+                &vec![0x0a; hidden_size * packed_intermediate_width],
             );
             push_tensor(
                 &mut shard_bytes,
@@ -4359,8 +4435,8 @@ mod tests {
                 "down_proj",
                 "weight_scale",
                 DType::F8E4M3,
-                vec![2, 1],
-                &[0x38, 0x38],
+                vec![hidden_size, intermediate_scale_width],
+                &vec![0x38; hidden_size * intermediate_scale_width],
             );
             push_tensor(
                 &mut shard_bytes,
@@ -4391,7 +4467,7 @@ mod tests {
             model_id: "test/model".to_owned(),
             snapshot_path: root.display().to_string(),
             facts: ModelFacts {
-                hidden_size: 2,
+                hidden_size,
                 ..ModelFacts::default()
             },
             tensors,
@@ -4403,6 +4479,14 @@ mod tests {
     }
 
     fn tiny_request_for_layer(layer_id: u32) -> ExpertProtocolV2Request {
+        request_for_layer(layer_id, &[1.0, 2.0])
+    }
+
+    fn preload_request_for_layer(layer_id: u32) -> ExpertProtocolV2Request {
+        request_for_layer(layer_id, &[1.0; 16])
+    }
+
+    fn request_for_layer(layer_id: u32, hidden_values: &[f32]) -> ExpertProtocolV2Request {
         let rows = vec![ExpertProtocolV2RowDescriptor {
             row_id: 0,
             source_kind: ExpertV2SourceKind::Decode,
@@ -4417,14 +4501,14 @@ mod tests {
             gate_weight: 1.0,
         }];
         let mut hidden_payload = Vec::new();
-        for value in [1.0_f32, 2.0] {
+        for value in hidden_values {
             hidden_payload.extend_from_slice(&((value.to_bits() >> 16) as u16).to_le_bytes());
         }
         ExpertProtocolV2Request::new(
             7,
             0x51CE,
             layer_id,
-            2,
+            hidden_values.len() as u32,
             ExpertV2Dtype::Bf16,
             rows,
             routes,

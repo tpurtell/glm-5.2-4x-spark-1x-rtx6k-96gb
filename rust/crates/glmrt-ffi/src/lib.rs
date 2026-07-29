@@ -1228,10 +1228,31 @@ type CudaB12xW4a16PackWeightAsyncFn = unsafe extern "C" fn(
     row_rotation: usize,
     cuda_stream: *mut c_void,
 ) -> GlmrtStatus;
+type CudaB12xW4a16PackWeightStridedAsyncFn = unsafe extern "C" fn(
+    source: GlmrtDeviceBuffer,
+    destination: GlmrtDeviceBuffer,
+    size_k: usize,
+    source_size_k: usize,
+    source_start_k: usize,
+    size_n: usize,
+    row_rotation: usize,
+    cuda_stream: *mut c_void,
+) -> GlmrtStatus;
 type CudaB12xW4a16PackScaleAsyncFn = unsafe extern "C" fn(
     source: GlmrtDeviceBuffer,
     destination: GlmrtDeviceBuffer,
     size_k: usize,
+    size_n: usize,
+    row_rotation: usize,
+    scale_factor: f32,
+    cuda_stream: *mut c_void,
+) -> GlmrtStatus;
+type CudaB12xW4a16PackScaleStridedAsyncFn = unsafe extern "C" fn(
+    source: GlmrtDeviceBuffer,
+    destination: GlmrtDeviceBuffer,
+    size_k: usize,
+    source_size_k: usize,
+    source_start_k: usize,
     size_n: usize,
     row_rotation: usize,
     scale_factor: f32,
@@ -5965,6 +5986,37 @@ impl NativeLibrary {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub unsafe fn cuda_b12x_w4a16_pack_weight_strided_async(
+        &self,
+        source: GlmrtDeviceBuffer,
+        destination: GlmrtDeviceBuffer,
+        size_k: usize,
+        source_size_k: usize,
+        source_start_k: usize,
+        size_n: usize,
+        row_rotation: usize,
+        cuda_stream: *mut c_void,
+    ) -> Result<()> {
+        let kernel_fn: Symbol<CudaB12xW4a16PackWeightStridedAsyncFn> = unsafe {
+            self.lib
+                .get(b"glmrt_cuda_b12x_w4a16_pack_weight_strided_async")?
+        };
+        let status = unsafe {
+            kernel_fn(
+                source,
+                destination,
+                size_k,
+                source_size_k,
+                source_start_k,
+                size_n,
+                row_rotation,
+                cuda_stream,
+            )
+        };
+        self.status_to_result("glmrt_cuda_b12x_w4a16_pack_weight_strided_async", status)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn cuda_b12x_w4a16_pack_scale_async(
         &self,
         source: GlmrtDeviceBuffer,
@@ -5989,6 +6041,39 @@ impl NativeLibrary {
             )
         };
         self.status_to_result("glmrt_cuda_b12x_w4a16_pack_scale_async", status)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn cuda_b12x_w4a16_pack_scale_strided_async(
+        &self,
+        source: GlmrtDeviceBuffer,
+        destination: GlmrtDeviceBuffer,
+        size_k: usize,
+        source_size_k: usize,
+        source_start_k: usize,
+        size_n: usize,
+        row_rotation: usize,
+        scale_factor: f32,
+        cuda_stream: *mut c_void,
+    ) -> Result<()> {
+        let kernel_fn: Symbol<CudaB12xW4a16PackScaleStridedAsyncFn> = unsafe {
+            self.lib
+                .get(b"glmrt_cuda_b12x_w4a16_pack_scale_strided_async")?
+        };
+        let status = unsafe {
+            kernel_fn(
+                source,
+                destination,
+                size_k,
+                source_size_k,
+                source_start_k,
+                size_n,
+                row_rotation,
+                scale_factor,
+                cuda_stream,
+            )
+        };
+        self.status_to_result("glmrt_cuda_b12x_w4a16_pack_scale_strided_async", status)
     }
 
     pub unsafe fn cuda_quantize_bf16_weight_nvfp4_async(

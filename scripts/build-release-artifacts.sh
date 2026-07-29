@@ -17,11 +17,13 @@ case "$role" in
     b12x_aot=OFF
     coordinator_aot=ON
     w8a16_aot=ON
+    nccl=OFF
     ;;
   expert)
     b12x_aot=ON
     coordinator_aot=OFF
     w8a16_aot=OFF
+    nccl=ON
     ;;
   *)
     echo "ROLE must be coordinator or expert" >&2
@@ -72,7 +74,7 @@ cmake \
   -DGLMRT_ENABLE_B12X_COORDINATOR_AOT="$coordinator_aot" \
   -DGLMRT_ENABLE_W8A16_AOT="$w8a16_aot" \
   -DGLMRT_ENABLE_SPARKINFER_SOURCE_W4A16_AOT=OFF \
-  -DGLMRT_ENABLE_NCCL=OFF \
+  -DGLMRT_ENABLE_NCCL="$nccl" \
   -DPython3_EXECUTABLE="$(command -v python3)" \
   -DGLMRT_CUDA_ARCHITECTURES="$cuda_arch"
 cmake --build "$build_root/native"

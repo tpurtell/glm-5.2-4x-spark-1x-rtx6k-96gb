@@ -43,6 +43,9 @@ pub(crate) const EXPERT_INTERMEDIATE_RDMA_RING_DEPTH_ENV: &str =
     "GLMRT_EXPERT_INTERMEDIATE_RDMA_RING_DEPTH";
 pub(crate) const EXPERT_INTERMEDIATE_RDMA_STRIPE_MIN_BYTES_ENV: &str =
     "GLMRT_EXPERT_INTERMEDIATE_RDMA_STRIPE_MIN_BYTES";
+pub(crate) const EXPERT_WEIGHT_PRELOAD_NCCL_ENV: &str = "GLMRT_EXPERT_WEIGHT_PRELOAD_NCCL";
+pub(crate) const EXPERT_WEIGHT_PRELOAD_NCCL_PORT_ENV: &str =
+    "GLMRT_EXPERT_WEIGHT_PRELOAD_NCCL_PORT";
 
 const DEFAULT_REDUCTION_ROOT: &str = "ostrich.200gb";
 const DEFAULT_REDUCTION_PORT: u16 = 9200;
@@ -54,6 +57,9 @@ const DEFAULT_RDMA_PORT: u16 = 9400;
 const DEFAULT_RDMA_SLOT_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_RDMA_RING_DEPTH: usize = 4;
 const DEFAULT_RDMA_STRIPE_MIN_BYTES: usize = 256 * 1024;
+// Keep the startup-only weight exchange separate from the long-lived Spark
+// transformer TP bootstrap, whose default is 9300.
+const DEFAULT_WEIGHT_PRELOAD_NCCL_PORT: u16 = 9350;
 const REDUCTION_ROOT_RANK: usize = 0;
 const REDUCTION_BOOTSTRAP_MAGIC: &[u8; 8] = b"GLMNCCL1";
 const REDUCTION_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -245,6 +251,43 @@ pub(crate) fn initialize_spark_nccl_communicator(
                 shard.rank, shard.count
             )
         })
+}
+
+pub(crate) fn initialize_spark_weight_preload_communicator(
+    library: &Arc<NativeLibrary>,
+    shard: Option<ExpertIntermediateShard>,
+) -> Result<Option<GlmrtNcclComm>> {
+    let enabled = parse_boolean(
+        EXPERT_WEIGHT_PRELOAD_NCCL_ENV,
+        env::var(EXPERT_WEIGHT_PRELOAD_NCCL_ENV).ok().as_deref(),
+        true,
+    )?;
+    let Some(shard) = shard.filter(|_| enabled) else {
+        return Ok(None);
+    };
+    let root_host = env::var(EXPERT_INTERMEDIATE_REDUCTION_ROOT_ENV)
+        .unwrap_or_else(|_| DEFAULT_REDUCTION_ROOT.to_owned());
+    let port = parse_positive(
+        EXPERT_WEIGHT_PRELOAD_NCCL_PORT_ENV,
+        env::var(EXPERT_WEIGHT_PRELOAD_NCCL_PORT_ENV)
+            .ok()
+            .as_deref(),
+        DEFAULT_WEIGHT_PRELOAD_NCCL_PORT as usize,
+    )?;
+    let port = u16::try_from(port)
+        .with_context(|| format!("{EXPERT_WEIGHT_PRELOAD_NCCL_PORT_ENV} exceeds u16"))?;
+    let communicator = initialize_spark_nccl_communicator(
+        library,
+        shard,
+        &root_host,
+        port,
+        "cooperative weight preload",
+    )?;
+    eprintln!(
+        "spark_weight_preload_nccl_ready rank={} world_size={} root_rank={} bootstrap={}:{}",
+        shard.rank, shard.count, REDUCTION_ROOT_RANK, root_host, port
+    );
+    Ok(Some(communicator))
 }
 
 pub(crate) fn spark_expert_reduction_dispatch_for_rows(

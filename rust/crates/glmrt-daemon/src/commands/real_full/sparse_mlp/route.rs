@@ -5,7 +5,7 @@ use glmrt_core::{
 };
 use glmrt_ffi::{
     GlmrtB12xSparkMlpBuffers, GlmrtB12xSparkMoeTp4M1Buffers, GlmrtB12xSparkW4a16MoeBuffers,
-    GlmrtB12xSparkW4a4MoeBuffers, GlmrtDeviceBuffer, GlmrtHostBuffer,
+    GlmrtB12xSparkW4a4MoeBuffers, GlmrtDeviceBuffer, GlmrtHostBuffer, GlmrtNcclComm,
     GlmrtNvfp4RouteBatchedMetadata, GlmrtRouteShardReductionBuffers, NativeLibrary,
     GLMRT_DEVICE_BUFFER_FLAG_MANAGED, GLMRT_ROUTE_SHARD_LOCAL_BF16, GLMRT_ROUTE_SHARD_LOCAL_F32,
     GLMRT_ROUTE_SHARD_WIRE_BF16, GLMRT_ROUTE_SHARD_WIRE_FP8_E4M3_ROW_SCALED,
@@ -16,12 +16,18 @@ use glmrt_loader::{
     LoadedTensorRows,
 };
 use glmrt_transport::{protocol_v2_verbs_host_execution_lanes, ExpertProtocolV2StreamPlan};
+use io_uring::{opcode, types, IoUring};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     ffi::c_void,
+    fs::{File, OpenOptions},
     hash::{Hash, Hasher},
-    path::PathBuf,
+    ops::Deref,
+    os::unix::fs::OpenOptionsExt,
+    os::{fd::AsRawFd, unix::fs::FileExt},
+    path::{Path, PathBuf},
+    ptr::NonNull,
     slice,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -36,8 +42,9 @@ use super::super::coordinator_kernels::{
 };
 use super::super::intermediate_sharding::{
     balanced_row_partition, initialize_spark_expert_rdma_reduction_lane,
-    initialize_spark_expert_reduction_lane, spark_expert_intermediate_shard_from_env,
-    ExpertIntermediateReductionDtype, ExpertIntermediateShard, SparkExpertReduction,
+    initialize_spark_expert_reduction_lane, initialize_spark_weight_preload_communicator,
+    spark_expert_intermediate_shard_from_env, ExpertIntermediateReductionDtype,
+    ExpertIntermediateShard, SparkExpertReduction,
 };
 use super::super::rdma_reduction::SparkExpertRdmaReduction;
 use super::math::{
@@ -67,6 +74,12 @@ const REAL_FULL_SPARKINFER_SOURCE_W4A16_DIRECT_MAX_ROWS_ENV: &str =
 const REAL_FULL_B12X_SPARK_W4A16_SMALL_M_MODE_ENV: &str = "GLMRT_B12X_SPARK_W4A16_SMALL_M_MODE";
 const REAL_FULL_B12X_SPARK_W4A16_DEVICE_WEIGHTS_ENV: &str = "GLMRT_B12X_SPARK_W4A16_DEVICE_WEIGHTS";
 const REAL_FULL_B12X_SPARK_ROUTE_LANES_ENV: &str = "GLMRT_B12X_SPARK_ROUTE_LANES";
+const REAL_FULL_NVFP4_ROUTE_PRELOAD_IO_WORKERS_ENV: &str =
+    "GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_IO_WORKERS";
+const REAL_FULL_NVFP4_ROUTE_PRELOAD_DIRECT_IO_ENV: &str =
+    "GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_DIRECT_IO";
+const REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE_ENV: &str =
+    "GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE";
 const EXPERT_FUSED_FP8_REDUCTION_ENV: &str = "GLMRT_EXPERT_FUSED_FP8_REDUCTION";
 const EXPERT_NCCL_BF16_REDUCE_ENV: &str = "GLMRT_EXPERT_NCCL_BF16_REDUCE";
 const CPU_REFERENCE_NVFP4_ROUTE_BACKEND: &str = "cpu-reference-provisional-nvfp4-route";
@@ -562,6 +575,7 @@ struct RouteCudaCache {
     library: Arc<NativeLibrary>,
     spark_reduction: Option<SparkExpertReduction>,
     spark_rdma_reduction: Option<SparkExpertRdmaReduction>,
+    weight_preload_communicator: Option<GlmrtNcclComm>,
     stream: RouteCudaStream,
     b12x_aux_streams: Vec<RouteCudaStream>,
     b12x_lane_events: Vec<RouteCudaEvent>,
@@ -645,6 +659,19 @@ impl RouteCudaCache {
             spark_reduction.is_none() || spark_rdma_reduction.is_none(),
             "Spark route lane {execution_lane} initialized both NCCL and RDMA reduction"
         );
+        let cooperative_weight_preload = env::var(REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE_ENV)
+            .map(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off" | "disabled"
+                )
+            })
+            .unwrap_or(true);
+        let weight_preload_communicator = if b12x_w4a16_packed && cooperative_weight_preload {
+            initialize_spark_weight_preload_communicator(&library, shard)?
+        } else {
+            None
+        };
         let b12x_lane_count = if b12x_aot_enabled {
             b12x_spark_route_lane_count()
         } else {
@@ -663,6 +690,7 @@ impl RouteCudaCache {
             library,
             spark_reduction,
             spark_rdma_reduction,
+            weight_preload_communicator,
             stream,
             b12x_aux_streams,
             b12x_lane_events,
@@ -721,6 +749,7 @@ impl RouteCudaCache {
             library: Arc::clone(&self.library),
             spark_reduction,
             spark_rdma_reduction,
+            weight_preload_communicator: None,
             stream,
             b12x_aux_streams,
             b12x_lane_events,
@@ -3474,15 +3503,139 @@ struct DeviceRoutedQuantProjection {
     weight_scale_b12x_swizzled: bool,
 }
 
+enum RouteCudaTensorStorage {
+    Owned(Vec<u8>),
+    Direct(RouteCudaAlignedReadBuffer),
+}
+
+#[derive(Clone)]
+struct RouteCudaTensorBytes {
+    storage: Arc<RouteCudaTensorStorage>,
+    offset: usize,
+    bytes: usize,
+}
+
+impl RouteCudaTensorBytes {
+    fn owned(bytes: Vec<u8>) -> Self {
+        let length = bytes.len();
+        Self {
+            storage: Arc::new(RouteCudaTensorStorage::Owned(bytes)),
+            offset: 0,
+            bytes: length,
+        }
+    }
+
+    fn direct(buffer: RouteCudaAlignedReadBuffer) -> Self {
+        let length = buffer.requested_slice().len();
+        Self {
+            storage: Arc::new(RouteCudaTensorStorage::Direct(buffer)),
+            offset: 0,
+            bytes: length,
+        }
+    }
+
+    fn view(&self, offset: usize, bytes: usize) -> Result<Self> {
+        let end = offset
+            .checked_add(bytes)
+            .context("route tensor byte view end overflow")?;
+        anyhow::ensure!(
+            end <= self.bytes,
+            "route tensor byte view {offset}..{end} exceeds {} bytes",
+            self.bytes
+        );
+        Ok(Self {
+            storage: Arc::clone(&self.storage),
+            offset: self.offset + offset,
+            bytes,
+        })
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        let storage = match self.storage.as_ref() {
+            RouteCudaTensorStorage::Owned(bytes) => bytes.as_slice(),
+            RouteCudaTensorStorage::Direct(bytes) => bytes.requested_slice(),
+        };
+        &storage[self.offset..self.offset + self.bytes]
+    }
+}
+
+impl Deref for RouteCudaTensorBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+struct LoadedRouteCudaTensorRows {
+    info: TensorInfo,
+    source_path: PathBuf,
+    start_row: usize,
+    row_count: usize,
+    row_width: usize,
+    source_row_width: usize,
+    source_column_start: usize,
+    bytes_per_scalar: usize,
+    bytes: RouteCudaTensorBytes,
+    elapsed_micros: u128,
+}
+
 struct LoadedRouteCudaProjectionShard {
-    weight: LoadedTensorRows,
-    weight_scale: LoadedTensorRows,
+    weight: LoadedRouteCudaTensorRows,
+    weight_scale: LoadedRouteCudaTensorRows,
 }
 
 struct LoadedRouteCudaExpertShard {
     gate: LoadedRouteCudaProjectionShard,
     up: LoadedRouteCudaProjectionShard,
     down: LoadedRouteCudaProjectionShard,
+}
+
+fn loaded_route_cuda_tensor_logical_bytes(tensor: &LoadedRouteCudaTensorRows) -> Result<usize> {
+    tensor
+        .row_count
+        .checked_mul(tensor.row_width)
+        .and_then(|values| values.checked_mul(tensor.bytes_per_scalar))
+        .context("route tensor logical byte count overflow")
+}
+
+fn copy_loaded_route_cuda_tensor_compact(
+    tensor: &LoadedRouteCudaTensorRows,
+    destination: &mut [u8],
+) -> Result<()> {
+    let logical_row_bytes = tensor
+        .row_width
+        .checked_mul(tensor.bytes_per_scalar)
+        .context("route tensor logical row bytes overflow")?;
+    let source_row_bytes = tensor
+        .source_row_width
+        .checked_mul(tensor.bytes_per_scalar)
+        .context("route tensor source row bytes overflow")?;
+    let source_column_bytes = tensor
+        .source_column_start
+        .checked_mul(tensor.bytes_per_scalar)
+        .context("route tensor source column bytes overflow")?;
+    let logical_bytes = loaded_route_cuda_tensor_logical_bytes(tensor)?;
+    anyhow::ensure!(
+        destination.len() == logical_bytes
+            && tensor.bytes.len() == tensor.row_count * source_row_bytes
+            && source_column_bytes + logical_row_bytes <= source_row_bytes,
+        "route tensor compact copy geometry is inconsistent"
+    );
+    if logical_row_bytes == source_row_bytes && source_column_bytes == 0 {
+        destination.copy_from_slice(&tensor.bytes);
+    } else {
+        for (source, output) in tensor
+            .bytes
+            .chunks_exact(source_row_bytes)
+            .zip(destination.chunks_exact_mut(logical_row_bytes))
+        {
+            output.copy_from_slice(
+                &source[source_column_bytes..source_column_bytes + logical_row_bytes],
+            );
+        }
+    }
+    Ok(())
 }
 
 struct LoadedRouteCudaBf16ExpertShard {
@@ -3539,16 +3692,17 @@ fn synthetic_quantized_projection_geometry(
         info.dtype = dtype;
         info.shape = vec![source.row_count, row_width];
         info.byte_length = (source.row_count * row_width) as u64;
-        LoadedTensorRows {
+        LoadedRouteCudaTensorRows {
             info,
             source_path: source.source_path.clone(),
             start_row: source.start_row,
             row_count: source.row_count,
             row_width,
+            source_row_width: row_width,
+            source_column_start: 0,
             bytes_per_scalar: 1,
-            bytes: Vec::new(),
+            bytes: RouteCudaTensorBytes::owned(Vec::new()),
             elapsed_micros: source.elapsed_micros,
-            sha256: String::new(),
         }
     };
     Ok(LoadedRouteCudaProjectionShard {
@@ -4312,18 +4466,318 @@ impl RouteCudaLayerExpertSlab {
         Ok(())
     }
 
+    fn store_layer_experts_w4a16(
+        &self,
+        expert_ids: &[usize],
+        loaded_experts: &[LoadedRouteCudaExpertShard],
+        library: Arc<NativeLibrary>,
+        workspace: &mut RouteCudaWorkspace,
+        cuda_stream: *mut c_void,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.w4a16_packed && !expert_ids.is_empty() && expert_ids.len() == loaded_experts.len(),
+            "layer {} batched W4A16 preload received {} expert ids and {} payloads",
+            self.layer_id,
+            expert_ids.len(),
+            loaded_experts.len()
+        );
+
+        #[derive(Clone, Copy)]
+        struct PackPlan {
+            source_offset: usize,
+            source_bytes: usize,
+            destination: GlmrtDeviceBuffer,
+            size_k: usize,
+            source_size_k: usize,
+            source_start_k: usize,
+            size_n: usize,
+            row_rotation: usize,
+            scale_factor: Option<f32>,
+        }
+
+        let source_bytes = loaded_experts.iter().try_fold(0_usize, |total, loaded| {
+            [
+                &loaded.up.weight,
+                &loaded.gate.weight,
+                &loaded.up.weight_scale,
+                &loaded.gate.weight_scale,
+                &loaded.down.weight,
+                &loaded.down.weight_scale,
+            ]
+            .into_iter()
+            .try_fold(total, |subtotal, tensor| {
+                subtotal
+                    .checked_add(loaded_route_cuda_tensor_logical_bytes(tensor)?)
+                    .context("layer W4A16 preload source byte count overflow")
+            })
+        })?;
+        RouteCudaWorkspace::ensure_pinned_buffer(
+            &mut workspace.pinned_projection_weight,
+            Arc::clone(&library),
+            source_bytes,
+            "batched layer W4A16 source",
+        )?;
+        RouteCudaWorkspace::ensure_buffer(
+            &mut workspace.b12x_w4a16_pack_source,
+            Arc::clone(&library),
+            source_bytes,
+            "batched layer W4A16 device source",
+        )?;
+
+        let mut plans = Vec::with_capacity(expert_ids.len() * 4);
+        let staging_buffer;
+        {
+            let staging = workspace
+                .pinned_projection_weight
+                .as_mut()
+                .expect("batched layer W4A16 pinned source ensured");
+            let staging_slice = staging.as_mut_slice(source_bytes)?;
+            let mut source_offset = 0_usize;
+            for (&expert_id, loaded) in expert_ids.iter().zip(loaded_experts) {
+                anyhow::ensure!(
+                    expert_id < self.expert_count,
+                    "layer {} batched W4A16 expert {expert_id} exceeds {}",
+                    self.layer_id,
+                    self.expert_count
+                );
+                let gate = loaded_route_cuda_projection_geometry(&loaded.gate)?;
+                let up = loaded_route_cuda_projection_geometry(&loaded.up)?;
+                let down = loaded_route_cuda_projection_geometry(&loaded.down)?;
+                anyhow::ensure!(
+                    gate.rows == up.rows
+                        && gate.weight_row_stride_bytes == up.weight_row_stride_bytes
+                        && gate.scale_row_stride_bytes == up.scale_row_stride_bytes,
+                    "layer {} expert {expert_id} batched W13 geometry differs",
+                    self.layer_id
+                );
+                let hidden_dim = gate
+                    .weight_row_stride_bytes
+                    .checked_mul(2)
+                    .context("batched W13 hidden dimension overflow")?;
+                let intermediate_dim = down
+                    .weight_row_stride_bytes
+                    .checked_mul(2)
+                    .context("batched W2 intermediate dimension overflow")?;
+                let down_weight_source_k = loaded
+                    .down
+                    .weight
+                    .source_row_width
+                    .checked_mul(2)
+                    .context("batched W2 source weight K overflow")?;
+                let down_weight_source_start_k = loaded
+                    .down
+                    .weight
+                    .source_column_start
+                    .checked_mul(2)
+                    .context("batched W2 source weight K offset overflow")?;
+                let down_scale_source_k = loaded
+                    .down
+                    .weight_scale
+                    .source_row_width
+                    .checked_mul(16)
+                    .context("batched W2 source scale K overflow")?;
+                let down_scale_source_start_k = loaded
+                    .down
+                    .weight_scale
+                    .source_column_start
+                    .checked_mul(16)
+                    .context("batched W2 source scale K offset overflow")?;
+                anyhow::ensure!(
+                    down_weight_source_k == down_scale_source_k
+                        && down_weight_source_start_k == down_scale_source_start_k
+                        && down_weight_source_start_k + intermediate_dim <= down_weight_source_k,
+                    "layer {} expert {expert_id} batched W2 source windows differ or overflow",
+                    self.layer_id
+                );
+                let w13_rows = gate
+                    .rows
+                    .checked_add(up.rows)
+                    .context("batched W13 row count overflow")?;
+                let w13_weight_parts = [&loaded.up.weight, &loaded.gate.weight];
+                let w13_scale_parts = [&loaded.up.weight_scale, &loaded.gate.weight_scale];
+                let w2_weight_parts = [&loaded.down.weight];
+                let w2_scale_parts = [&loaded.down.weight_scale];
+                let destinations = [
+                    (
+                        route_device_buffer_slice(
+                            self.w13_weight.buffer(),
+                            expert_id * self.w13_weight_expert_stride_bytes,
+                            self.w13_weight_expert_stride_bytes,
+                        )?,
+                        hidden_dim,
+                        w13_rows,
+                        up.rows,
+                        None,
+                        w13_weight_parts.as_slice(),
+                    ),
+                    (
+                        route_device_buffer_slice(
+                            self.w13_scale.buffer(),
+                            expert_id * self.w13_scale_expert_stride_bytes,
+                            self.w13_scale_expert_stride_bytes,
+                        )?,
+                        hidden_dim,
+                        w13_rows,
+                        up.rows,
+                        Some(1.0),
+                        w13_scale_parts.as_slice(),
+                    ),
+                    (
+                        route_device_buffer_slice(
+                            self.w2_weight.buffer(),
+                            expert_id * self.w2_weight_expert_stride_bytes,
+                            self.w2_weight_expert_stride_bytes,
+                        )?,
+                        intermediate_dim,
+                        down.rows,
+                        0,
+                        None,
+                        w2_weight_parts.as_slice(),
+                    ),
+                    (
+                        route_device_buffer_slice(
+                            self.w2_scale.buffer(),
+                            expert_id * self.w2_scale_expert_stride_bytes,
+                            self.w2_scale_expert_stride_bytes,
+                        )?,
+                        intermediate_dim,
+                        down.rows,
+                        0,
+                        Some(1.0),
+                        w2_scale_parts.as_slice(),
+                    ),
+                ];
+                for (destination, size_k, size_n, row_rotation, scale_factor, parts) in destinations
+                {
+                    let plan_offset = source_offset;
+                    for part in parts {
+                        let part_bytes = loaded_route_cuda_tensor_logical_bytes(part)?;
+                        let end = source_offset
+                            .checked_add(part_bytes)
+                            .context("batched W4A16 staging offset overflow")?;
+                        copy_loaded_route_cuda_tensor_compact(
+                            part,
+                            &mut staging_slice[source_offset..end],
+                        )?;
+                        source_offset = end;
+                    }
+                    plans.push(PackPlan {
+                        source_offset: plan_offset,
+                        source_bytes: source_offset - plan_offset,
+                        destination,
+                        size_k,
+                        source_size_k: size_k,
+                        source_start_k: 0,
+                        size_n,
+                        row_rotation,
+                        scale_factor,
+                    });
+                }
+            }
+            anyhow::ensure!(
+                source_offset == source_bytes,
+                "batched W4A16 staged {source_offset} bytes, expected {source_bytes}"
+            );
+            staging_buffer = staging.buffer();
+        }
+
+        let source = workspace
+            .b12x_w4a16_pack_source
+            .as_ref()
+            .expect("batched layer W4A16 device source ensured")
+            .buffer();
+        unsafe {
+            library
+                .copy_host_buffer_h2d_async(source, staging_buffer, source_bytes, cuda_stream)
+                .context("uploading batched layer W4A16 source")?;
+            for plan in plans {
+                let source_view =
+                    route_device_buffer_slice(source, plan.source_offset, plan.source_bytes)?;
+                if let Some(scale_factor) = plan.scale_factor {
+                    library
+                        .cuda_b12x_w4a16_pack_scale_strided_async(
+                            source_view,
+                            plan.destination,
+                            plan.size_k,
+                            plan.source_size_k,
+                            plan.source_start_k,
+                            plan.size_n,
+                            plan.row_rotation,
+                            scale_factor,
+                            cuda_stream,
+                        )
+                        .context("packing batched layer W4A16 scales")?;
+                } else {
+                    library
+                        .cuda_b12x_w4a16_pack_weight_strided_async(
+                            source_view,
+                            plan.destination,
+                            plan.size_k,
+                            plan.source_size_k,
+                            plan.source_start_k,
+                            plan.size_n,
+                            plan.row_rotation,
+                            cuda_stream,
+                        )
+                        .context("packing batched layer W4A16 weights")?;
+                }
+            }
+            library
+                .cuda_stream_synchronize(cuda_stream)
+                .context("synchronizing batched layer W4A16 preload")?;
+        }
+        Ok(())
+    }
+
     fn store_expert_scalars(&self, catalog: &TensorCatalog, expert_id: usize) -> Result<()> {
+        let gate =
+            load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "gate_proj")?;
+        let up = load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "up_proj")?;
+        let down =
+            load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "down_proj")?;
+        self.store_expert_scalars_from_metadata(expert_id, &gate, &up, &down)
+    }
+
+    fn store_expert_scalars_from_cache(
+        &self,
+        expert_id: usize,
+        scalar_metadata: &HashMap<RoutedQuantScalarMetadataKey, RoutedQuantScalarMetadata>,
+    ) -> Result<()> {
+        let metadata = |projection| {
+            scalar_metadata
+                .get(&RoutedQuantScalarMetadataKey {
+                    layer_id: self.layer_id,
+                    expert_id,
+                    projection,
+                })
+                .with_context(|| {
+                    format!(
+                        "layer {} expert {expert_id} is missing cached {projection} scalar metadata",
+                        self.layer_id
+                    )
+                })
+        };
+        self.store_expert_scalars_from_metadata(
+            expert_id,
+            metadata("gate_proj")?,
+            metadata("up_proj")?,
+            metadata("down_proj")?,
+        )
+    }
+
+    fn store_expert_scalars_from_metadata(
+        &self,
+        expert_id: usize,
+        gate: &RoutedQuantScalarMetadata,
+        up: &RoutedQuantScalarMetadata,
+        down: &RoutedQuantScalarMetadata,
+    ) -> Result<()> {
         anyhow::ensure!(
             expert_id < self.expert_count,
             "expert {expert_id} exceeds layer {} scalar slab expert count {}",
             self.layer_id,
             self.expert_count
         );
-        let gate =
-            load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "gate_proj")?;
-        let up = load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "up_proj")?;
-        let down =
-            load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "down_proj")?;
         anyhow::ensure!(
             gate.input_scale.to_bits() == up.input_scale.to_bits()
                 && gate.weight_scale_2.to_bits() == up.weight_scale_2.to_bits(),
@@ -4928,9 +5382,21 @@ fn loaded_route_cuda_projection_geometry_inner(
         .checked_mul(scale_row_stride_bytes)
         .context("contiguous slab scale bytes overflow")?;
     if require_loaded_bytes {
+        let loaded_weight_bytes = projection
+            .weight
+            .row_count
+            .checked_mul(projection.weight.source_row_width)
+            .and_then(|values| values.checked_mul(projection.weight.bytes_per_scalar))
+            .context("contiguous slab loaded weight bytes overflow")?;
+        let loaded_scale_bytes = projection
+            .weight_scale
+            .row_count
+            .checked_mul(projection.weight_scale.source_row_width)
+            .and_then(|values| values.checked_mul(projection.weight_scale.bytes_per_scalar))
+            .context("contiguous slab loaded scale bytes overflow")?;
         anyhow::ensure!(
-            projection.weight.bytes.len() == weight_bytes
-                && projection.weight_scale.bytes.len() == scale_bytes,
+            projection.weight.bytes.len() == loaded_weight_bytes
+                && projection.weight_scale.bytes.len() == loaded_scale_bytes,
             "contiguous slab loaded byte lengths differ from projection geometry"
         );
     }
@@ -12092,6 +12558,140 @@ pub(in crate::commands::real_full) fn preload_routed_quant_projection_scalar_cac
     })
 }
 
+pub(in crate::commands::real_full) fn preload_routed_quant_projection_scalar_cache_parallel(
+    catalog: &TensorCatalog,
+    requests: &[RouteProjectionCachePreloadRequest],
+    cache: &mut RouteTensorCache,
+) -> Result<RouteHostProjectionPreload> {
+    anyhow::ensure!(
+        !requests.is_empty(),
+        "parallel routed scalar preload requires projection requests"
+    );
+    #[derive(Clone)]
+    struct ScalarLocation {
+        key: RoutedQuantScalarMetadataKey,
+        name: String,
+        byte_offset: u64,
+        input_scale: bool,
+    }
+
+    let snapshot = Path::new(&catalog.snapshot_path);
+    let mut locations_by_file = BTreeMap::<PathBuf, Vec<ScalarLocation>>::new();
+    for request in requests {
+        let base_name = routed_quant_projection_base_name(
+            request.layer_id,
+            request.expert_id,
+            request.projection,
+        );
+        for (suffix, input_scale) in [("input_scale", true), ("weight_scale_2", false)] {
+            let name = format!("{base_name}.{suffix}");
+            let tensor = catalog_tensor(catalog, &name)?;
+            anyhow::ensure!(
+                tensor.dtype == DType::F32 && tensor.shape.is_empty() && tensor.byte_length == 4,
+                "routed scalar tensor {name} must be a four-byte F32 scalar"
+            );
+            locations_by_file
+                .entry(snapshot.join(&tensor.file))
+                .or_default()
+                .push(ScalarLocation {
+                    key: RoutedQuantScalarMetadataKey {
+                        layer_id: request.layer_id,
+                        expert_id: request.expert_id,
+                        projection: request.projection,
+                    },
+                    name,
+                    byte_offset: tensor.byte_offset,
+                    input_scale,
+                });
+        }
+    }
+
+    type ScalarPair = (Option<(String, f32)>, Option<(String, f32)>);
+    let mut values = HashMap::<RoutedQuantScalarMetadataKey, ScalarPair>::new();
+    for (path, locations) in locations_by_file {
+        let first = locations
+            .iter()
+            .map(|location| location.byte_offset)
+            .min()
+            .context("routed scalar file group is empty")?;
+        let end = locations
+            .iter()
+            .map(|location| location.byte_offset + 4)
+            .max()
+            .context("routed scalar file group is empty")?;
+        let span: usize = (end - first)
+            .try_into()
+            .context("routed scalar file span does not fit in memory")?;
+        let mut bytes = vec![0_u8; span];
+        File::open(&path)
+            .with_context(|| format!("opening routed scalar file {}", path.display()))?
+            .read_exact_at(&mut bytes, first)
+            .with_context(|| {
+                format!(
+                    "reading routed scalar span {first}..{end} from {}",
+                    path.display()
+                )
+            })?;
+        for location in locations {
+            let offset: usize = (location.byte_offset - first)
+                .try_into()
+                .context("routed scalar offset does not fit in memory")?;
+            let value = f32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .expect("routed scalar slice has four bytes"),
+            );
+            validate_finite_route_scalar(&location.name, value)?;
+            let pair = values.entry(location.key).or_default();
+            let destination = if location.input_scale {
+                &mut pair.0
+            } else {
+                &mut pair.1
+            };
+            anyhow::ensure!(
+                destination.replace((location.name, value)).is_none(),
+                "routed scalar metadata was loaded twice"
+            );
+        }
+    }
+
+    for request in requests {
+        let key = RoutedQuantScalarMetadataKey {
+            layer_id: request.layer_id,
+            expert_id: request.expert_id,
+            projection: request.projection,
+        };
+        let (input_scale, weight_scale_2) = values.remove(&key).with_context(|| {
+            format!(
+                "bulk scalar preload did not fill layer {} expert {} {}",
+                request.layer_id, request.expert_id, request.projection
+            )
+        })?;
+        let (input_scale_name, input_scale) =
+            input_scale.context("bulk scalar preload is missing input_scale")?;
+        let (weight_scale_2_name, weight_scale_2) =
+            weight_scale_2.context("bulk scalar preload is missing weight_scale_2")?;
+        let metadata = RoutedQuantScalarMetadata {
+            input_scale_name,
+            weight_scale_2_name,
+            input_scale,
+            weight_scale_2,
+        };
+        validate_finite_route_scalar(&metadata.input_scale_name, metadata.input_scale)?;
+        validate_finite_route_scalar(&metadata.weight_scale_2_name, metadata.weight_scale_2)?;
+        if cache.scalar_metadata.insert(key, metadata).is_none() {
+            cache.scalar_metadata_loads += 1;
+        } else {
+            cache.scalar_metadata_cache_hits += 1;
+        }
+        cache.prepare_layer(request.layer_id);
+    }
+    Ok(RouteHostProjectionPreload {
+        weight_bytes: 0,
+        quant_metadata_bytes: (requests.len() as u64) * 8,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::commands::real_full) fn preload_bf16_route_projection_group_cache(
     catalog: &TensorCatalog,
@@ -12114,67 +12714,61 @@ pub(in crate::commands::real_full) fn preload_bf16_route_projection_group_cache(
     if cache.bf16_projection_groups.contains_key(&cache_key) {
         return Ok(());
     }
-    let projections = load_validated_bf16_route_projections(
-        catalog,
-        layer_id,
-        expert_id,
-        intermediate_rows,
-        output_rows,
-        hidden_dim,
-        cache,
-    )?;
+    let projections = if cuda_route_validation_enabled() {
+        load_validated_bf16_route_projections(
+            catalog,
+            layer_id,
+            expert_id,
+            intermediate_rows,
+            output_rows,
+            hidden_dim,
+            cache,
+        )?
+    } else {
+        let projection = |projection, row_count, input_width| -> Result<_> {
+            let metadata = cache
+                .scalar_metadata
+                .get(&RoutedQuantScalarMetadataKey {
+                    layer_id,
+                    expert_id,
+                    projection,
+                })
+                .with_context(|| {
+                    format!(
+                        "startup route group is missing layer {layer_id} expert {expert_id} {projection} scalar metadata"
+                    )
+                })?;
+            anyhow::ensure!(
+                row_count > 0 && input_width > 0 && input_width % 16 == 0,
+                "startup route group has invalid {projection} geometry {row_count}x{input_width}"
+            );
+            Ok((
+                Bf16RouteProjection {
+                    key: RoutedQuantProjectionKey {
+                        layer_id,
+                        expert_id,
+                        projection,
+                        row_count,
+                    },
+                    host: None,
+                },
+                metadata.weight_scale_2,
+            ))
+        };
+        let (gate, gate_scale_2) = projection("gate_proj", intermediate_rows, hidden_dim)?;
+        let (up, up_scale_2) = projection("up_proj", intermediate_rows, hidden_dim)?;
+        let (down, down_scale_2) = projection("down_proj", output_rows, intermediate_rows)?;
+        Bf16RouteProjections {
+            gate,
+            up,
+            down,
+            gate_scale_2,
+            up_scale_2,
+            down_scale_2,
+        }
+    };
     cache.bf16_projection_groups.insert(cache_key, projections);
     Ok(())
-}
-
-fn load_route_cuda_projection_shard(
-    catalog: &TensorCatalog,
-    request: &RouteProjectionCachePreloadRequest,
-    shard: ExpertIntermediateShard,
-) -> Result<LoadedRouteCudaProjectionShard> {
-    let base_name =
-        routed_quant_projection_base_name(request.layer_id, request.expert_id, request.projection);
-    let weight = load_routed_projection_rows_for_shard(
-        catalog,
-        &format!("{base_name}.weight"),
-        request.projection,
-        request.row_count,
-        shard,
-    )?;
-    // Raw ModelOpt HF scales use logical [out, in / 16] coordinates. The
-    // destination slab pack performs the one required kernel-layout transform.
-    let weight_scale = load_routed_projection_rows_for_shard(
-        catalog,
-        &format!("{base_name}.weight_scale"),
-        request.projection,
-        request.row_count,
-        shard,
-    )?;
-    Ok(LoadedRouteCudaProjectionShard {
-        weight,
-        weight_scale,
-    })
-}
-
-fn load_route_cuda_expert_shard(
-    catalog: &TensorCatalog,
-    layer_requests: &[&RouteProjectionCachePreloadRequest],
-    layer_id: usize,
-    expert_id: usize,
-    shard: ExpertIntermediateShard,
-) -> Result<LoadedRouteCudaExpertShard> {
-    let find = |projection| {
-        layer_requests
-            .iter()
-            .copied()
-            .find(|request| request.expert_id == expert_id && request.projection == projection)
-            .with_context(|| format!("layer {layer_id} expert {expert_id} is missing {projection}"))
-    };
-    Ok(LoadedRouteCudaExpertShard {
-        gate: load_route_cuda_projection_shard(catalog, find("gate_proj")?, shard)?,
-        up: load_route_cuda_projection_shard(catalog, find("up_proj")?, shard)?,
-        down: load_route_cuda_projection_shard(catalog, find("down_proj")?, shard)?,
-    })
 }
 
 fn load_route_cuda_bf16_projection_shard(
@@ -12435,10 +13029,1675 @@ fn sparkinfer_nvfp4_scale_factor(maximum: f32) -> f32 {
     }
 }
 
+fn route_preload_io_workers() -> usize {
+    env::var(REAL_FULL_NVFP4_ROUTE_PRELOAD_IO_WORKERS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(128)
+        .clamp(1, 128)
+}
+
+fn route_preload_direct_io() -> bool {
+    env::var(REAL_FULL_NVFP4_ROUTE_PRELOAD_DIRECT_IO_ENV)
+        .ok()
+        .map(|value| !matches!(value.trim(), "0" | "false" | "off"))
+        .unwrap_or(true)
+}
+
+const ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT: usize = 4096;
+
+struct RouteCudaAlignedAllocation {
+    ptr: NonNull<u8>,
+    layout: std::alloc::Layout,
+}
+
+impl Drop for RouteCudaAlignedAllocation {
+    fn drop(&mut self) {
+        unsafe {
+            std::alloc::dealloc(self.ptr.as_ptr(), self.layout);
+        }
+    }
+}
+
+unsafe impl Send for RouteCudaAlignedAllocation {}
+unsafe impl Sync for RouteCudaAlignedAllocation {}
+
+fn route_cuda_aligned_read_pool() -> &'static Mutex<Vec<RouteCudaAlignedAllocation>> {
+    static POOL: OnceLock<Mutex<Vec<RouteCudaAlignedAllocation>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn clear_route_cuda_aligned_read_pool() {
+    if let Ok(mut pool) = route_cuda_aligned_read_pool().lock() {
+        pool.clear();
+    }
+}
+
+struct RouteCudaAlignedReadBuffer {
+    allocation: Option<RouteCudaAlignedAllocation>,
+    requested_offset: usize,
+    requested_bytes: usize,
+}
+
+impl RouteCudaAlignedReadBuffer {
+    fn aligned_geometry(
+        file_bytes: u64,
+        source_offset: u64,
+        source_bytes: usize,
+    ) -> Result<Option<(u64, usize, usize)>> {
+        let alignment = ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT as u64;
+        let aligned_offset = source_offset / alignment * alignment;
+        let requested_offset: usize = (source_offset - aligned_offset)
+            .try_into()
+            .context("direct route read prefix does not fit in usize")?;
+        let requested_end = requested_offset
+            .checked_add(source_bytes)
+            .context("direct route read requested byte end overflow")?;
+        let aligned_bytes = requested_end
+            .checked_add(ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT - 1)
+            .context("direct route read aligned byte length overflow")?
+            / ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT
+            * ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT;
+        let aligned_end = aligned_offset
+            .checked_add(aligned_bytes as u64)
+            .context("direct route read aligned file end overflow")?;
+        Ok(
+            (aligned_end <= file_bytes).then_some((
+                aligned_offset,
+                aligned_bytes,
+                requested_offset,
+            )),
+        )
+    }
+
+    fn allocate(
+        file_bytes: u64,
+        source_offset: u64,
+        source_bytes: usize,
+    ) -> Result<Option<(Self, u64)>> {
+        let Some((aligned_offset, aligned_bytes, requested_offset)) =
+            Self::aligned_geometry(file_bytes, source_offset, source_bytes)?
+        else {
+            return Ok(None);
+        };
+        let layout =
+            std::alloc::Layout::from_size_align(aligned_bytes, ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT)
+                .context("building direct route read allocation layout")?;
+        let mut allocation = {
+            let mut pool = route_cuda_aligned_read_pool()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("direct route read allocation pool is poisoned"))?;
+            let candidate = pool
+                .iter()
+                .enumerate()
+                .filter(|(_, allocation)| allocation.layout.size() >= aligned_bytes)
+                .min_by_key(|(_, allocation)| allocation.layout.size())
+                .map(|(index, _)| index);
+            candidate.map(|index| pool.swap_remove(index))
+        };
+        if allocation.is_none() {
+            let ptr = NonNull::new(unsafe { std::alloc::alloc(layout) })
+                .context("allocating direct route read buffer")?;
+            allocation = Some(RouteCudaAlignedAllocation { ptr, layout });
+        }
+        Ok(Some((
+            Self {
+                allocation,
+                requested_offset,
+                requested_bytes: source_bytes,
+            },
+            aligned_offset,
+        )))
+    }
+
+    fn new(
+        file: &File,
+        file_bytes: u64,
+        source_offset: u64,
+        source_bytes: usize,
+    ) -> Result<Option<Self>> {
+        let Some((mut buffer, aligned_offset)) =
+            Self::allocate(file_bytes, source_offset, source_bytes)?
+        else {
+            return Ok(None);
+        };
+        if let Err(error) = file.read_exact_at(buffer.full_slice_mut(), aligned_offset) {
+            return Err(error).with_context(|| {
+                format!(
+                    "direct-reading {} bytes at aligned offset {aligned_offset}",
+                    buffer.full_bytes()
+                )
+            });
+        }
+        Ok(Some(buffer))
+    }
+
+    fn full_slice_mut(&mut self) -> &mut [u8] {
+        let allocation = self
+            .allocation
+            .as_mut()
+            .expect("direct route read allocation is present until drop");
+        unsafe { slice::from_raw_parts_mut(allocation.ptr.as_ptr(), allocation.layout.size()) }
+    }
+
+    fn full_ptr(&mut self) -> *mut u8 {
+        self.allocation
+            .as_mut()
+            .expect("direct route read allocation is present until drop")
+            .ptr
+            .as_ptr()
+    }
+
+    fn full_bytes(&self) -> usize {
+        self.allocation
+            .as_ref()
+            .expect("direct route read allocation is present until drop")
+            .layout
+            .size()
+    }
+
+    fn requested_slice(&self) -> &[u8] {
+        let allocation = self
+            .allocation
+            .as_ref()
+            .expect("direct route read allocation is present until drop");
+        unsafe {
+            slice::from_raw_parts(
+                allocation.ptr.as_ptr().add(self.requested_offset),
+                self.requested_bytes,
+            )
+        }
+    }
+
+    fn physical_bytes_for(file_bytes: u64, source_offset: u64, source_bytes: usize) -> Result<u64> {
+        Ok(
+            match Self::aligned_geometry(file_bytes, source_offset, source_bytes)? {
+                Some((_, aligned_bytes, _)) => aligned_bytes as u64,
+                None => source_bytes as u64,
+            },
+        )
+    }
+}
+
+impl Drop for RouteCudaAlignedReadBuffer {
+    fn drop(&mut self) {
+        if let Some(allocation) = self.allocation.take() {
+            if let Ok(mut pool) = route_cuda_aligned_read_pool().lock() {
+                pool.push(allocation);
+            }
+        }
+    }
+}
+
+unsafe impl Send for RouteCudaAlignedReadBuffer {}
+unsafe impl Sync for RouteCudaAlignedReadBuffer {}
+
+#[derive(Clone, Copy)]
+enum RouteCudaLayerTensorSlot {
+    GateWeight,
+    GateWeightScale,
+    UpWeight,
+    UpWeightScale,
+    DownWeight,
+    DownWeightScale,
+}
+
+impl RouteCudaLayerTensorSlot {
+    const COUNT: usize = 6;
+
+    fn index(self) -> usize {
+        match self {
+            Self::GateWeight => 0,
+            Self::GateWeightScale => 1,
+            Self::UpWeight => 2,
+            Self::UpWeightScale => 3,
+            Self::DownWeight => 4,
+            Self::DownWeightScale => 5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::GateWeight => "gate weight",
+            Self::GateWeightScale => "gate weight scale",
+            Self::UpWeight => "up weight",
+            Self::UpWeightScale => "up weight scale",
+            Self::DownWeight => "down weight",
+            Self::DownWeightScale => "down weight scale",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RouteCudaLayerColumnWindow {
+    start: usize,
+    count: usize,
+}
+
+struct RouteCudaLayerTensorReadPlan {
+    expert_index: usize,
+    slot: RouteCudaLayerTensorSlot,
+    info: TensorInfo,
+    source_path: PathBuf,
+    buffered_file: Arc<File>,
+    direct_file: Option<Arc<File>>,
+    file_bytes: u64,
+    source_offset: u64,
+    source_bytes: usize,
+    output_start_row: usize,
+    output_row_count: usize,
+    output_row_width: usize,
+    bytes_per_scalar: usize,
+    column_window: Option<RouteCudaLayerColumnWindow>,
+    retain_column_window_for_gpu_pack: bool,
+}
+
+impl RouteCudaLayerTensorReadPlan {
+    fn load(&self) -> Result<LoadedRouteCudaTensorRows> {
+        let started = Instant::now();
+        let source = if let Some(file) = &self.direct_file {
+            if let Some(buffer) = RouteCudaAlignedReadBuffer::new(
+                file,
+                self.file_bytes,
+                self.source_offset,
+                self.source_bytes,
+            )
+            .with_context(|| {
+                format!(
+                    "direct-reading {} from {}",
+                    self.info.name,
+                    self.source_path.display()
+                )
+            })? {
+                RouteCudaTensorBytes::direct(buffer)
+            } else {
+                let mut bytes = vec![0_u8; self.source_bytes];
+                self.buffered_file
+                    .read_exact_at(&mut bytes, self.source_offset)
+                    .with_context(|| {
+                        format!(
+                            "reading tail tensor {} from {} at offset {}",
+                            self.info.name,
+                            self.source_path.display(),
+                            self.source_offset
+                        )
+                    })?;
+                RouteCudaTensorBytes::owned(bytes)
+            }
+        } else {
+            let mut bytes = vec![0_u8; self.source_bytes];
+            self.buffered_file
+                .read_exact_at(&mut bytes, self.source_offset)
+                .with_context(|| {
+                    format!(
+                        "reading {} bytes for {} from {} at offset {}",
+                        self.source_bytes,
+                        self.info.name,
+                        self.source_path.display(),
+                        self.source_offset
+                    )
+                })?;
+            RouteCudaTensorBytes::owned(bytes)
+        };
+        self.finish_load(source, started.elapsed().as_micros())
+    }
+
+    fn finish_load(
+        &self,
+        source: RouteCudaTensorBytes,
+        elapsed_micros: u128,
+    ) -> Result<LoadedRouteCudaTensorRows> {
+        let bytes = if let Some(window) = self
+            .column_window
+            .filter(|_| !self.retain_column_window_for_gpu_pack)
+        {
+            let full_row_bytes = self
+                .info
+                .shape
+                .get(1)
+                .copied()
+                .context("route preload tensor has no row width")?
+                .checked_mul(self.bytes_per_scalar)
+                .context("route preload full row byte width overflow")?;
+            let compact_row_bytes = window
+                .count
+                .checked_mul(self.bytes_per_scalar)
+                .context("route preload compact row byte width overflow")?;
+            let column_start_bytes = window
+                .start
+                .checked_mul(self.bytes_per_scalar)
+                .context("route preload column start byte offset overflow")?;
+            let mut compact = Vec::with_capacity(
+                self.output_row_count
+                    .checked_mul(compact_row_bytes)
+                    .context("route preload compact tensor byte count overflow")?,
+            );
+            for row in source.as_slice().chunks_exact(full_row_bytes) {
+                compact.extend_from_slice(
+                    &row[column_start_bytes..column_start_bytes + compact_row_bytes],
+                );
+            }
+            RouteCudaTensorBytes::owned(compact)
+        } else {
+            source
+        };
+        let (source_row_width, source_column_start) = if self.retain_column_window_for_gpu_pack {
+            (
+                self.info.shape[1],
+                self.column_window
+                    .map(|window| window.start)
+                    .unwrap_or_default(),
+            )
+        } else {
+            (self.output_row_width, 0)
+        };
+        let mut info = self.info.clone();
+        if self.column_window.is_some() {
+            info.shape[1] = self.output_row_width;
+            info.byte_length =
+                (self.output_row_count * self.output_row_width * self.bytes_per_scalar) as u64;
+        }
+        Ok(LoadedRouteCudaTensorRows {
+            info,
+            source_path: self.source_path.clone(),
+            start_row: self.output_start_row,
+            row_count: self.output_row_count,
+            row_width: self.output_row_width,
+            source_row_width,
+            source_column_start,
+            bytes_per_scalar: self.bytes_per_scalar,
+            bytes,
+            elapsed_micros,
+        })
+    }
+
+    fn physical_source_bytes(&self) -> u64 {
+        if self.direct_file.is_none() {
+            return self.source_bytes as u64;
+        }
+        RouteCudaAlignedReadBuffer::physical_bytes_for(
+            self.file_bytes,
+            self.source_offset,
+            self.source_bytes,
+        )
+        .unwrap_or(self.source_bytes as u64)
+    }
+}
+
+fn load_route_cuda_read_plans_io_uring(
+    read_plans: &[RouteCudaLayerTensorReadPlan],
+    slots: &[Mutex<Vec<Option<Result<LoadedRouteCudaTensorRows>>>>],
+) -> Result<Option<u128>> {
+    let mut buffers = (0..read_plans.len()).map(|_| None).collect::<Vec<_>>();
+    let mut aligned_offsets = vec![None; read_plans.len()];
+    let mut direct_indices = Vec::with_capacity(read_plans.len());
+    let mut buffered_indices = Vec::new();
+    for (index, plan) in read_plans.iter().enumerate() {
+        let direct = plan
+            .direct_file
+            .as_ref()
+            .map(|_| {
+                RouteCudaAlignedReadBuffer::allocate(
+                    plan.file_bytes,
+                    plan.source_offset,
+                    plan.source_bytes,
+                )
+            })
+            .transpose()?
+            .flatten();
+        if let Some((buffer, aligned_offset)) = direct {
+            buffers[index] = Some(buffer);
+            aligned_offsets[index] = Some(aligned_offset);
+            direct_indices.push(index);
+        } else {
+            buffered_indices.push(index);
+        }
+    }
+    if direct_indices.is_empty() {
+        return Ok(None);
+    }
+
+    let entries = direct_indices.len().next_power_of_two().max(2);
+    let entries: u32 = entries
+        .try_into()
+        .context("route preload io_uring entry count exceeds u32")?;
+    let mut ring = match IoUring::new(entries) {
+        Ok(ring) => ring,
+        Err(error) => {
+            eprintln!("real_nvfp4_route_preload_io_uring_unavailable error={error}");
+            return Ok(None);
+        }
+    };
+    for &index in &direct_indices {
+        let plan = &read_plans[index];
+        let buffer = buffers[index]
+            .as_mut()
+            .expect("route preload io_uring buffer allocated above");
+        let length: u32 = buffer
+            .full_bytes()
+            .try_into()
+            .context("route preload io_uring read length exceeds u32")?;
+        let entry = opcode::Read::new(
+            types::Fd(
+                plan.direct_file
+                    .as_ref()
+                    .expect("route preload direct file checked above")
+                    .as_raw_fd(),
+            ),
+            buffer.full_ptr(),
+            length,
+        )
+        .offset(
+            aligned_offsets[index].expect("route preload io_uring aligned offset recorded above"),
+        )
+        .build()
+        .user_data(index as u64);
+        unsafe {
+            ring.submission()
+                .push(&entry)
+                .map_err(|_| anyhow::anyhow!("route preload io_uring submission queue is full"))?;
+        }
+    }
+    let started = Instant::now();
+    std::thread::scope(|scope| -> Result<()> {
+        for &index in &buffered_indices {
+            scope.spawn(move || {
+                let plan = &read_plans[index];
+                let loaded = plan.load();
+                slots[plan.expert_index]
+                    .lock()
+                    .expect("mixed route preload result slot is poisoned")[plan.slot.index()] =
+                    Some(loaded);
+            });
+        }
+        ring.submit_and_wait(direct_indices.len())
+            .context("submitting route preload io_uring reads")?;
+        Ok(())
+    })?;
+    let elapsed_micros = started.elapsed().as_micros();
+    let mut completed = vec![false; read_plans.len()];
+    for completion in ring.completion() {
+        let index: usize = completion
+            .user_data()
+            .try_into()
+            .context("route preload io_uring completion index exceeds usize")?;
+        let buffer = buffers
+            .get(index)
+            .and_then(Option::as_ref)
+            .with_context(|| {
+                format!("route preload io_uring completion {index} is out of range")
+            })?;
+        let result = completion.result();
+        if result < 0 {
+            return Err(std::io::Error::from_raw_os_error(-result)).with_context(|| {
+                format!(
+                    "route preload io_uring read failed for {}",
+                    read_plans[index].info.name
+                )
+            });
+        }
+        anyhow::ensure!(
+            result as usize == buffer.full_bytes(),
+            "route preload io_uring short read for {}: {result}/{} bytes",
+            read_plans[index].info.name,
+            buffer.full_bytes()
+        );
+        completed[index] = true;
+    }
+    anyhow::ensure!(
+        direct_indices.iter().all(|index| completed[*index]),
+        "route preload io_uring returned {}/{} completions",
+        direct_indices
+            .iter()
+            .filter(|index| completed[**index])
+            .count(),
+        direct_indices.len()
+    );
+
+    for index in direct_indices {
+        let plan = &read_plans[index];
+        let loaded = plan.finish_load(
+            RouteCudaTensorBytes::direct(
+                buffers[index]
+                    .take()
+                    .expect("route preload io_uring buffer retained until completion"),
+            ),
+            elapsed_micros,
+        );
+        slots[plan.expert_index]
+            .lock()
+            .expect("route preload io_uring result slot is poisoned")[plan.slot.index()] =
+            Some(loaded);
+    }
+    Ok(Some(elapsed_micros))
+}
+
+struct RouteCudaLayerSourceFile {
+    buffered: Arc<File>,
+    direct: Option<Arc<File>>,
+    bytes: u64,
+}
+
+fn route_cuda_layer_tensor_read_plan(
+    catalog: &TensorCatalog,
+    file_cache: &mut HashMap<PathBuf, RouteCudaLayerSourceFile>,
+    expert_index: usize,
+    slot: RouteCudaLayerTensorSlot,
+    tensor_name: &str,
+    projection: &str,
+    row_count: usize,
+    shard: ExpertIntermediateShard,
+    retain_column_window_for_gpu_pack: bool,
+    load_full_projection: bool,
+) -> Result<RouteCudaLayerTensorReadPlan> {
+    let info = catalog_tensor(catalog, tensor_name)?.clone();
+    anyhow::ensure!(
+        info.shape.len() == 2,
+        "route preload tensor {tensor_name} must be rank-2, shape={:?}",
+        info.shape
+    );
+    let full_rows = info.shape[0];
+    let full_row_width = info.shape[1];
+    let bytes_per_scalar = dtype_byte_width(&info.dtype)?;
+    let full_row_bytes = full_row_width
+        .checked_mul(bytes_per_scalar)
+        .context("route preload full row byte width overflow")?;
+    let (
+        source_offset,
+        source_bytes,
+        output_start_row,
+        output_row_count,
+        output_row_width,
+        column_window,
+    ) = if load_full_projection {
+        (
+            info.byte_offset,
+            full_rows
+                .checked_mul(full_row_bytes)
+                .context("route preload full tensor byte length overflow")?,
+            0,
+            full_rows,
+            full_row_width,
+            None,
+        )
+    } else if matches!(projection, "gate_proj" | "up_proj") {
+        let local_rows = shard.local_rows(full_rows)?;
+        anyhow::ensure!(
+            row_count == local_rows,
+            "sharded projection {tensor_name} requested {row_count} rows, expected {local_rows}"
+        );
+        let start_row = shard.row_start(full_rows)?;
+        let relative_offset = start_row
+            .checked_mul(full_row_bytes)
+            .context("route preload row byte offset overflow")?;
+        let source_bytes = local_rows
+            .checked_mul(full_row_bytes)
+            .context("route preload row byte length overflow")?;
+        (
+            info.byte_offset
+                .checked_add(relative_offset as u64)
+                .context("route preload absolute byte offset overflow")?,
+            source_bytes,
+            start_row,
+            local_rows,
+            full_row_width,
+            None,
+        )
+    } else {
+        anyhow::ensure!(
+                projection == "down_proj" && row_count == full_rows,
+                "unsupported sharded projection window for {tensor_name}: projection={projection} rows={row_count}/{full_rows}"
+            );
+        anyhow::ensure!(
+            full_row_width % shard.count == 0,
+            "sharded down projection {tensor_name} width {full_row_width} is not divisible by {}",
+            shard.count
+        );
+        let local_width = full_row_width / shard.count;
+        (
+            info.byte_offset,
+            full_rows
+                .checked_mul(full_row_bytes)
+                .context("route preload tensor byte length overflow")?,
+            0,
+            full_rows,
+            local_width,
+            Some(RouteCudaLayerColumnWindow {
+                start: local_width
+                    .checked_mul(shard.rank)
+                    .context("route preload shard column start overflow")?,
+                count: local_width,
+            }),
+        )
+    };
+    let source_end = source_offset
+        .checked_add(source_bytes as u64)
+        .context("route preload source byte end overflow")?;
+    let tensor_end = info
+        .byte_offset
+        .checked_add(info.byte_length)
+        .context("route preload tensor byte end overflow")?;
+    anyhow::ensure!(
+        source_end <= tensor_end,
+        "route preload byte window for {tensor_name} exceeds catalog tensor range"
+    );
+    let source_path = Path::new(&catalog.snapshot_path).join(&info.file);
+    let files = if let Some(files) = file_cache.get(&source_path) {
+        files
+    } else {
+        let buffered = Arc::new(
+            File::open(&source_path)
+                .with_context(|| format!("opening {}", source_path.display()))?,
+        );
+        let direct = if route_preload_direct_io() {
+            Some(Arc::new(
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECT)
+                    .open(&source_path)
+                    .with_context(|| format!("opening {} for direct I/O", source_path.display()))?,
+            ))
+        } else {
+            None
+        };
+        let bytes = buffered
+            .metadata()
+            .with_context(|| format!("reading metadata for {}", source_path.display()))?
+            .len();
+        file_cache.insert(
+            source_path.clone(),
+            RouteCudaLayerSourceFile {
+                buffered,
+                direct,
+                bytes,
+            },
+        );
+        file_cache
+            .get(&source_path)
+            .expect("route preload file inserted above")
+    };
+    Ok(RouteCudaLayerTensorReadPlan {
+        expert_index,
+        slot,
+        info,
+        source_path,
+        buffered_file: Arc::clone(&files.buffered),
+        direct_file: files.direct.as_ref().map(Arc::clone),
+        file_bytes: files.bytes,
+        source_offset,
+        source_bytes,
+        output_start_row,
+        output_row_count,
+        output_row_width,
+        bytes_per_scalar,
+        column_window,
+        retain_column_window_for_gpu_pack,
+    })
+}
+
+struct LoadedRouteCudaLayer {
+    experts: Vec<LoadedRouteCudaExpertShard>,
+    source_bytes_read: u64,
+    physical_source_bytes_read: u64,
+    source_io_micros: Option<u128>,
+}
+
+fn cooperative_weight_preload_expert_groups(
+    catalog: &TensorCatalog,
+    layer_id: usize,
+    expert_ids: &[usize],
+    world_size: usize,
+) -> Result<Vec<Vec<usize>>> {
+    anyhow::ensure!(
+        world_size > 1 && expert_ids.len() % world_size == 0,
+        "cooperative weight preload requires evenly divisible expert groups"
+    );
+    let mut ordered = expert_ids
+        .iter()
+        .copied()
+        .map(|expert_id| {
+            let name = format!(
+                "{}.weight",
+                routed_quant_projection_base_name(layer_id, expert_id, "gate_proj")
+            );
+            let info = catalog_tensor(catalog, &name)?;
+            Ok((info.file.clone(), info.byte_offset, expert_id))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ordered.sort_unstable();
+    let group_len = expert_ids.len() / world_size;
+    Ok(ordered
+        .chunks_exact(group_len)
+        .map(|group| group.iter().map(|(_, _, expert_id)| *expert_id).collect())
+        .collect())
+}
+
+fn compact_route_cuda_tensor_for_shard(
+    source: &LoadedRouteCudaTensorRows,
+    projection: &str,
+    shard: ExpertIntermediateShard,
+) -> Result<LoadedRouteCudaTensorRows> {
+    anyhow::ensure!(
+        source.start_row == 0
+            && source.row_count == source.info.shape[0]
+            && source.row_width == source.info.shape[1]
+            && source.source_row_width == source.row_width
+            && source.source_column_start == 0,
+        "cooperative weight preload source {} is not a full tensor",
+        source.info.name
+    );
+    let source_row_bytes = source
+        .row_width
+        .checked_mul(source.bytes_per_scalar)
+        .context("cooperative source row byte width overflow")?;
+    let (start_row, row_count, row_width, source_row_width, source_column_start, bytes) =
+        if matches!(projection, "gate_proj" | "up_proj") {
+            let row_count = shard.local_rows(source.row_count)?;
+            let start_row = shard.row_start(source.row_count)?;
+            let start = start_row
+                .checked_mul(source_row_bytes)
+                .context("cooperative source row byte offset overflow")?;
+            let bytes = row_count
+                .checked_mul(source_row_bytes)
+                .context("cooperative source row byte length overflow")?;
+            (
+                start_row,
+                row_count,
+                source.row_width,
+                source.row_width,
+                0,
+                source.bytes.view(start, bytes)?,
+            )
+        } else {
+            anyhow::ensure!(
+                projection == "down_proj" && source.row_width % shard.count == 0,
+                "unsupported cooperative projection {projection} width {}",
+                source.row_width
+            );
+            let row_width = source.row_width / shard.count;
+            let start_column = row_width
+                .checked_mul(shard.rank)
+                .context("cooperative source column start overflow")?;
+            (
+                0,
+                source.row_count,
+                row_width,
+                source.row_width,
+                start_column,
+                source.bytes.clone(),
+            )
+        };
+    let mut info = source.info.clone();
+    info.shape = vec![row_count, row_width];
+    info.byte_length = row_count
+        .checked_mul(row_width)
+        .and_then(|values| values.checked_mul(source.bytes_per_scalar))
+        .context("cooperative compact tensor logical byte length overflow")?
+        as u64;
+    Ok(LoadedRouteCudaTensorRows {
+        info,
+        source_path: source.source_path.clone(),
+        start_row,
+        row_count,
+        row_width,
+        source_row_width,
+        source_column_start,
+        bytes_per_scalar: source.bytes_per_scalar,
+        bytes,
+        elapsed_micros: source.elapsed_micros,
+    })
+}
+
+fn compact_route_cuda_expert_for_shard(
+    source: &LoadedRouteCudaExpertShard,
+    shard: ExpertIntermediateShard,
+) -> Result<LoadedRouteCudaExpertShard> {
+    let projection = |source: &LoadedRouteCudaProjectionShard,
+                      name|
+     -> Result<LoadedRouteCudaProjectionShard> {
+        Ok(LoadedRouteCudaProjectionShard {
+            weight: compact_route_cuda_tensor_for_shard(&source.weight, name, shard)?,
+            weight_scale: compact_route_cuda_tensor_for_shard(&source.weight_scale, name, shard)?,
+        })
+    };
+    Ok(LoadedRouteCudaExpertShard {
+        gate: projection(&source.gate, "gate_proj")?,
+        up: projection(&source.up, "up_proj")?,
+        down: projection(&source.down, "down_proj")?,
+    })
+}
+
+fn compact_route_cuda_experts_for_shard_parallel(
+    source: &[LoadedRouteCudaExpertShard],
+    shard: ExpertIntermediateShard,
+) -> Result<Vec<LoadedRouteCudaExpertShard>> {
+    let workers = route_preload_io_workers().min(source.len());
+    let next = AtomicUsize::new(0);
+    let slots = (0..source.len())
+        .map(|_| Mutex::new(None))
+        .collect::<Vec<OptionSlot<LoadedRouteCudaExpertShard>>>();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(expert) = source.get(index) else {
+                    break;
+                };
+                *slots[index]
+                    .lock()
+                    .expect("cooperative compact result slot is poisoned") =
+                    Some(compact_route_cuda_expert_for_shard(expert, shard));
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            slot.into_inner()
+                .map_err(|_| anyhow::anyhow!("cooperative compact result slot is poisoned"))?
+                .with_context(|| {
+                    format!(
+                        "cooperative compact worker did not fill expert index {index} for rank {}",
+                        shard.rank
+                    )
+                })?
+        })
+        .collect()
+}
+
+fn load_route_cuda_layer_expert_shards_parallel(
+    catalog: &TensorCatalog,
+    layer_requests: &[&RouteProjectionCachePreloadRequest],
+    layer_id: usize,
+    expert_ids: &[usize],
+    shard: ExpertIntermediateShard,
+    retain_column_window_for_gpu_pack: bool,
+    load_full_projection: bool,
+) -> Result<LoadedRouteCudaLayer> {
+    let mut requests_by_projection = HashMap::with_capacity(layer_requests.len());
+    for &request in layer_requests {
+        anyhow::ensure!(
+            requests_by_projection
+                .insert((request.expert_id, request.projection), request)
+                .is_none(),
+            "layer {layer_id} has duplicate expert {} {} preload requests",
+            request.expert_id,
+            request.projection
+        );
+    }
+    let mut file_cache = HashMap::new();
+    let mut read_plans = Vec::with_capacity(expert_ids.len() * RouteCudaLayerTensorSlot::COUNT);
+    for (expert_index, &expert_id) in expert_ids.iter().enumerate() {
+        for (projection, weight_slot, scale_slot) in [
+            (
+                "gate_proj",
+                RouteCudaLayerTensorSlot::GateWeight,
+                RouteCudaLayerTensorSlot::GateWeightScale,
+            ),
+            (
+                "up_proj",
+                RouteCudaLayerTensorSlot::UpWeight,
+                RouteCudaLayerTensorSlot::UpWeightScale,
+            ),
+            (
+                "down_proj",
+                RouteCudaLayerTensorSlot::DownWeight,
+                RouteCudaLayerTensorSlot::DownWeightScale,
+            ),
+        ] {
+            let request = requests_by_projection
+                .get(&(expert_id, projection))
+                .with_context(|| {
+                    format!("layer {layer_id} expert {expert_id} is missing {projection}")
+                })?;
+            let base_name = routed_quant_projection_base_name(layer_id, expert_id, projection);
+            read_plans.push(route_cuda_layer_tensor_read_plan(
+                catalog,
+                &mut file_cache,
+                expert_index,
+                weight_slot,
+                &format!("{base_name}.weight"),
+                projection,
+                request.row_count,
+                shard,
+                retain_column_window_for_gpu_pack,
+                load_full_projection,
+            )?);
+            read_plans.push(route_cuda_layer_tensor_read_plan(
+                catalog,
+                &mut file_cache,
+                expert_index,
+                scale_slot,
+                &format!("{base_name}.weight_scale"),
+                projection,
+                request.row_count,
+                shard,
+                retain_column_window_for_gpu_pack,
+                load_full_projection,
+            )?);
+        }
+    }
+    read_plans.sort_unstable_by(|left, right| {
+        left.source_path
+            .cmp(&right.source_path)
+            .then_with(|| left.source_offset.cmp(&right.source_offset))
+    });
+    let source_bytes_read = read_plans.iter().try_fold(0_u64, |total, plan| {
+        total
+            .checked_add(plan.source_bytes as u64)
+            .context("route preload source byte count overflow")
+    })?;
+    let physical_source_bytes_read = read_plans.iter().try_fold(0_u64, |total, plan| {
+        total
+            .checked_add(plan.physical_source_bytes())
+            .context("route preload physical source byte count overflow")
+    })?;
+    let slots = (0..expert_ids.len())
+        .map(|_| {
+            Mutex::new(
+                (0..RouteCudaLayerTensorSlot::COUNT)
+                    .map(|_| None)
+                    .collect::<Vec<Option<Result<LoadedRouteCudaTensorRows>>>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_io_micros = if load_full_projection && route_preload_direct_io() {
+        load_route_cuda_read_plans_io_uring(&read_plans, &slots)?
+    } else {
+        None
+    };
+    if source_io_micros.is_some() {
+        // Results were filled above from one queued direct-I/O batch, with any
+        // unaligned EOF tail reads running concurrently through buffered I/O.
+    } else {
+        let workers = route_preload_io_workers().min(read_plans.len());
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(plan) = read_plans.get(index) else {
+                        break;
+                    };
+                    let loaded = plan.load();
+                    slots[plan.expert_index]
+                        .lock()
+                        .expect("parallel route preload result slot is poisoned")
+                        [plan.slot.index()] = Some(loaded);
+                });
+            }
+        });
+    }
+    let experts = slots
+        .into_iter()
+        .enumerate()
+        .map(|(expert_index, slot)| {
+            let mut tensors = slot
+                .into_inner()
+                .map_err(|_| anyhow::anyhow!("parallel route preload result slot is poisoned"))?;
+            let mut take =
+                |slot: RouteCudaLayerTensorSlot| -> Result<LoadedRouteCudaTensorRows> {
+                tensors[slot.index()]
+                    .take()
+                    .with_context(|| {
+                        format!(
+                            "parallel route preload did not fill layer {layer_id} expert index {expert_index} {}",
+                            slot.label()
+                        )
+                    })?
+                    .with_context(|| {
+                        format!(
+                            "loading layer {layer_id} expert index {expert_index} {}",
+                            slot.label()
+                        )
+                    })
+            };
+            Ok(LoadedRouteCudaExpertShard {
+                gate: LoadedRouteCudaProjectionShard {
+                    weight: take(RouteCudaLayerTensorSlot::GateWeight)?,
+                    weight_scale: take(RouteCudaLayerTensorSlot::GateWeightScale)?,
+                },
+                up: LoadedRouteCudaProjectionShard {
+                    weight: take(RouteCudaLayerTensorSlot::UpWeight)?,
+                    weight_scale: take(RouteCudaLayerTensorSlot::UpWeightScale)?,
+                },
+                down: LoadedRouteCudaProjectionShard {
+                    weight: take(RouteCudaLayerTensorSlot::DownWeight)?,
+                    weight_scale: take(RouteCudaLayerTensorSlot::DownWeightScale)?,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        experts.len() == expert_ids.len(),
+        "parallel route preload returned {} experts for layer {layer_id}, expected {}",
+        experts.len(),
+        expert_ids.len()
+    );
+    Ok(LoadedRouteCudaLayer {
+        experts,
+        source_bytes_read,
+        physical_source_bytes_read,
+        source_io_micros,
+    })
+}
+
+type OptionSlot<T> = Mutex<Option<Result<T>>>;
+
+struct RouteCudaQuantLayerPreloadPlan {
+    layer_id: usize,
+    requests: Vec<RouteProjectionCachePreloadRequest>,
+    expert_ids: Vec<usize>,
+}
+
+struct RouteCudaCooperativeLayerPreloadPlan {
+    expert_groups: Vec<Vec<usize>>,
+}
+
+#[derive(Default)]
+struct RouteCudaCooperativePreloadWorkspace {
+    exchange_slab: Option<Arc<RouteCudaLayerExpertSlab>>,
+    receive: Option<OwnedDeviceAllocation>,
+}
+
+fn load_route_cuda_layer_plan(
+    catalog: &TensorCatalog,
+    plan: &RouteCudaQuantLayerPreloadPlan,
+    shard: ExpertIntermediateShard,
+    retain_column_window_for_gpu_pack: bool,
+) -> Result<LoadedRouteCudaLayer> {
+    let request_refs = plan.requests.iter().collect::<Vec<_>>();
+    load_route_cuda_layer_expert_shards_parallel(
+        catalog,
+        &request_refs,
+        plan.layer_id,
+        &plan.expert_ids,
+        shard,
+        retain_column_window_for_gpu_pack,
+        false,
+    )
+}
+
+fn load_route_cuda_cooperative_layer_plan(
+    catalog: &TensorCatalog,
+    plan: &RouteCudaQuantLayerPreloadPlan,
+    cooperative: &RouteCudaCooperativeLayerPreloadPlan,
+    shard: ExpertIntermediateShard,
+) -> Result<LoadedRouteCudaLayer> {
+    let request_refs = plan.requests.iter().collect::<Vec<_>>();
+    let source_expert_ids = cooperative.expert_groups.get(shard.rank).with_context(|| {
+        format!(
+            "cooperative layer {} has no expert group for rank {}",
+            plan.layer_id, shard.rank
+        )
+    })?;
+    load_route_cuda_layer_expert_shards_parallel(
+        catalog,
+        &request_refs,
+        plan.layer_id,
+        source_expert_ids,
+        shard,
+        false,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_loaded_route_cuda_layer_cooperative(
+    plan: &RouteCudaQuantLayerPreloadPlan,
+    cooperative: &RouteCudaCooperativeLayerPreloadPlan,
+    loaded_source_experts: &[LoadedRouteCudaExpertShard],
+    cuda_cache: &mut RouteCudaCache,
+    scalar_metadata: &HashMap<RoutedQuantScalarMetadataKey, RoutedQuantScalarMetadata>,
+    shard: ExpertIntermediateShard,
+    cuda_stream: *mut c_void,
+    workspace: &mut RouteCudaCooperativePreloadWorkspace,
+    preload: &mut RouteCudaProjectionPreload,
+    load_ms: f64,
+    source_io_micros: Option<u128>,
+    source_bytes_read: u64,
+    physical_source_bytes_read: u64,
+) -> Result<()> {
+    let world_size = shard.count;
+    anyhow::ensure!(
+        world_size == 4
+            && cooperative.expert_groups.len() == world_size
+            && cooperative
+                .expert_groups
+                .iter()
+                .all(|group| group.len() == loaded_source_experts.len()),
+        "cooperative layer {} expert groups do not match rank {}/{} source expert count {}",
+        plan.layer_id,
+        shard.rank,
+        world_size,
+        loaded_source_experts.len()
+    );
+    let source_expert_count = loaded_source_experts.len();
+    let mut allocation_ms = 0.0;
+    let mut final_slab = None;
+    let mut compact_ms = 0.0;
+    let mut pack_ms = 0.0;
+    for target_rank in 0..world_size {
+        let target_shard = ExpertIntermediateShard::new(world_size, target_rank)?;
+        let compact_started = Instant::now();
+        let compact =
+            compact_route_cuda_experts_for_shard_parallel(loaded_source_experts, target_shard)?;
+        compact_ms += elapsed_ms(compact_started);
+        let exemplar = compact
+            .first()
+            .context("cooperative weight preload produced no compact experts")?;
+        if workspace.exchange_slab.is_none() {
+            let allocation_started = Instant::now();
+            workspace.exchange_slab = Some(Arc::new(RouteCudaLayerExpertSlab::new(
+                Arc::clone(&cuda_cache.library),
+                plan.layer_id,
+                plan.expert_ids.len(),
+                exemplar,
+                true,
+                false,
+                false,
+                false,
+            )?));
+            allocation_ms += elapsed_ms(allocation_started);
+        }
+        if final_slab.is_none() {
+            let allocation_started = Instant::now();
+            final_slab = Some(Arc::new(RouteCudaLayerExpertSlab::new(
+                Arc::clone(&cuda_cache.library),
+                plan.layer_id,
+                plan.expert_ids.len(),
+                exemplar,
+                true,
+                false,
+                false,
+                false,
+            )?));
+            allocation_ms += elapsed_ms(allocation_started);
+        }
+        let target_start = target_rank
+            .checked_mul(source_expert_count)
+            .context("cooperative exchange expert offset overflow")?;
+        let exchange_expert_ids =
+            (target_start..target_start + source_expert_count).collect::<Vec<_>>();
+        let pack_started = Instant::now();
+        workspace
+            .exchange_slab
+            .as_ref()
+            .expect("cooperative exchange slab initialized above")
+            .store_layer_experts_w4a16(
+                &exchange_expert_ids,
+                &compact,
+                Arc::clone(&cuda_cache.library),
+                &mut cuda_cache.workspace,
+                cuda_stream,
+            )?;
+        pack_ms += elapsed_ms(pack_started);
+    }
+    let exchange_slab = workspace
+        .exchange_slab
+        .as_ref()
+        .context("cooperative exchange slab was not initialized")?;
+    let final_slab = final_slab.context("cooperative final slab was not initialized")?;
+    let communicator = cuda_cache
+        .weight_preload_communicator
+        .as_ref()
+        .context("cooperative weight preload has no NCCL communicator")?;
+    anyhow::ensure!(
+        communicator.world_size() == world_size && communicator.rank() == shard.rank,
+        "cooperative weight preload communicator rank {}/{} differs from shard {}/{}",
+        communicator.rank(),
+        communicator.world_size(),
+        shard.rank,
+        world_size
+    );
+    struct ExchangeComponent {
+        label: &'static str,
+        send: GlmrtDeviceBuffer,
+        destination: GlmrtDeviceBuffer,
+        expert_stride_bytes: usize,
+    }
+    let components = [
+        ExchangeComponent {
+            label: "W13 weight",
+            send: exchange_slab.w13_weight.buffer(),
+            destination: final_slab.w13_weight.buffer(),
+            expert_stride_bytes: exchange_slab.w13_weight_expert_stride_bytes,
+        },
+        ExchangeComponent {
+            label: "W13 scale",
+            send: exchange_slab.w13_scale.buffer(),
+            destination: final_slab.w13_scale.buffer(),
+            expert_stride_bytes: exchange_slab.w13_scale_expert_stride_bytes,
+        },
+        ExchangeComponent {
+            label: "W2 weight",
+            send: exchange_slab.w2_weight.buffer(),
+            destination: final_slab.w2_weight.buffer(),
+            expert_stride_bytes: exchange_slab.w2_weight_expert_stride_bytes,
+        },
+        ExchangeComponent {
+            label: "W2 scale",
+            send: exchange_slab.w2_scale.buffer(),
+            destination: final_slab.w2_scale.buffer(),
+            expert_stride_bytes: exchange_slab.w2_scale_expert_stride_bytes,
+        },
+    ];
+    let maximum_row_stride = components
+        .iter()
+        .map(|component| {
+            component
+                .expert_stride_bytes
+                .checked_mul(source_expert_count)
+                .context("cooperative exchange row stride overflow")
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .context("cooperative exchange has no components")?;
+    let receive_bytes = maximum_row_stride
+        .checked_mul(world_size - 1)
+        .context("cooperative exchange receive byte count overflow")?;
+    let needs_receive_allocation = workspace
+        .receive
+        .as_ref()
+        .map(|receive| receive.capacity_bytes() < receive_bytes)
+        .unwrap_or(true);
+    if needs_receive_allocation {
+        let allocation_started = Instant::now();
+        workspace.receive = Some(OwnedDeviceAllocation::new_with_kind(
+            Arc::clone(&cuda_cache.library),
+            receive_bytes,
+            "cooperative weight exchange receive workspace",
+            false,
+        )?);
+        allocation_ms += elapsed_ms(allocation_started);
+    }
+    let receive = workspace
+        .receive
+        .as_ref()
+        .context("cooperative weight exchange receive workspace was not initialized")?;
+    let exchange_started = Instant::now();
+    for component in components {
+        let row_stride = component
+            .expert_stride_bytes
+            .checked_mul(source_expert_count)
+            .context("cooperative component row stride overflow")?;
+        let component_receive_bytes = row_stride
+            .checked_mul(world_size - 1)
+            .context("cooperative component receive byte count overflow")?;
+        let receive_view = route_device_buffer_slice(receive.buffer(), 0, component_receive_bytes)?;
+        unsafe {
+            communicator
+                .row_all_to_all_u8_async(
+                    component.send,
+                    receive_view,
+                    world_size,
+                    row_stride,
+                    cuda_stream,
+                )
+                .with_context(|| {
+                    format!(
+                        "exchanging layer {} cooperative {}",
+                        plan.layer_id, component.label
+                    )
+                })?;
+        }
+        for source_rank in 0..world_size {
+            let source_group = &cooperative.expert_groups[source_rank];
+            let segment = if source_rank == shard.rank {
+                route_device_buffer_slice(component.send, shard.rank * row_stride, row_stride)?
+            } else {
+                let receive_index = if source_rank < shard.rank {
+                    source_rank
+                } else {
+                    source_rank - 1
+                };
+                route_device_buffer_slice(receive_view, receive_index * row_stride, row_stride)?
+            };
+            for (source_index, &expert_id) in source_group.iter().enumerate() {
+                let source = route_device_buffer_slice(
+                    segment,
+                    source_index * component.expert_stride_bytes,
+                    component.expert_stride_bytes,
+                )?;
+                let destination = route_device_buffer_slice(
+                    component.destination,
+                    expert_id * component.expert_stride_bytes,
+                    component.expert_stride_bytes,
+                )?;
+                unsafe {
+                    cuda_cache
+                        .library
+                        .copy_d2d_async(
+                            destination,
+                            source,
+                            component.expert_stride_bytes,
+                            cuda_stream,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "scattering layer {} cooperative {} expert {expert_id}",
+                                plan.layer_id, component.label
+                            )
+                        })?;
+                }
+            }
+        }
+    }
+    unsafe {
+        cuda_cache
+            .library
+            .cuda_stream_synchronize(cuda_stream)
+            .context("synchronizing cooperative weight preload exchange")?;
+    }
+    let exchange_ms = elapsed_ms(exchange_started);
+    for expert_id in &plan.expert_ids {
+        final_slab.store_expert_scalars_from_cache(*expert_id, scalar_metadata)?;
+    }
+    final_slab.finalize_w4a16_global_scales(cuda_cache.library.as_ref(), cuda_stream)?;
+    anyhow::ensure!(
+        cuda_cache
+            .expert_slabs
+            .insert(plan.layer_id, Arc::clone(&final_slab))
+            .is_none(),
+        "cooperative preload inserted duplicate layer {}",
+        plan.layer_id
+    );
+    let projection_groups = plan.expert_ids.len() * 3;
+    preload.projection_groups += projection_groups;
+    preload.weight_bytes +=
+        (final_slab.w13_weight.capacity_bytes() + final_slab.w2_weight.capacity_bytes()) as u64;
+    preload.weight_scale_bytes +=
+        (final_slab.w13_scale.capacity_bytes() + final_slab.w2_scale.capacity_bytes()) as u64;
+    cuda_cache.projection_uploads += projection_groups;
+    let source_gbps = physical_source_bytes_read as f64 / (load_ms * 1.0e6).max(1.0);
+    let source_io_ms = source_io_micros
+        .map(|micros| micros as f64 / 1_000.0)
+        .unwrap_or_default();
+    let source_io_gbps = source_io_micros
+        .map(|micros| physical_source_bytes_read as f64 / (micros as f64 * 1.0e3).max(1.0))
+        .unwrap_or_default();
+    eprintln!(
+        "real_nvfp4_cuda_layer_preload layer_id={} experts={} source_experts={} io_workers={} direct_io={} cooperative=true source_bytes_requested={source_bytes_read} source_bytes_read={physical_source_bytes_read} source_gbps={source_gbps:.3} source_io_gbps={source_io_gbps:.3} load_ms={load_ms:.3} source_io_ms={source_io_ms:.3} allocation_ms={allocation_ms:.3} compact_ms={compact_ms:.3} pack_ms={pack_ms:.3} exchange_ms={exchange_ms:.3}",
+        plan.layer_id,
+        plan.expert_ids.len(),
+        loaded_source_experts.len(),
+        route_preload_io_workers(),
+        route_preload_direct_io(),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn store_loaded_route_cuda_layer(
+    catalog: &TensorCatalog,
+    plan: &RouteCudaQuantLayerPreloadPlan,
+    loaded_experts: &[LoadedRouteCudaExpertShard],
+    cuda_cache: &mut RouteCudaCache,
+    scalar_metadata: &HashMap<RoutedQuantScalarMetadataKey, RoutedQuantScalarMetadata>,
+    packed_w4a16: bool,
+    sparkinfer_source_w4a16: bool,
+    managed_weights: bool,
+    cuda_stream: *mut c_void,
+    request_count: usize,
+    progress_interval: usize,
+    preload: &mut RouteCudaProjectionPreload,
+    load_ms: f64,
+    source_io_micros: Option<u128>,
+    source_bytes_read: u64,
+    physical_source_bytes_read: u64,
+) -> Result<()> {
+    let first = loaded_experts
+        .first()
+        .context("parallel route preload returned no experts")?;
+    let allocation_started = Instant::now();
+    let slab = Arc::new(RouteCudaLayerExpertSlab::new(
+        Arc::clone(&cuda_cache.library),
+        plan.layer_id,
+        plan.expert_ids.len(),
+        first,
+        packed_w4a16,
+        sparkinfer_source_w4a16,
+        managed_weights,
+        false,
+    )?);
+    let allocation_ms = elapsed_ms(allocation_started);
+    let mut w13_scale_maximum = 0.0_f32;
+    let mut w2_scale_maximum = 0.0_f32;
+    let pack_started = Instant::now();
+    if packed_w4a16 {
+        slab.store_layer_experts_w4a16(
+            &plan.expert_ids,
+            loaded_experts,
+            Arc::clone(&cuda_cache.library),
+            &mut cuda_cache.workspace,
+            cuda_stream,
+        )?;
+    }
+    for (expert_id, loaded) in plan.expert_ids.iter().copied().zip(loaded_experts) {
+        if sparkinfer_source_w4a16 {
+            update_nvfp4_scale_maximum(&mut w13_scale_maximum, &loaded.up.weight_scale.bytes);
+            update_nvfp4_scale_maximum(&mut w13_scale_maximum, &loaded.gate.weight_scale.bytes);
+            update_nvfp4_scale_maximum(&mut w2_scale_maximum, &loaded.down.weight_scale.bytes);
+        }
+        slab.store_expert_scalars_from_cache(expert_id, scalar_metadata)?;
+        if packed_w4a16 {
+            preload.projection_groups += 3;
+            preload.weight_bytes += (loaded.gate.weight.bytes.len()
+                + loaded.up.weight.bytes.len()
+                + loaded.down.weight.bytes.len()) as u64;
+            preload.weight_scale_bytes += (loaded.gate.weight_scale.bytes.len()
+                + loaded.up.weight_scale.bytes.len()
+                + loaded.down.weight_scale.bytes.len())
+                as u64;
+            cuda_cache.projection_uploads += 3;
+        } else if sparkinfer_source_w4a16 {
+            slab.store_expert_source_w4a16(
+                expert_id,
+                loaded,
+                Arc::clone(&cuda_cache.library),
+                &mut cuda_cache.workspace,
+                cuda_stream,
+            )?;
+            preload.projection_groups += 3;
+            preload.weight_bytes += (loaded.gate.weight.bytes.len()
+                + loaded.up.weight.bytes.len()
+                + loaded.down.weight.bytes.len()) as u64;
+            preload.weight_scale_bytes += (loaded.gate.weight_scale.bytes.len()
+                + loaded.up.weight_scale.bytes.len()
+                + loaded.down.weight_scale.bytes.len())
+                as u64;
+            cuda_cache.projection_uploads += 3;
+        } else {
+            for (key, projection) in slab.store_expert(
+                expert_id,
+                loaded,
+                Arc::clone(&cuda_cache.library),
+                &mut cuda_cache.workspace,
+                cuda_stream,
+            )? {
+                preload.projection_groups += 1;
+                preload.weight_bytes += projection.weight.buffer().bytes as u64;
+                preload.weight_scale_bytes += projection.weight_scale.buffer().bytes as u64;
+                cuda_cache.projection_uploads += 1;
+                anyhow::ensure!(
+                    cuda_cache.projections.insert(key, projection).is_none(),
+                    "contiguous TP4 preload inserted a duplicate projection"
+                );
+            }
+        }
+        if progress_interval > 0
+            && (preload.projection_groups % progress_interval == 0
+                || preload.projection_groups == request_count)
+        {
+            eprintln!(
+                "real_nvfp4_cuda_projection_preload_progress groups={}/{} managed_projection_allocations={managed_weights} contiguous_tp4=true packed_w4a16={packed_w4a16} sparkinfer_source_w4a16={sparkinfer_source_w4a16}",
+                preload.projection_groups,
+                request_count
+            );
+        }
+    }
+    let pack_ms = elapsed_ms(pack_started);
+    let source_gbps = physical_source_bytes_read as f64 / (load_ms * 1.0e6).max(1.0);
+    let source_io_ms = source_io_micros
+        .map(|micros| micros as f64 / 1_000.0)
+        .unwrap_or_default();
+    let source_io_gbps = source_io_micros
+        .map(|micros| physical_source_bytes_read as f64 / (micros as f64 * 1.0e3).max(1.0))
+        .unwrap_or_default();
+    eprintln!(
+        "real_nvfp4_cuda_layer_preload layer_id={} experts={} io_workers={} direct_io={} source_bytes_requested={source_bytes_read} source_bytes_read={physical_source_bytes_read} source_gbps={source_gbps:.3} source_io_gbps={source_io_gbps:.3} load_ms={load_ms:.3} source_io_ms={source_io_ms:.3} allocation_ms={allocation_ms:.3} pack_and_scalar_ms={pack_ms:.3}",
+        plan.layer_id,
+        plan.expert_ids.len(),
+        route_preload_io_workers(),
+        route_preload_direct_io()
+    );
+    if sparkinfer_source_w4a16 {
+        slab.finalize_sparkinfer_source_w4a16(
+            catalog,
+            Arc::clone(&cuda_cache.library),
+            &mut cuda_cache.workspace,
+            sparkinfer_nvfp4_scale_factor(w13_scale_maximum),
+            sparkinfer_nvfp4_scale_factor(w2_scale_maximum),
+            cuda_stream,
+        )?;
+    } else {
+        slab.finalize_w4a16_global_scales(cuda_cache.library.as_ref(), cuda_stream)?;
+    }
+    anyhow::ensure!(
+        cuda_cache
+            .expert_slabs
+            .insert(plan.layer_id, slab)
+            .is_none(),
+        "contiguous TP4 preload inserted duplicate layer {}",
+        plan.layer_id
+    );
+    Ok(())
+}
+
+fn preload_routed_quant_projection_cuda_cache_cooperative_tp4(
+    catalog: &TensorCatalog,
+    layer_plans: &[RouteCudaQuantLayerPreloadPlan],
+    cuda_cache: &mut RouteCudaCache,
+    scalar_metadata: &HashMap<RoutedQuantScalarMetadataKey, RoutedQuantScalarMetadata>,
+    shard: ExpertIntermediateShard,
+    cuda_stream: *mut c_void,
+) -> Result<RouteCudaProjectionPreload> {
+    let preload_started = Instant::now();
+    let world_size = cuda_cache
+        .weight_preload_communicator
+        .as_ref()
+        .context("cooperative preload requires a communicator")?
+        .world_size();
+    anyhow::ensure!(
+        world_size == shard.count,
+        "cooperative communicator world size {world_size} differs from shard count {}",
+        shard.count
+    );
+    let cooperative_plans = layer_plans
+        .iter()
+        .map(|plan| {
+            Ok(RouteCudaCooperativeLayerPreloadPlan {
+                expert_groups: cooperative_weight_preload_expert_groups(
+                    catalog,
+                    plan.layer_id,
+                    &plan.expert_ids,
+                    world_size,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut preload = RouteCudaProjectionPreload::default();
+    let mut source_bytes_read = 0_u64;
+    let mut workspace = RouteCudaCooperativePreloadWorkspace::default();
+    std::thread::scope(|scope| -> Result<()> {
+        let first_plan = layer_plans
+            .first()
+            .context("cooperative TP4 preload has no layer plans")?;
+        let first_cooperative = cooperative_plans
+            .first()
+            .context("cooperative TP4 preload has no expert groups")?;
+        let mut pending = Some(scope.spawn(move || {
+            let started = Instant::now();
+            let loaded = load_route_cuda_cooperative_layer_plan(
+                catalog,
+                first_plan,
+                first_cooperative,
+                shard,
+            )?;
+            Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
+        }));
+        for index in 0..layer_plans.len() {
+            let plan = &layer_plans[index];
+            let cooperative = &cooperative_plans[index];
+            let (loaded_layer, load_ms) = pending
+                .take()
+                .expect("cooperative current layer preload handle exists")
+                .join()
+                .map_err(|_| {
+                    anyhow::anyhow!("cooperative route layer preload worker panicked")
+                })??;
+            pending = layer_plans.get(index + 1).map(|next_plan| {
+                let next_cooperative = &cooperative_plans[index + 1];
+                scope.spawn(move || {
+                    let started = Instant::now();
+                    let loaded = load_route_cuda_cooperative_layer_plan(
+                        catalog,
+                        next_plan,
+                        next_cooperative,
+                        shard,
+                    )?;
+                    Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
+                })
+            });
+            source_bytes_read = source_bytes_read
+                .checked_add(loaded_layer.physical_source_bytes_read)
+                .context("cooperative preload source byte total overflow")?;
+            store_loaded_route_cuda_layer_cooperative(
+                plan,
+                cooperative,
+                &loaded_layer.experts,
+                cuda_cache,
+                scalar_metadata,
+                shard,
+                cuda_stream,
+                &mut workspace,
+                &mut preload,
+                load_ms,
+                loaded_layer.source_io_micros,
+                loaded_layer.source_bytes_read,
+                loaded_layer.physical_source_bytes_read,
+            )?;
+        }
+        Ok(())
+    })?;
+    let total_ms = preload_started.elapsed().as_secs_f64() * 1_000.0;
+    let effective_source_gbps = source_bytes_read as f64 / (total_ms * 1.0e6).max(1.0);
+    eprintln!(
+        "real_nvfp4_cooperative_preload_complete layers={} read_ahead_layers=1 source_bytes={} total_ms={total_ms:.3} effective_source_gbps={effective_source_gbps:.3}",
+        layer_plans.len(),
+        source_bytes_read,
+    );
+    let expected = layer_plans
+        .iter()
+        .map(|plan| plan.expert_ids.len() * 3)
+        .sum::<usize>();
+    anyhow::ensure!(
+        preload.projection_groups == expected,
+        "cooperative preload loaded {} projections, expected {expected}",
+        preload.projection_groups
+    );
+    clear_route_cuda_aligned_read_pool();
+    drop(cuda_cache.weight_preload_communicator.take());
+    Ok(preload)
+}
+
 fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
     catalog: &TensorCatalog,
     requests: &[RouteProjectionCachePreloadRequest],
     cuda_cache: &mut RouteCudaCache,
+    scalar_metadata: &HashMap<RoutedQuantScalarMetadataKey, RoutedQuantScalarMetadata>,
     shard: ExpertIntermediateShard,
     cuda_stream: *mut c_void,
 ) -> Result<RouteCudaProjectionPreload> {
@@ -12494,12 +14753,12 @@ fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
         .collect::<Vec<_>>();
     layers.sort_unstable();
     layers.dedup();
-    let progress_interval = cuda_projection_preload_progress_interval();
-    let mut preload = RouteCudaProjectionPreload::default();
+    let mut layer_plans = Vec::with_capacity(layers.len());
     for layer_id in layers {
         let layer_requests = requests
             .iter()
             .filter(|request| request.layer_id == layer_id)
+            .copied()
             .collect::<Vec<_>>();
         let mut expert_ids = layer_requests
             .iter()
@@ -12518,126 +14777,75 @@ fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
             expert_ids.len(),
             expert_ids.len() * 3
         );
-
-        let mut first = Some(load_route_cuda_expert_shard(
+        layer_plans.push(RouteCudaQuantLayerPreloadPlan {
+            layer_id,
+            requests: layer_requests,
+            expert_ids,
+        });
+    }
+    if packed_w4a16 && cuda_cache.weight_preload_communicator.is_some() {
+        return preload_routed_quant_projection_cuda_cache_cooperative_tp4(
             catalog,
-            &layer_requests,
-            layer_id,
-            0,
+            &layer_plans,
+            cuda_cache,
+            scalar_metadata,
             shard,
-        )?);
-        let slab = Arc::new(RouteCudaLayerExpertSlab::new(
-            Arc::clone(&cuda_cache.library),
-            layer_id,
-            expert_ids.len(),
-            first.as_ref().expect("first expert loaded above"),
-            packed_w4a16,
-            sparkinfer_source_w4a16,
-            managed_weights,
-            false,
-        )?);
-        let mut w13_scale_maximum = 0.0_f32;
-        let mut w2_scale_maximum = 0.0_f32;
-        for expert_id in expert_ids {
-            let loaded = if expert_id == 0 {
-                first.take().expect("first expert is consumed once")
-            } else {
-                load_route_cuda_expert_shard(catalog, &layer_requests, layer_id, expert_id, shard)?
-            };
-            if sparkinfer_source_w4a16 {
-                update_nvfp4_scale_maximum(&mut w13_scale_maximum, &loaded.up.weight_scale.bytes);
-                update_nvfp4_scale_maximum(&mut w13_scale_maximum, &loaded.gate.weight_scale.bytes);
-                update_nvfp4_scale_maximum(&mut w2_scale_maximum, &loaded.down.weight_scale.bytes);
-            }
-            slab.store_expert_scalars(catalog, expert_id)?;
-            if packed_w4a16 {
-                slab.store_expert_w4a16(
-                    expert_id,
-                    &loaded,
-                    Arc::clone(&cuda_cache.library),
-                    &mut cuda_cache.workspace,
-                    cuda_stream,
-                )?;
-                preload.projection_groups += 3;
-                preload.weight_bytes += (loaded.gate.weight.bytes.len()
-                    + loaded.up.weight.bytes.len()
-                    + loaded.down.weight.bytes.len())
-                    as u64;
-                preload.weight_scale_bytes += (loaded.gate.weight_scale.bytes.len()
-                    + loaded.up.weight_scale.bytes.len()
-                    + loaded.down.weight_scale.bytes.len())
-                    as u64;
-                cuda_cache.projection_uploads += 3;
-            } else if sparkinfer_source_w4a16 {
-                slab.store_expert_source_w4a16(
-                    expert_id,
-                    &loaded,
-                    Arc::clone(&cuda_cache.library),
-                    &mut cuda_cache.workspace,
-                    cuda_stream,
-                )?;
-                preload.projection_groups += 3;
-                preload.weight_bytes += (loaded.gate.weight.bytes.len()
-                    + loaded.up.weight.bytes.len()
-                    + loaded.down.weight.bytes.len())
-                    as u64;
-                preload.weight_scale_bytes += (loaded.gate.weight_scale.bytes.len()
-                    + loaded.up.weight_scale.bytes.len()
-                    + loaded.down.weight_scale.bytes.len())
-                    as u64;
-                cuda_cache.projection_uploads += 3;
-            } else {
-                for (key, projection) in slab.store_expert(
-                    expert_id,
-                    &loaded,
-                    Arc::clone(&cuda_cache.library),
-                    &mut cuda_cache.workspace,
-                    cuda_stream,
-                )? {
-                    preload.projection_groups += 1;
-                    preload.weight_bytes += projection.weight.buffer().bytes as u64;
-                    preload.weight_scale_bytes += projection.weight_scale.buffer().bytes as u64;
-                    cuda_cache.projection_uploads += 1;
-                    anyhow::ensure!(
-                        cuda_cache.projections.insert(key, projection).is_none(),
-                        "contiguous TP4 preload inserted a duplicate projection"
-                    );
-                }
-            }
-            if progress_interval > 0
-                && (preload.projection_groups % progress_interval == 0
-                    || preload.projection_groups == requests.len())
-            {
-                eprintln!(
-                    "real_nvfp4_cuda_projection_preload_progress groups={}/{} managed_projection_allocations={managed_weights} contiguous_tp4=true packed_w4a16={packed_w4a16} sparkinfer_source_w4a16={sparkinfer_source_w4a16}",
-                    preload.projection_groups,
-                    requests.len()
-                );
-            }
-        }
-        if sparkinfer_source_w4a16 {
-            slab.finalize_sparkinfer_source_w4a16(
-                catalog,
-                Arc::clone(&cuda_cache.library),
-                &mut cuda_cache.workspace,
-                sparkinfer_nvfp4_scale_factor(w13_scale_maximum),
-                sparkinfer_nvfp4_scale_factor(w2_scale_maximum),
-                cuda_stream,
-            )?;
-        } else {
-            slab.finalize_w4a16_global_scales(cuda_cache.library.as_ref(), cuda_stream)?;
-        }
-        anyhow::ensure!(
-            cuda_cache.expert_slabs.insert(layer_id, slab).is_none(),
-            "contiguous TP4 preload inserted duplicate layer {layer_id}"
+            cuda_stream,
         );
     }
+    let progress_interval = cuda_projection_preload_progress_interval();
+    let mut preload = RouteCudaProjectionPreload::default();
+    std::thread::scope(|scope| -> Result<()> {
+        let first_plan = layer_plans
+            .first()
+            .context("contiguous TP4 preload has no layer plans")?;
+        let mut pending = Some(scope.spawn(move || {
+            let started = Instant::now();
+            let loaded = load_route_cuda_layer_plan(catalog, first_plan, shard, packed_w4a16)?;
+            Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
+        }));
+        for (index, plan) in layer_plans.iter().enumerate() {
+            let (loaded_layer, load_ms) = pending
+                .take()
+                .expect("current layer preload handle exists")
+                .join()
+                .map_err(|_| anyhow::anyhow!("parallel route layer preload worker panicked"))??;
+            pending = layer_plans.get(index + 1).map(|next_plan| {
+                scope.spawn(move || {
+                    let started = Instant::now();
+                    let loaded =
+                        load_route_cuda_layer_plan(catalog, next_plan, shard, packed_w4a16)?;
+                    Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
+                })
+            });
+            store_loaded_route_cuda_layer(
+                catalog,
+                plan,
+                &loaded_layer.experts,
+                cuda_cache,
+                scalar_metadata,
+                packed_w4a16,
+                sparkinfer_source_w4a16,
+                managed_weights,
+                cuda_stream,
+                requests.len(),
+                progress_interval,
+                &mut preload,
+                load_ms,
+                loaded_layer.source_io_micros,
+                loaded_layer.source_bytes_read,
+                loaded_layer.physical_source_bytes_read,
+            )?;
+        }
+        Ok(())
+    })?;
     anyhow::ensure!(
         preload.projection_groups == requests.len(),
         "contiguous TP4 preload loaded {} projections, expected {}",
         preload.projection_groups,
         requests.len()
     );
+    clear_route_cuda_aligned_read_pool();
     Ok(preload)
 }
 
@@ -12649,6 +14857,7 @@ pub(in crate::commands::real_full) fn preload_routed_quant_projection_cuda_cache
     if requests.is_empty() {
         anyhow::bail!("real NVFP4 CUDA resident preload requires at least one projection request");
     }
+    let scalar_metadata = cache.scalar_metadata.clone();
     let cuda_cache = cache.cuda_cache()?;
     let stream = RouteCudaStream::new(Arc::clone(&cuda_cache.library))?;
     let cuda_stream = stream.as_ptr();
@@ -12662,6 +14871,7 @@ pub(in crate::commands::real_full) fn preload_routed_quant_projection_cuda_cache
                 catalog,
                 requests,
                 cuda_cache,
+                &scalar_metadata,
                 shard,
                 cuda_stream,
             );
@@ -13054,7 +15264,8 @@ mod tests {
         b12x_projection_scale_shape_supported, b12x_spark_direct_route_shape_supported,
         b12x_w4a16_capacity_rows, b12x_w4a16_prefill_route_block_rows,
         canonical_spark_collective_request_id, coalesce_streaming_completion_slices,
-        collective_gap_ready, cuda_reference_kernels_enabled, cuda_reference_kernels_test_override,
+        collective_gap_ready, copy_loaded_route_cuda_tensor_compact,
+        cuda_reference_kernels_enabled, cuda_reference_kernels_test_override,
         cuda_route_validation_test_override, execute_nvfp4_route_cached,
         execute_nvfp4_route_rows_bf16_accumulated_cached,
         execute_nvfp4_route_rows_bf16_accumulated_cached_device_input_device_output,
@@ -13066,10 +15277,11 @@ mod tests {
         plan_packed_w4a16_topk8_prefill, plan_packed_w4a16_topk8_prefill_flat,
         route_cuda_graphs_test_override, routed_quant_scalar_metadata_from_loaded,
         should_use_grouped_route_launches, sparkinfer_source_w4a16_workspace_rows,
-        Bf16RouteProjectionGroupKey, Bf16RouteProjections, LoadedTensor, LoadedTensorRows,
-        OwnedDeviceAllocation, PackedW4a16Topk8Route, RouteCudaCache, RouteCudaEvent,
-        RouteCudaStream, RouteCudaWorkspace, RouteStreamingOutputDtype, RouteTensorCache,
-        RoutedQuantProjection, RoutedQuantProjectionKey, ScoredRoute, SparkCollectiveLaunchOrder,
+        Bf16RouteProjectionGroupKey, Bf16RouteProjections, LoadedRouteCudaTensorRows, LoadedTensor,
+        LoadedTensorRows, OwnedDeviceAllocation, PackedW4a16Topk8Route, RouteCudaCache,
+        RouteCudaEvent, RouteCudaStream, RouteCudaTensorBytes, RouteCudaWorkspace,
+        RouteStreamingOutputDtype, RouteTensorCache, RoutedQuantProjection,
+        RoutedQuantProjectionKey, ScoredRoute, SparkCollectiveLaunchOrder,
         CPU_REFERENCE_NVFP4_ROUTE_BACKEND, CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND,
         CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_DEVICE_INPUT_BACKEND,
         CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_DEVICE_OUTPUT_BACKEND,
@@ -13095,6 +15307,50 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|path| path.to_string_lossy().contains("native/build-cuda/")));
+    }
+
+    #[test]
+    fn compact_route_tensor_copy_preserves_contiguous_rows() -> Result<()> {
+        let tensor = LoadedRouteCudaTensorRows {
+            info: fake_tensor_info("weight", DType::U8, vec![2, 4], 8),
+            source_path: PathBuf::from("fake-route.bin"),
+            start_row: 0,
+            row_count: 2,
+            row_width: 4,
+            source_row_width: 4,
+            source_column_start: 0,
+            bytes_per_scalar: 1,
+            bytes: RouteCudaTensorBytes::owned(vec![0, 1, 2, 3, 4, 5, 6, 7]),
+            elapsed_micros: 0,
+        };
+        let mut compact = vec![0_u8; 8];
+
+        copy_loaded_route_cuda_tensor_compact(&tensor, &mut compact)?;
+
+        assert_eq!(compact, [0, 1, 2, 3, 4, 5, 6, 7]);
+        Ok(())
+    }
+
+    #[test]
+    fn compact_route_tensor_copy_extracts_strided_column_window() -> Result<()> {
+        let tensor = LoadedRouteCudaTensorRows {
+            info: fake_tensor_info("weight", DType::U8, vec![2, 3], 6),
+            source_path: PathBuf::from("fake-route.bin"),
+            start_row: 0,
+            row_count: 2,
+            row_width: 3,
+            source_row_width: 6,
+            source_column_start: 2,
+            bytes_per_scalar: 1,
+            bytes: RouteCudaTensorBytes::owned(vec![0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]),
+            elapsed_micros: 0,
+        };
+        let mut compact = vec![0_u8; 6];
+
+        copy_loaded_route_cuda_tensor_compact(&tensor, &mut compact)?;
+
+        assert_eq!(compact, [2, 3, 4, 12, 13, 14]);
+        Ok(())
     }
 
     #[test]
@@ -13686,6 +15942,7 @@ mod tests {
             library,
             spark_reduction: None,
             spark_rdma_reduction: None,
+            weight_preload_communicator: None,
             stream,
             b12x_aux_streams: Vec::new(),
             b12x_lane_events: Vec::new(),

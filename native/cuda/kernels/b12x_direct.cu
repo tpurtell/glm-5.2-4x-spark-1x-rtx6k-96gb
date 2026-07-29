@@ -629,7 +629,8 @@ __global__ void gather_nvfp4_rows_bf16_kernel(
 }
 
 __global__ void pack_w4a16_weight_kernel(const uint8_t* source, uint32_t* destination,
-                                          size_t size_k, size_t size_n,
+                                          size_t size_k, size_t source_size_k,
+                                          size_t source_start_k, size_t size_n,
                                           size_t row_rotation) {
   const size_t output_index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const size_t k_tiles = size_k / 16;
@@ -658,16 +659,17 @@ __global__ void pack_w4a16_weight_kernel(const uint8_t* source, uint32_t* destin
     const size_t column_base = warp_column * 16 + tensor_column;
     const size_t packed_row = n_tile * 64 + column_base + (source_slot >= 4 ? 8 : 0);
     const size_t source_row = (packed_row + row_rotation) % size_n;
-    const size_t source_word = k_tile * 2 + k_half;
+    const size_t source_word = source_start_k / 8 + k_tile * 2 + k_half;
     const uint32_t word = reinterpret_cast<const uint32_t*>(source)[
-        source_row * (size_k / 8) + source_word];
+        source_row * (source_size_k / 8) + source_word];
     result |= ((word >> (nibble * 4)) & 0x0fU) << (slot * 4);
   }
   destination[output_index] = result;
 }
 
 __global__ void pack_w4a16_scale_kernel(const uint8_t* source, uint8_t* destination,
-                                         size_t size_k, size_t size_n,
+                                         size_t size_k, size_t source_size_k,
+                                         size_t source_start_k, size_t size_n,
                                          size_t row_rotation, float scale_factor) {
   const size_t output_index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const size_t values = (size_k / 16) * size_n;
@@ -682,7 +684,8 @@ __global__ void pack_w4a16_scale_kernel(const uint8_t* source, uint8_t* destinat
   const size_t group_offset = swapped % 64;
   const size_t permuted_row = group_base + group_offset / 8 + 8 * (group_offset % 8);
   const size_t source_row = (permuted_row + row_rotation) % size_n;
-  const float source_scale = f8e4m3_to_f32(source[source_row * (size_k / 16) + k_block]);
+  const float source_scale = f8e4m3_to_f32(
+      source[source_row * (source_size_k / 16) + source_start_k / 16 + k_block]);
   const float adjusted = source_scale * scale_factor * 128.0f;
   if (adjusted < 2.0f) {
     destination[output_index] = 0;
@@ -2683,7 +2686,35 @@ extern "C" glmrt_status_t glmrt_cuda_b12x_w4a16_pack_weight_async(
   pack_w4a16_weight_kernel<<<static_cast<unsigned int>(blocks), threads, 0,
                                reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
       static_cast<const uint8_t*>(source.ptr), static_cast<uint32_t*>(destination.ptr),
-      size_k, size_n, row_rotation);
+      size_k, size_k, 0, size_n, row_rotation);
+  return status_from_cuda(cudaGetLastError());
+}
+
+extern "C" glmrt_status_t glmrt_cuda_b12x_w4a16_pack_weight_strided_async(
+    glmrt_device_buffer_t source, glmrt_device_buffer_t destination, size_t size_k,
+    size_t source_size_k, size_t source_start_k, size_t size_n, size_t row_rotation,
+    void* cuda_stream) {
+  if (size_k == 0 || source_size_k == 0 || size_n == 0 || size_k % 16 != 0 ||
+      source_size_k % 16 != 0 || source_start_k % 16 != 0 ||
+      source_start_k > source_size_k || size_k > source_size_k - source_start_k ||
+      size_n % 64 != 0 || row_rotation >= size_n ||
+      size_n > std::numeric_limits<size_t>::max() / source_size_k ||
+      size_n > std::numeric_limits<size_t>::max() / size_k) {
+    return GLMRT_STATUS_INVALID_ARGUMENT;
+  }
+  const size_t source_bytes = size_n * source_size_k / 2;
+  const size_t destination_bytes = size_n * size_k / 2;
+  if (!buffer_has_bytes(source, source_bytes) ||
+      !buffer_has_bytes(destination, destination_bytes)) {
+    return GLMRT_STATUS_BUFFER_TOO_SMALL;
+  }
+  const size_t words = destination_bytes / sizeof(uint32_t);
+  constexpr size_t threads = 256;
+  const size_t blocks = (words + threads - 1) / threads;
+  pack_w4a16_weight_kernel<<<static_cast<unsigned int>(blocks), threads, 0,
+                               reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
+      static_cast<const uint8_t*>(source.ptr), static_cast<uint32_t*>(destination.ptr),
+      size_k, source_size_k, source_start_k, size_n, row_rotation);
   return status_from_cuda(cudaGetLastError());
 }
 
@@ -2704,7 +2735,35 @@ extern "C" glmrt_status_t glmrt_cuda_b12x_w4a16_pack_scale_async(
   pack_w4a16_scale_kernel<<<static_cast<unsigned int>(blocks), threads, 0,
                               reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
       static_cast<const uint8_t*>(source.ptr), static_cast<uint8_t*>(destination.ptr),
-      size_k, size_n, row_rotation, scale_factor);
+      size_k, size_k, 0, size_n, row_rotation, scale_factor);
+  return status_from_cuda(cudaGetLastError());
+}
+
+extern "C" glmrt_status_t glmrt_cuda_b12x_w4a16_pack_scale_strided_async(
+    glmrt_device_buffer_t source, glmrt_device_buffer_t destination, size_t size_k,
+    size_t source_size_k, size_t source_start_k, size_t size_n, size_t row_rotation,
+    float scale_factor, void* cuda_stream) {
+  if (size_k == 0 || source_size_k == 0 || size_n == 0 || size_k % 16 != 0 ||
+      source_size_k % 16 != 0 || source_start_k % 16 != 0 ||
+      source_start_k > source_size_k || size_k > source_size_k - source_start_k ||
+      size_n % 64 != 0 || row_rotation >= size_n || !isfinite(scale_factor) ||
+      scale_factor <= 0.0f ||
+      size_n > std::numeric_limits<size_t>::max() / (source_size_k / 16) ||
+      size_n > std::numeric_limits<size_t>::max() / (size_k / 16)) {
+    return GLMRT_STATUS_INVALID_ARGUMENT;
+  }
+  const size_t source_bytes = size_n * (source_size_k / 16);
+  const size_t destination_bytes = size_n * (size_k / 16);
+  if (!buffer_has_bytes(source, source_bytes) ||
+      !buffer_has_bytes(destination, destination_bytes)) {
+    return GLMRT_STATUS_BUFFER_TOO_SMALL;
+  }
+  constexpr size_t threads = 256;
+  const size_t blocks = (destination_bytes + threads - 1) / threads;
+  pack_w4a16_scale_kernel<<<static_cast<unsigned int>(blocks), threads, 0,
+                              reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
+      static_cast<const uint8_t*>(source.ptr), static_cast<uint8_t*>(destination.ptr),
+      size_k, source_size_k, source_start_k, size_n, row_rotation, scale_factor);
   return status_from_cuda(cudaGetLastError());
 }
 

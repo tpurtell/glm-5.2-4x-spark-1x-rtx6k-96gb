@@ -345,7 +345,8 @@ if [[ -n "$lane_b_csv" ]]; then
 else
   unset GLMRT_EXPERT_INTERMEDIATE_RDMA_ADDITIONAL_PEERS || true
 fi
-"$repo_root/scripts/phase0-spark-tcp-bench.sh"
+"$repo_root/scripts/phase0-spark-tcp-bench.sh" &
+spark_start_pid=$!
 
 env_file="$state_dir/coordinator.env"
 jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$env_file"
@@ -358,6 +359,7 @@ jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$en
   echo "GLMRT_REAL_FULL_SERVE_BUILD_DAEMON=0"
   echo "GLMRT_REAL_FULL_SERVE_BUILD_NATIVE=0"
   echo "GLMRT_REAL_FULL_SERVE_REQUIRE_CUDA=1"
+  echo "GLMRT_REAL_FULL_SERVE_EXPERT_WARMUP_STATUS_FILE=/tmp/glmrt-expert-warmup.status"
   echo "GLMRT_BIN=/opt/glmrt/bin/glmrt"
   echo "GLMRT_NATIVE_LIB=/opt/glmrt/lib/libglmrt_native.so"
   echo "GLMRT_ENGINE_COMMIT=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$COORDINATOR_DOCKER_INFERENCE")"
@@ -392,7 +394,17 @@ docker_args+=(
 )
 
 echo "== starting coordinator container =="
-docker "${docker_args[@]}" >/dev/null
+if ! docker "${docker_args[@]}" >/dev/null; then
+  kill "$spark_start_pid" >/dev/null 2>&1 || true
+  wait "$spark_start_pid" >/dev/null 2>&1 || true
+  release_die "failed to start coordinator container"
+fi
+
+if ! wait "$spark_start_pid"; then
+  docker logs --tail 200 "$coordinator_container" >&2 || true
+  docker rm -f "$coordinator_container" >/dev/null 2>&1 || true
+  release_die "one or more Spark experts failed during parallel startup"
+fi
 
 deadline=$((SECONDS + 900))
 until curl -fsS "http://127.0.0.1:${ADDR##*:}/v1/models" >/dev/null 2>&1; do

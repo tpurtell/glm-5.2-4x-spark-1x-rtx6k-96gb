@@ -18,6 +18,8 @@ glmrt-core = { path = "../glmrt-core" }
 glmrt-ffi = { path = "../glmrt-ffi" }
 glmrt-loader = { path = "../glmrt-loader" }
 glmrt-transport = { path = "../glmrt-transport" }
+io-uring.workspace = true
+libc.workspace = true
 pyo3.workspace = true
 serde.workspace = true
 serde_json.workspace = true

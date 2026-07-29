@@ -174,10 +174,10 @@ if [ "$require_cuda" = "1" ]; then
     cat >&2 <<EOF
 CUDA native library not found: $native_lib
 Build it with:
-  cmake -S native -B native/build-cuda -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=OFF -DGLMRT_ENABLE_NCCL=OFF -DGLMRT_CUDA_ARCHITECTURES=120
+  cmake -S native -B native/build-cuda -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=OFF -DGLMRT_ENABLE_NCCL=ON -DGLMRT_CUDA_ARCHITECTURES=120
   cmake --build native/build-cuda
 For verbs-host, build the RDMA-enabled native library:
-  cmake -S native -B native/build-cuda-rdma -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=ON -DGLMRT_ENABLE_NCCL=OFF -DGLMRT_CUDA_ARCHITECTURES=120
+  cmake -S native -B native/build-cuda-rdma -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=ON -DGLMRT_ENABLE_NCCL=ON -DGLMRT_CUDA_ARCHITECTURES=120
   cmake --build native/build-cuda-rdma
 or set GLMRT_REAL_FULL_TCP_SMOKE_REQUIRE_CUDA=0 for a diagnostic-only local check.
 EOF

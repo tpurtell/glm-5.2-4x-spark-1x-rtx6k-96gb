@@ -9,8 +9,8 @@ use glmrt_transport::{expert_protocol_v2_compact_id, TcpProtocolV2HostBatchTarge
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::env;
-use std::fs::File;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::fs::{self, File};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -174,6 +174,11 @@ const REAL_FULL_DSPARK_TAIL_CACHE_BYTES_ENV: &str = "GLMRT_REAL_FULL_DSPARK_TAIL
 const REAL_FULL_DSPARK_TRACE_ENV: &str = "GLMRT_REAL_FULL_DSPARK_TRACE";
 const REAL_FULL_DSPARK_CONFIDENCE_POLICY_ENV: &str = "GLMRT_REAL_FULL_DSPARK_CONFIDENCE_POLICY";
 const REAL_FULL_DSPARK_FIXED_DRAFTS_ENV: &str = "GLMRT_REAL_FULL_DSPARK_FIXED_DRAFTS";
+const REAL_FULL_EXPERT_READY_TIMEOUT_SECS_ENV: &str =
+    "GLMRT_REAL_FULL_SERVE_EXPERT_READY_TIMEOUT_SECS";
+const REAL_FULL_EXPERT_WARMUP_STATUS_FILE_ENV: &str =
+    "GLMRT_REAL_FULL_SERVE_EXPERT_WARMUP_STATUS_FILE";
+const DEFAULT_REAL_FULL_EXPERT_READY_TIMEOUT_SECS: u64 = 900;
 const REAL_FULL_KV_POOL_TOKENS_ENV: &str = "GLMRT_REAL_FULL_KV_POOL_TOKENS";
 const DEFAULT_REAL_FULL_DSPARK_REQUEST_LOCAL_CONTEXT_TOKENS: usize = 4 * 1024;
 const DEFAULT_REAL_FULL_DSPARK_PROMPT_SWA_CONTEXT_TOKENS: usize = 2 * 1024;
@@ -5436,6 +5441,119 @@ pub(crate) fn run_real_glm_full_preflight(args: &CoordinatorArgs) -> Result<()> 
     bail!("{}", REAL_GLM_FULL_BLOCKER)
 }
 
+fn real_full_expert_ready_timeout_secs() -> Result<u64> {
+    let timeout_secs = env::var(REAL_FULL_EXPERT_READY_TIMEOUT_SECS_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            value.parse::<u64>().with_context(|| {
+                format!("parsing {REAL_FULL_EXPERT_READY_TIMEOUT_SECS_ENV}={value}")
+            })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_REAL_FULL_EXPERT_READY_TIMEOUT_SECS);
+    anyhow::ensure!(
+        timeout_secs > 0,
+        "{REAL_FULL_EXPERT_READY_TIMEOUT_SECS_ENV} must be positive"
+    );
+    Ok(timeout_secs)
+}
+
+fn wait_for_real_full_sparse_targets(
+    targets: Option<&[TcpProtocolV2HostBatchTarget]>,
+) -> Result<()> {
+    let Some(targets) = targets else {
+        return Ok(());
+    };
+    let timeout_secs = real_full_expert_ready_timeout_secs()?;
+    let started = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+    let connect_timeout = Duration::from_millis(200);
+    let mut pending = targets.iter().collect::<Vec<_>>();
+    eprintln!(
+        "real_full_expert_readiness_wait targets={} timeout_secs={timeout_secs}",
+        pending.len(),
+    );
+    while !pending.is_empty() {
+        pending.retain(|target| TcpStream::connect_timeout(&target.addr, connect_timeout).is_err());
+        if pending.is_empty() {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            let pending_targets = pending
+                .iter()
+                .map(|target| format!("{}={}", target.host, target.addr))
+                .collect::<Vec<_>>()
+                .join(",");
+            anyhow::bail!(
+                "expert daemons did not become ready within {timeout_secs}s: {pending_targets}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!(
+        "real_full_expert_readiness_ready targets={} elapsed_ms={:.3}",
+        targets.len(),
+        started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    Ok(())
+}
+
+fn wait_for_real_full_expert_warmup() -> Result<()> {
+    let Some(status_file) = env::var_os(REAL_FULL_EXPERT_WARMUP_STATUS_FILE_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let timeout_secs = real_full_expert_ready_timeout_secs()?;
+    let started = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+    eprintln!(
+        "real_full_expert_warmup_wait status_file={} timeout_secs={timeout_secs}",
+        status_file.display(),
+    );
+    loop {
+        match fs::read_to_string(&status_file) {
+            Ok(status) if status.trim() == "ready" => break,
+            Ok(status) if status.trim().starts_with("failed") => {
+                anyhow::bail!(
+                    "expert precompile warmup failed: {}",
+                    status.trim().replace('\n', " ")
+                );
+            }
+            Ok(status) => {
+                anyhow::bail!(
+                    "invalid expert precompile warmup status in {}: {:?}",
+                    status_file.display(),
+                    status.trim()
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "reading expert precompile warmup status {}",
+                        status_file.display()
+                    )
+                });
+            }
+        }
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "expert precompile warmup did not finish within {timeout_secs}s: {}",
+                status_file.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!(
+        "real_full_expert_warmup_ready elapsed_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    Ok(())
+}
+
 pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRealFullServing> {
     if args.backend != "cuda-reference" {
         anyhow::ensure!(
@@ -5574,6 +5692,7 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
     // Draft KV is an execution lease, not queued-request or target-radix
     // residency. Size this pool for the lanes that can actually execute;
     // submitted requests beyond that limit must wait without owning pages.
+    let dspark_load_started = Instant::now();
     let dspark = real_full_dspark_mode_and_snapshot()?
         .map(|(mode, snapshot)| {
             let cache_mode = real_full_dspark_cache_mode()?;
@@ -5627,6 +5746,13 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
             }))
         })
         .transpose()?;
+    eprintln!(
+        "real_full_dspark_preload elapsed_ms={:.3} enabled={}",
+        dspark_load_started.elapsed().as_secs_f64() * 1_000.0,
+        dspark.is_some(),
+    );
+    wait_for_real_full_sparse_targets(sparse_tcp_targets.as_deref())?;
+    wait_for_real_full_expert_warmup()?;
     let sparse_dispatch_worker_cpu = real_full_scheduler_worker_cpu()?;
     let sparse_tcp_dispatch_worker = sparse_tcp_targets
         .as_ref()

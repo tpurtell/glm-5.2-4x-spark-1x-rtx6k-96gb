@@ -336,6 +336,8 @@ warmup_mtp_chain_rows="${GLMRT_REAL_FULL_SERVE_WARMUP_MTP_CHAIN_ROWS:-2}"
 warmup_prefill_roundtrip_rows="${GLMRT_REAL_FULL_SERVE_WARMUP_PREFILL_ROUNDTRIP_ROWS:-16,256,512}"
 warmup_prefill_chain_rows="${GLMRT_REAL_FULL_SERVE_WARMUP_PREFILL_CHAIN_ROWS:-16,256,512}"
 warmup_expected_executor="${GLMRT_REAL_FULL_SERVE_WARMUP_EXPECTED_EXECUTOR:-protocol-v2-real-nvfp4-checkpoint-executor}"
+expert_ready_timeout_secs="${GLMRT_REAL_FULL_SERVE_EXPERT_READY_TIMEOUT_SECS:-900}"
+expert_warmup_status_file="${GLMRT_REAL_FULL_SERVE_EXPERT_WARMUP_STATUS_FILE:-}"
 prewarm_request="${GLMRT_REAL_FULL_SERVE_PREWARM_REQUEST:-1}"
 protocol_v2_timeout_ms="${GLMRT_REAL_FULL_PROTOCOL_V2_TIMEOUT_MS:-120000}"
 mtp="${GLMRT_REAL_FULL_MTP:-0}"
@@ -576,6 +578,20 @@ warmup_protocol_v2_experts() {
   done
 }
 
+wait_for_protocol_v2_experts() {
+  echo "== waiting for Spark expert control planes ==" >&2
+  IFS=',' read -r -a entries <<< "$expert_hosts"
+  for entry in "${entries[@]}"; do
+    local addr_part
+    addr_part="$(target_addr "$entry")"
+    wait_for_tcp \
+      "$(target_host "$addr_part")" \
+      "$(target_port "$addr_part")" \
+      "expert target ${entry}" \
+      "$expert_ready_timeout_secs"
+  done
+}
+
 require_bool_flag GLMRT_REAL_FULL_SERVE_START_EXPERTS "$start_experts"
 require_bool_flag GLMRT_REAL_FULL_SERVE_CHECK_EXPERTS "$check_experts"
 require_bool_flag GLMRT_REAL_FULL_SERVE_BUILD_DAEMON "$build_daemon"
@@ -744,6 +760,10 @@ if ! [[ "$warmup_timeout_ms" =~ ^[0-9]+$ ]] || [ "$warmup_timeout_ms" -lt 1 ]; t
   echo "GLMRT_REAL_FULL_SERVE_WARMUP_TIMEOUT_MS must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "$expert_ready_timeout_secs" =~ ^[0-9]+$ ]] || [ "$expert_ready_timeout_secs" -lt 1 ]; then
+  echo "GLMRT_REAL_FULL_SERVE_EXPERT_READY_TIMEOUT_SECS must be a positive integer" >&2
+  exit 2
+fi
 if ! [[ "$warmup_measured_timeout_ms" =~ ^[0-9]+$ ]] || [ "$warmup_measured_timeout_ms" -lt 1 ]; then
   echo "GLMRT_REAL_FULL_SERVE_WARMUP_MEASURED_TIMEOUT_MS must be a positive integer" >&2
   exit 2
@@ -800,7 +820,7 @@ if [ "$require_cuda" = "1" ]; then
       -DGLMRT_ENABLE_B12X_AOT=OFF \
       -DGLMRT_ENABLE_B12X_COORDINATOR_AOT="${GLMRT_B12X_COORDINATOR_AOT:-ON}" \
       -DGLMRT_ENABLE_W8A16_AOT="$w8a16_aot" \
-      -DGLMRT_ENABLE_NCCL=OFF \
+      -DGLMRT_ENABLE_NCCL=ON \
       -DPython3_EXECUTABLE="$GLMRT_PYTHON" \
       -DGLMRT_CUDA_ARCHITECTURES="${GLMRT_CUDA_ARCH:-120}"
     cmake --build "$(dirname "$native_lib")"
@@ -809,10 +829,10 @@ if [ "$require_cuda" = "1" ]; then
     cat >&2 <<EOF
 CUDA native library not found: $native_lib
 Build it with:
-  cmake -S native -B native/build-cuda -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=OFF -DGLMRT_ENABLE_NCCL=OFF -DGLMRT_CUDA_ARCHITECTURES=120
+  cmake -S native -B native/build-cuda -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=OFF -DGLMRT_ENABLE_NCCL=ON -DGLMRT_CUDA_ARCHITECTURES=120
   cmake --build native/build-cuda
 For verbs-host, build the RDMA-enabled native library:
-  cmake -S native -B native/build-cuda-rdma -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=ON -DGLMRT_ENABLE_NCCL=OFF -DGLMRT_CUDA_ARCHITECTURES=120
+  cmake -S native -B native/build-cuda-rdma -G Ninja -DGLMRT_ENABLE_CUDA=ON -DGLMRT_ENABLE_RDMA=ON -DGLMRT_ENABLE_NCCL=ON -DGLMRT_CUDA_ARCHITECTURES=120
   cmake --build native/build-cuda-rdma
 or set GLMRT_REAL_FULL_SERVE_REQUIRE_CUDA=0 for a diagnostic-only start.
 EOF
@@ -919,7 +939,21 @@ if [ -n "$host_python_module_path" ]; then
   export PYTHONPATH="$host_python_module_path${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
-warmup_protocol_v2_experts
+if [ -n "$expert_warmup_status_file" ]; then
+  status_tmp="${expert_warmup_status_file}.tmp"
+  rm -f "$expert_warmup_status_file" "$status_tmp"
+  (
+    if wait_for_protocol_v2_experts && warmup_protocol_v2_experts; then
+      printf 'ready\n' >"$status_tmp"
+    else
+      status=$?
+      printf 'failed exit_status=%s\n' "$status" >"$status_tmp"
+    fi
+    mv -f "$status_tmp" "$expert_warmup_status_file"
+  ) &
+else
+  warmup_protocol_v2_experts
+fi
 
 echo "== starting real-full ${coordinator_transport} API coordinator ==" >&2
 echo "listen=${addr}" >&2

@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use glmrt_core::{DType, TensorCatalog, TensorInfo, TensorRole};
-use glmrt_loader::{read_tensor_bytes_into, LoadedTensorSummary};
+use glmrt_loader::{load_tensor_bytes, read_tensor_bytes_into, LoadedTensor, LoadedTensorSummary};
 use std::collections::BTreeMap;
 use std::env;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::Instant;
 
 use super::coordinator_kernels::{
     coordinator_w4a16_o_proj_decode_enabled, coordinator_w4a16_q_b_decode_enabled,
@@ -98,107 +101,170 @@ pub(super) fn real_full_coordinator_resident_preload_plan(
 pub(super) fn preload_real_full_coordinator_resident_weights(
     catalog: &TensorCatalog,
 ) -> Result<RealFullCoordinatorResidentPreloadPlan> {
+    let preload_started = Instant::now();
     let tensors = coordinator_resident_tensors(catalog);
+    let source_started = Instant::now();
+    let next_tensor = AtomicUsize::new(0);
+    let source_workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(32)
+        .min(tensors.len().max(1));
+    let (source_sender, source_receiver) = mpsc::channel();
+    let mut source_bytes = 0_u64;
+    let mut source_ms = 0.0_f64;
     let mut loaded_bytes = 0_u64;
-    for tensor in &tensors {
-        let expected_bytes: usize = tensor.byte_length.try_into().with_context(|| {
-            format!(
-                "coordinator resident tensor {} byte length {} does not fit in usize",
-                tensor.name, tensor.byte_length
-            )
-        })?;
-        let mut bytes_read = 0_u64;
-        preload_resident_weight_from_host_staging(
-            &tensor.name,
-            expected_bytes,
-            "startup resident coordinator weight pinned staging",
-            |staging| {
-                let summary =
-                    read_tensor_bytes_into(catalog, &tensor.name, staging).with_context(|| {
-                        format!(
-                            "reading coordinator resident tensor {} into pinned startup staging",
-                            tensor.name
-                        )
-                    })?;
-                validate_coordinator_resident_tensor_summary(tensor, &summary)?;
-                cache_router_correction_bias_host_values(
-                    catalog,
-                    tensor,
-                    &staging[..expected_bytes],
-                )?;
-                bytes_read = summary.bytes_read;
-                Ok(())
-            },
-        )
-        .with_context(|| format!("preloading coordinator resident tensor {}", tensor.name))?;
-        let pack_w4a16_q_b = tensor.name.ends_with(".self_attn.q_b_proj.weight")
-            && coordinator_w4a16_q_b_decode_enabled();
-        let pack_w4a16_o_proj = tensor.name.ends_with(".self_attn.o_proj.weight")
-            && coordinator_w4a16_o_proj_decode_enabled();
-        let pack_w8a16_o_proj = tensor.name.ends_with(".self_attn.o_proj.weight")
-            && coordinator_w8a16_o_proj_decode_enabled();
-        let pack_w8a16_q_a = tensor.name.ends_with(".self_attn.q_a_proj.weight")
-            && coordinator_w8a16_q_a_decode_enabled();
-        let pack_w8a16_q_b = tensor.name.ends_with(".self_attn.q_b_proj.weight")
-            && coordinator_w8a16_q_b_decode_enabled();
-        anyhow::ensure!(
-            !(pack_w4a16_o_proj && pack_w8a16_o_proj),
-            "coordinator O projection cannot enable W4A16 and W8A16 simultaneously"
-        );
-        anyhow::ensure!(
-            !(pack_w4a16_q_b && pack_w8a16_q_b),
-            "coordinator Q-B projection cannot enable W4A16 and W8A16 simultaneously"
-        );
-        if pack_w4a16_q_b || pack_w4a16_o_proj {
-            anyhow::ensure!(
-                tensor.dtype == DType::Bf16 && tensor.shape.len() == 2,
-                "coordinator W4A16 projection {} must be a BF16 matrix",
-                tensor.name
-            );
-            let size_n: usize = tensor.shape[0].try_into().with_context(|| {
-                format!("coordinator W4A16 projection {} rows overflow", tensor.name)
-            })?;
-            let size_k: usize = tensor.shape[1].try_into().with_context(|| {
-                format!(
-                    "coordinator W4A16 projection {} columns overflow",
-                    tensor.name
-                )
-            })?;
-            preload_coordinator_w4a16_projection(&tensor.name, size_k, size_n)
-                .with_context(|| format!("packing coordinator W4A16 projection {}", tensor.name))?;
+    let mut upload_pack_ms = 0.0_f64;
+    std::thread::scope(|scope| -> Result<()> {
+        for _ in 0..source_workers {
+            let sender = source_sender.clone();
+            let next_tensor = &next_tensor;
+            let tensors = &tensors;
+            scope.spawn(move || loop {
+                let index = next_tensor.fetch_add(1, Ordering::Relaxed);
+                let Some(tensor) = tensors.get(index) else {
+                    break;
+                };
+                let loaded = load_tensor_bytes(catalog, &tensor.name).with_context(|| {
+                    format!("reading coordinator resident tensor {}", tensor.name)
+                });
+                let completed_ms = source_started.elapsed().as_secs_f64() * 1_000.0;
+                if sender.send((index, loaded, completed_ms)).is_err() {
+                    break;
+                }
+            });
         }
-        if pack_w8a16_q_a || pack_w8a16_q_b || pack_w8a16_o_proj {
-            anyhow::ensure!(
-                tensor.dtype == DType::Bf16 && tensor.shape.len() == 2,
-                "coordinator W8A16 projection {} must be a BF16 matrix",
-                tensor.name
-            );
-            let size_n: usize = tensor.shape[0].try_into().with_context(|| {
-                format!("coordinator W8A16 projection {} rows overflow", tensor.name)
-            })?;
-            let size_k: usize = tensor.shape[1].try_into().with_context(|| {
-                format!(
-                    "coordinator W8A16 projection {} columns overflow",
-                    tensor.name
-                )
-            })?;
-            preload_coordinator_w8a16_projection(&tensor.name, size_k, size_n)
-                .with_context(|| format!("packing coordinator W8A16 projection {}", tensor.name))?;
-            release_preloaded_resident_weight_device_buffer(&tensor.name, expected_bytes)
-                .with_context(|| {
-                    format!(
-                        "releasing superseded BF16 coordinator projection {}",
-                        tensor.name
-                    )
-                })?;
+        drop(source_sender);
+        for _ in 0..tensors.len() {
+            let (index, loaded, completed_ms) = source_receiver
+                .recv()
+                .context("coordinator resident source workers stopped before completion")?;
+            let tensor = tensors
+                .get(index)
+                .context("coordinator resident source worker returned an invalid tensor index")?;
+            let loaded = loaded?;
+            source_ms = source_ms.max(completed_ms);
+            source_bytes = source_bytes
+                .checked_add(loaded.bytes.len() as u64)
+                .context("coordinator resident source byte count overflow")?;
+            let upload_started = Instant::now();
+            let tensor_bytes =
+                preload_real_full_coordinator_resident_tensor(catalog, tensor, loaded)?;
+            upload_pack_ms += upload_started.elapsed().as_secs_f64() * 1_000.0;
+            loaded_bytes = loaded_bytes
+                .checked_add(tensor_bytes)
+                .context("coordinator resident loaded byte count overflow")?;
         }
-        loaded_bytes += bytes_read;
-    }
+        Ok(())
+    })?;
+    let source_gbps = source_bytes as f64 / (source_ms * 1.0e6).max(1.0);
+    eprintln!(
+        "real_full_coordinator_resident_source_load tensors={} workers={} bytes={} elapsed_ms={source_ms:.3} source_gbps={source_gbps:.3}",
+        tensors.len(),
+        source_workers,
+        source_bytes,
+    );
+    let total_ms = preload_started.elapsed().as_secs_f64() * 1_000.0;
+    let overlap_ms = (source_ms + upload_pack_ms - total_ms).max(0.0);
+    let total_gbps = loaded_bytes as f64 / (total_ms * 1.0e6).max(1.0);
+    eprintln!(
+        "real_full_coordinator_resident_preload tensors={} bytes={} source_ms={source_ms:.3} upload_pack_ms={upload_pack_ms:.3} overlap_ms={overlap_ms:.3} total_ms={total_ms:.3} effective_gbps={total_gbps:.3}",
+        tensors.len(),
+        loaded_bytes,
+    );
     Ok(coordinator_resident_preload_plan_for_tensors(
         catalog,
         "loaded",
         loaded_bytes,
     ))
+}
+
+fn preload_real_full_coordinator_resident_tensor(
+    catalog: &TensorCatalog,
+    tensor: &TensorInfo,
+    loaded: LoadedTensor,
+) -> Result<u64> {
+    let expected_bytes: usize = tensor.byte_length.try_into().with_context(|| {
+        format!(
+            "coordinator resident tensor {} byte length {} does not fit in usize",
+            tensor.name, tensor.byte_length
+        )
+    })?;
+    let summary = loaded.summary();
+    validate_coordinator_resident_tensor_summary(tensor, &summary)?;
+    cache_router_correction_bias_host_values(catalog, tensor, &loaded.bytes)?;
+    preload_resident_weight_from_host_staging(
+        &tensor.name,
+        expected_bytes,
+        "startup resident coordinator weight pinned staging",
+        |staging| {
+            staging[..expected_bytes].copy_from_slice(&loaded.bytes);
+            Ok(())
+        },
+    )
+    .with_context(|| format!("preloading coordinator resident tensor {}", tensor.name))?;
+    let pack_w4a16_q_b = tensor.name.ends_with(".self_attn.q_b_proj.weight")
+        && coordinator_w4a16_q_b_decode_enabled();
+    let pack_w4a16_o_proj = tensor.name.ends_with(".self_attn.o_proj.weight")
+        && coordinator_w4a16_o_proj_decode_enabled();
+    let pack_w8a16_o_proj = tensor.name.ends_with(".self_attn.o_proj.weight")
+        && coordinator_w8a16_o_proj_decode_enabled();
+    let pack_w8a16_q_a = tensor.name.ends_with(".self_attn.q_a_proj.weight")
+        && coordinator_w8a16_q_a_decode_enabled();
+    let pack_w8a16_q_b = tensor.name.ends_with(".self_attn.q_b_proj.weight")
+        && coordinator_w8a16_q_b_decode_enabled();
+    anyhow::ensure!(
+        !(pack_w4a16_o_proj && pack_w8a16_o_proj),
+        "coordinator O projection cannot enable W4A16 and W8A16 simultaneously"
+    );
+    anyhow::ensure!(
+        !(pack_w4a16_q_b && pack_w8a16_q_b),
+        "coordinator Q-B projection cannot enable W4A16 and W8A16 simultaneously"
+    );
+    if pack_w4a16_q_b || pack_w4a16_o_proj {
+        anyhow::ensure!(
+            tensor.dtype == DType::Bf16 && tensor.shape.len() == 2,
+            "coordinator W4A16 projection {} must be a BF16 matrix",
+            tensor.name
+        );
+        let size_n: usize = tensor.shape[0].try_into().with_context(|| {
+            format!("coordinator W4A16 projection {} rows overflow", tensor.name)
+        })?;
+        let size_k: usize = tensor.shape[1].try_into().with_context(|| {
+            format!(
+                "coordinator W4A16 projection {} columns overflow",
+                tensor.name
+            )
+        })?;
+        preload_coordinator_w4a16_projection(&tensor.name, size_k, size_n)
+            .with_context(|| format!("packing coordinator W4A16 projection {}", tensor.name))?;
+    }
+    if pack_w8a16_q_a || pack_w8a16_q_b || pack_w8a16_o_proj {
+        anyhow::ensure!(
+            tensor.dtype == DType::Bf16 && tensor.shape.len() == 2,
+            "coordinator W8A16 projection {} must be a BF16 matrix",
+            tensor.name
+        );
+        let size_n: usize = tensor.shape[0].try_into().with_context(|| {
+            format!("coordinator W8A16 projection {} rows overflow", tensor.name)
+        })?;
+        let size_k: usize = tensor.shape[1].try_into().with_context(|| {
+            format!(
+                "coordinator W8A16 projection {} columns overflow",
+                tensor.name
+            )
+        })?;
+        preload_coordinator_w8a16_projection(&tensor.name, size_k, size_n)
+            .with_context(|| format!("packing coordinator W8A16 projection {}", tensor.name))?;
+        release_preloaded_resident_weight_device_buffer(&tensor.name, expected_bytes)
+            .with_context(|| {
+                format!(
+                    "releasing superseded BF16 coordinator projection {}",
+                    tensor.name
+                )
+            })?;
+    }
+    Ok(summary.bytes_read)
 }
 
 fn coordinator_resident_preload_plan_for_tensors(

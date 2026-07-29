@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 #[derive(Debug, Deserialize)]
 struct SafetensorsIndex {
@@ -52,12 +54,44 @@ pub fn build_catalog(model_id: &str, hf_home: Option<&Path>) -> Result<TensorCat
     )
     .with_context(|| format!("parsing {}", index_path.display()))?;
 
-    let files = index.weight_map.values().cloned().collect::<BTreeSet<_>>();
+    let files = index
+        .weight_map
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let header_slots = (0..files.len())
+        .map(|_| Mutex::new(None))
+        .collect::<Vec<OptionSlot<BTreeMap<String, SafetensorsTensorHeader>>>>();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(32)
+        .min(files.len().max(1));
+    let next_file = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| loop {
+                let index = next_file.fetch_add(1, Ordering::Relaxed);
+                let Some(file_name) = files.get(index) else {
+                    break;
+                };
+                let path = snapshot_path.join(file_name);
+                let parsed = parse_safetensors_header(&path)
+                    .with_context(|| format!("parsing safetensors header {}", path.display()));
+                *header_slots[index]
+                    .lock()
+                    .expect("safetensors header result slot is poisoned") = Some(parsed);
+            });
+        }
+    });
     let mut header_by_tensor = BTreeMap::new();
-    for file_name in files {
-        let path = snapshot_path.join(&file_name);
-        let entries = parse_safetensors_header(&path)
-            .with_context(|| format!("parsing safetensors header {}", path.display()))?;
+    for (file_name, slot) in files.into_iter().zip(header_slots) {
+        let entries = slot
+            .into_inner()
+            .map_err(|_| anyhow::anyhow!("safetensors header result slot is poisoned"))?
+            .with_context(|| format!("safetensors header worker did not visit {file_name}"))??;
         for (name, header) in entries {
             header_by_tensor.insert(name, (file_name.clone(), header));
         }
@@ -100,6 +134,8 @@ pub fn build_catalog(model_id: &str, hf_home: Option<&Path>) -> Result<TensorCat
         tensors,
     })
 }
+
+type OptionSlot<T> = Mutex<Option<Result<T>>>;
 
 pub fn read_safetensors_metadata(path: &Path) -> Result<Vec<SafetensorsTensorMetadata>> {
     let entries = parse_safetensors_header(path)?;
