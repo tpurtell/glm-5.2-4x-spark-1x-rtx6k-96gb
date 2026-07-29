@@ -12,6 +12,8 @@ It supports the `lukealonso/GLM-5.2-NVFP4` and `nvidia/GLM-5.2-NVFP4` exports,
 continuous batching, long context, tool use, reasoning, vision, and plain,
 native-MTP, or dSpark decoding. It is built for this particular hardware
 layout, but is open source for anyone who wants to adapt it to their own.
+It is also zippy in `balanced` mode: about 35 TPS on real Python coding and
+about 1,800 TPS on large prefills.
 
 ## Why
 
@@ -28,6 +30,13 @@ Grok 4.5, which was a big upgrade.
 I am releasing it because it is cool, intelligence should be everywhere, and
 it may be useful to someone building a customized inference engine for their
 own hardware.
+
+## Architecture
+
+[![GLMRT balanced-path architecture](docs/balanced-path-architecture.svg)](docs/balanced-path-architecture.svg)
+
+The measured path, timing, residency, and data-movement details are described
+in [`docs/balanced-path.md`](docs/balanced-path.md).
 
 ## How to use it
 
@@ -72,7 +81,7 @@ The server exposes an OpenAI-compatible API at
 selected GLM-5.2 checkpoint must already be present in the Hugging Face cache
 on each host.
 
-## Benchmarks
+## High Level Benchmarks
 
 These results use the `balanced` profile and the hardware described above.
 
@@ -152,6 +161,10 @@ JSON-only format.
 | 64K | Pass | Pass | Pass |
 | 128K | Pass | Pass | Pass |
 | 256K | Pass | Pass | Pass |
+
+## Micro-timeline Benchmarks
+
+[![GLMRT balanced-path micro-timeline](docs/balanced-path-timeline.svg)](docs/balanced-path-timeline.svg)
 
 Agents customizing the engine should start with [`DEVELOPER.md`](DEVELOPER.md).
 GLMRT is released under the [MIT License](LICENSE).

@@ -1,0 +1,161 @@
+{
+  "schema": "glmrt-balanced-path-visual-v1",
+  "measured_at": "2026-07-29",
+  "commit": "d5a0a367833dd1d52c7a41875c23673b87cfe3ba",
+  "profile": {
+    "name": "balanced",
+    "model": "lukealonso/GLM-5.2-NVFP4",
+    "speculator": "RedHatAI/GLM-5.2-speculator.dspark@8bc9ac46fbf507f3ee3ad82304116a1f63e9edb4",
+    "target_layers": 78,
+    "dense_layers": 3,
+    "sparse_layers": 75,
+    "hidden_size": 6144,
+    "routed_experts_per_layer": 256,
+    "top_k": 8,
+    "execution_lanes": 4,
+    "max_concurrent_requests": 4,
+    "max_context_tokens_per_request": 400000,
+    "max_output_tokens": 100000,
+    "target_kv": {
+      "dtype": "FP8 compressed MLA + BF16 DSA index",
+      "bytes_per_token": 56544,
+      "physical_pool_tokens": 609536,
+      "physical_pool_bytes": 34465603584,
+      "page_tokens": 64,
+      "dsa_indexer_layers": 21
+    },
+    "target_resident_weights_bytes": 37202615808,
+    "dspark": {
+      "target_taps": [2, 20, 39, 58, 75],
+      "layers": 3,
+      "window_tokens": 2048,
+      "max_drafts": 7,
+      "physical_m_min": 1,
+      "physical_m_max": 8,
+      "resident_weights_bytes": 2499130626,
+      "kv_bytes_per_token": 49152,
+      "kv_physical_pages": 136,
+      "kv_page_tokens": 64,
+      "kv_physical_bytes": 427819008,
+      "host_tail_cache_bytes": 2768240640
+    },
+    "spark": {
+      "logical_roles": ["spark-0", "spark-1", "spark-2", "spark-3"],
+      "physical_hosts": ["ostrich", "dodo", "emu", "kiwi"],
+      "expert_weight_path": "device-resident packed ModelOpt/NVFP4, B12X/CuTe W4A16 AOT",
+      "small_m_path": "M=1 fused atomic top-k; M=2..8 grouped-wide fixed order",
+      "wide_m_path": "packed W4A16 through 2048 rows",
+      "transport": "ProtocolV2 verbs-host",
+      "reduction": "direct small-row response; Spark-RDMA at 16+ rows",
+      "intermediate_dtype": "FP8",
+      "owner_dtype": "BF16"
+    }
+  },
+  "clean_baseline": {
+    "weighted_suite": {
+      "cases": 35,
+      "corpus_repeats": 5,
+      "wall_decode_tps": 27.87061468256299,
+      "median_repeat_wall_decode_tps": 27.814408666515263,
+      "min_repeat_wall_decode_tps": 27.514063377600845,
+      "max_repeat_wall_decode_tps": 28.453850502759177,
+      "draft_acceptance": 0.7861254165404423,
+      "emitted_tokens_per_speculative_cycle": 2.642811501597444,
+      "runtime_captures": 0,
+      "physical_m_histogram": {
+        "1": 844,
+        "2": 898,
+        "3": 152,
+        "4": 259,
+        "5": 60,
+        "6": 144,
+        "7": 2,
+        "8": 50
+      }
+    },
+    "target_cycle_median_ms": {
+      "1": 47.363,
+      "2": 72.079,
+      "3": 90.750,
+      "4": 101.677,
+      "5": 114.578,
+      "6": 125.050,
+      "7": 143.014,
+      "8": 147.753
+    },
+    "target_cycle_sample_count": {
+      "1": 844,
+      "2": 898,
+      "3": 152,
+      "4": 259,
+      "5": 60,
+      "6": 144,
+      "7": 2,
+      "8": 50
+    },
+    "target_cycle_m1_note": "M=1 is the residual non-verifier decode time divided by scalar cycles; M=2..8 are direct verifier-cycle medians.",
+    "fresh_prefill_8k": {
+      "prefill_rows": 8219,
+      "chunks": 5,
+      "server_prefill_ms_median": 4786.926719,
+      "server_prefill_tps_median": 1716.968001072088,
+      "external_ttft_ms_median": 4793.216912003118,
+      "external_prompt_tps_median": 1714.7148044600435
+    }
+  },
+  "synchronized_diagnostic": {
+    "warning": "CUDA-event and verbose stage clocks synchronize work and are attribution-only. Do not compare their totals to uninstrumented production throughput.",
+    "target_cycle_median_ms": {
+      "1": 56.969,
+      "2": 79.358,
+      "3": 100.768
+    },
+    "m3_scheduler_breakdown_ms": {
+      "dense_attention": 1.419,
+      "dense_numeric": 2.054,
+      "sparse_attention": 31.529,
+      "sparse_numeric": 60.253,
+      "scheduler_remainder": 5.513
+    },
+    "m3_sparse_work_ms": {
+      "attention_delta": 1.414,
+      "norm": 1.003,
+      "shared_mlp": 8.346,
+      "router": 7.055,
+      "spark_dispatch": 48.694,
+      "complete_sparse_stage": 59.497,
+      "note": "These host-stage clocks overlap and are not additive."
+    },
+    "spark_execute_per_shard_per_sparse_layer_ms": {
+      "1": 0.241,
+      "2": 0.374,
+      "3": 0.513
+    },
+    "fresh_prefill_8k": {
+      "prefill_rows": 8207,
+      "chunks": 5,
+      "scheduler_ms": 5783.451,
+      "server_prefill_ms": 5840.681548,
+      "server_prefill_tps": 1405.1442340338326,
+      "sparse_layer_chunk_calls": 375,
+      "attention_calls": 390,
+      "median_attention_stage_ms_per_layer_chunk": 6.258,
+      "median_sparse_stage_ms_per_layer_chunk": 42.436,
+      "median_sparse_dispatch_ms_per_layer_chunk": 40.506,
+      "median_coordinator_transport_batch_ms": 19.236,
+      "spark_execute_mean_ms_per_shard": 14.004,
+      "spark_rdma_mean_ms_per_shard": 12.633,
+      "runtime_captures": 524
+    }
+  },
+  "provenance": {
+    "clean_weighted": ".glmrt-cache/benchmarks/balanced-architecture-adaptive-weighted-5x-20260729.jsonl",
+    "clean_prefill": ".glmrt-cache/benchmarks/balanced-architecture-prefill-c1-8k-3x-20260729.jsonl",
+    "clean_server": ".glmrt-cache/benchmarks/balanced-architecture-baseline-server-20260729.log",
+    "diagnostic_code": ".glmrt-cache/benchmarks/balanced-architecture-diagnostic-code32-20260729.jsonl",
+    "diagnostic_prefill": ".glmrt-cache/benchmarks/balanced-architecture-diagnostic-prefill-8k-20260729.jsonl",
+    "diagnostic_server": ".glmrt-cache/benchmarks/balanced-architecture-diagnostic-server-20260729.log.zst",
+    "diagnostic_coordinator_trace_lines": "251682..262155",
+    "diagnostic_spark_trace_start_utc": "2026-07-29T03:22:19.871017684Z"
+  }
+}

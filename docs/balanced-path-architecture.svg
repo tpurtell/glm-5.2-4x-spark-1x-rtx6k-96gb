@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1420" viewBox="0 0 1920 1420" role="img" aria-labelledby="title desc">
+<title id="title">GLMRT balanced path architecture</title>
+<desc id="desc">Measured GLMRT balanced inference path.</desc>
+<defs>
+<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="5" stdDeviation="8" flood-opacity=".28"/></filter>
+<marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#46d7e8"/></marker>
+<marker id="arrow-muted" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#91a8bf"/></marker>
+<linearGradient id="coordinator" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#10243a"/><stop offset="1" stop-color="#0d1b2d"/></linearGradient>
+<linearGradient id="spark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#231c43"/><stop offset="1" stop-color="#121c36"/></linearGradient>
+<style>.title{font:700 34px Inter,Segoe UI,sans-serif;fill:#e9f3ff}.subtitle{font:400 16px Inter,Segoe UI,sans-serif;fill:#91a8bf}.section{font:700 20px Inter,Segoe UI,sans-serif;fill:#e9f3ff}.box-title{font:700 16px Inter,Segoe UI,sans-serif;fill:#e9f3ff}.body{font:400 14px Inter,Segoe UI,sans-serif;fill:#b9cde0}.small{font:400 12px Inter,Segoe UI,sans-serif;fill:#91a8bf}.mono{font:500 12px ui-monospace,SFMono-Regular,Consolas,monospace;fill:#b9cde0}.metric{font:700 18px Inter,Segoe UI,sans-serif;fill:#e9f3ff}.metric-label{font:500 11px Inter,Segoe UI,sans-serif;fill:#91a8bf;letter-spacing:.8px}</style>
+</defs>
+<rect width="1920" height="1420" fill="#07111f"/>
+<text x="64" y="58" class="title" text-anchor="start">GLMRT BALANCED PATH</text>
+<text x="64" y="86" class="subtitle" text-anchor="start">Information flow, ownership, residency, kernels, and measured steady-state timing</text>
+<rect x="64" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<text x="81" y="139" class="metric" text-anchor="start" fill="#56d69c">27.87 TPS</text>
+<text x="81" y="161" class="metric-label" text-anchor="start">WEIGHTED ADAPTIVE DECODE</text>
+<rect x="327" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<text x="344" y="139" class="metric" text-anchor="start" fill="#a978ff">78.6%</text>
+<text x="344" y="161" class="metric-label" text-anchor="start">DRAFT ACCEPTANCE</text>
+<rect x="590" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<text x="607" y="139" class="metric" text-anchor="start" fill="#46d7e8">1715 TPS</text>
+<text x="607" y="161" class="metric-label" text-anchor="start">FRESH 8K EXTERNAL</text>
+<rect x="853" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#ffc35a" stroke-width="1.2"/>
+<text x="870" y="139" class="metric" text-anchor="start" fill="#ffc35a">M = 1…8</text>
+<text x="870" y="161" class="metric-label" text-anchor="start">TARGET ROWS / CYCLE</text>
+<rect x="1116" y="112" width="300" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
+<text x="1133" y="139" class="metric" text-anchor="start" fill="#5d8cff">609,536</text>
+<text x="1133" y="161" class="metric-label" text-anchor="start">SHARED TARGET-KV SLOTS</text>
+<rect x="64" y="225" width="265" height="175" rx="14" fill="#10243a" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2" filter="url(#shadow)"/>
+<rect x="64" y="225" width="6" height="175" rx="3" fill="#46d7e8" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<text x="86" y="254" class="box-title" text-anchor="start">OpenAI-compatible client</text>
+<text x="86" y="279" class="body" text-anchor="start">chat / completions / tools / vision</text>
+<text x="86" y="297" class="body" text-anchor="start">HTTP + incremental SSE</text>
+<text x="86" y="315" class="body" text-anchor="start">cancel on broken stream</text>
+<text x="86" y="333" class="body" text-anchor="start">temperature / top-k / top-p</text>
+<rect x="365" y="210" width="1035" height="1080" rx="22" fill="url(#coordinator)" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2" filter="url(#shadow)"/>
+<text x="397" y="252" class="section" text-anchor="start" fill="#5d8cff">RAPTOR · COORDINATOR</text>
+<text x="397" y="278" class="subtitle" text-anchor="start">RTX PRO 6000 Blackwell 96 GiB · Rust scheduler + native/CUDA graphs</text>
+<text x="1365" y="252" class="metric" text-anchor="end" fill="#5d8cff">C≤4</text>
+<text x="1365" y="274" class="metric-label" text-anchor="end">persistent execution lanes</text>
+<rect x="400" y="310" width="435" height="112" rx="14" fill="#10243a" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<rect x="400" y="310" width="6" height="112" rx="3" fill="#46d7e8" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<text x="422" y="339" class="box-title" text-anchor="start">1 · Request ingress</text>
+<text x="422" y="364" class="body" text-anchor="start">parse → tokenize → reserve shared pages</text>
+<text x="422" y="382" class="body" text-anchor="start">radix lookup chooses the uncached suffix</text>
+<text x="422" y="400" class="body" text-anchor="start">scheduler admits one of four resident lanes</text>
+<rect x="870" y="310" width="495" height="112" rx="14" fill="#10243a" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
+<rect x="870" y="310" width="6" height="112" rx="3" fill="#5d8cff" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
+<text x="892" y="339" class="box-title" text-anchor="start">Shared cache ownership</text>
+<text x="892" y="364" class="body" text-anchor="start">target radix: 609,536 × 56,544 B = 32.1 GiB</text>
+<text x="892" y="382" class="body" text-anchor="start">logical request cap 400,000; 64-token pages</text>
+<text x="892" y="400" class="body" text-anchor="start">dSpark tails use a separate bounded host LRU</text>
+<path d="M329,312 L400,350" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<path d="M835,366 L870,366" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<rect x="400" y="457" width="965" height="83" rx="14" fill="#10243a" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<rect x="400" y="457" width="6" height="83" rx="3" fill="#56d69c" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<text x="422" y="486" class="box-title" text-anchor="start">2 · BF16 embedding → 6,144-wide residual stream</text>
+<text x="422" y="511" class="body" text-anchor="start">captured lookup; optional MoonViT rows replace matching text embeddings before layer 0</text>
+<path d="M618,422 L618,457" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<rect x="400" y="580" width="965" height="400" rx="18" fill="#0a1728" fill-opacity="1.0" stroke="#203a55" stroke-width="1.2"/>
+<text x="425" y="616" class="section" text-anchor="start">3 · TARGET TRANSFORMER · 78 SERIAL LAYERS</text>
+<text x="1338" y="615" class="mono" text-anchor="end" fill="#ffc35a">34.6 GiB weights · W8A16 Q-A / Q-B / O</text>
+<rect x="430" y="645" width="905" height="82" rx="14" fill="#102538" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<rect x="430" y="645" width="6" height="82" rx="3" fill="#56d69c" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<text x="452" y="674" class="box-title" text-anchor="start">Layers 0–2 · dense ×3</text>
+<text x="452" y="699" class="body" text-anchor="start">RMSNorm → compressed MLA/DSA attention → W8 O → local dense MLP → residual</text>
+<text x="882" y="758" class="subtitle" text-anchor="middle">⋮  same residual dependency, layer by layer  ⋮</text>
+<rect x="430" y="790" width="905" height="158" rx="14" fill="#121d33" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<rect x="430" y="790" width="6" height="158" rx="3" fill="#a978ff" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<text x="452" y="819" class="box-title" text-anchor="start">Layers 3–77 · routed MoE ×75</text>
+<rect x="456" y="838" width="260" height="84" rx="14" fill="#0d2632" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<rect x="456" y="838" width="6" height="84" rx="3" fill="#46d7e8" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<text x="478" y="867" class="box-title" text-anchor="start">Attention branch</text>
+<text x="478" y="892" class="body" text-anchor="start">Q-A/Q-B → RoPE</text>
+<text x="478" y="910" class="body" text-anchor="start">packed FP8 MLA + DSA top-k</text>
+<rect x="741" y="838" width="205" height="84" rx="14" fill="#2a2318" fill-opacity="1.0" stroke="#ffc35a" stroke-width="1.2"/>
+<rect x="741" y="838" width="6" height="84" rx="3" fill="#ffc35a" fill-opacity="1.0" stroke="#ffc35a" stroke-width="1.2"/>
+<text x="763" y="867" class="box-title" text-anchor="start">Local MoE work</text>
+<text x="763" y="892" class="body" text-anchor="start">shared MLP + router</text>
+<text x="763" y="910" class="body" text-anchor="start">top-8 of 256 experts</text>
+<rect x="971" y="838" width="330" height="84" rx="14" fill="#211b39" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<rect x="971" y="838" width="6" height="84" rx="3" fill="#a978ff" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<text x="993" y="867" class="box-title" text-anchor="start">Remote routed experts</text>
+<text x="993" y="892" class="body" text-anchor="start">compact rows → four Sparks → reduce</text>
+<text x="993" y="910" class="body" text-anchor="start">BF16 owner delta → residual</text>
+<path d="M716,879 L741,879" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<path d="M946,879 L971,879" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<text x="450" y="966" class="mono" text-anchor="start" fill="#56d69c">Clean target-cycle medians: M1≈47.4 ms · M2 72.1 · M3 90.8 · M4 101.7 · M8 147.8</text>
+<path d="M882,540 L882,580" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<rect x="400" y="1025" width="452" height="205" rx="14" fill="#10243a" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<rect x="400" y="1025" width="6" height="205" rx="3" fill="#a978ff" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<text x="422" y="1054" class="box-title" text-anchor="start">4A · RedHat dSpark controller</text>
+<text x="422" y="1079" class="body" text-anchor="start">target residual taps: 2 / 20 / 39 / 58 / 75</text>
+<text x="422" y="1097" class="body" text-anchor="start">3 BF16 draft layers; native 2K sliding window</text>
+<text x="422" y="1115" class="body" text-anchor="start">2383 MiB weights + 408 MiB GPU KV</text>
+<text x="422" y="1133" class="body" text-anchor="start">request-local confidence residuals + joint cost model</text>
+<text x="422" y="1151" class="body" text-anchor="start">propose D=0…7 → target physical M=D+1</text>
+<rect x="885" y="1025" width="480" height="205" rx="14" fill="#10243a" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<rect x="885" y="1025" width="6" height="205" rx="3" fill="#56d69c" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<text x="907" y="1054" class="box-title" text-anchor="start">4B · Terminal score + commit</text>
+<text x="907" y="1079" class="body" text-anchor="start">one batched final norm + full BF16 LM head</text>
+<text x="907" y="1097" class="body" text-anchor="start">greedy or sampled target rows</text>
+<text x="907" y="1115" class="body" text-anchor="start">accept matching draft prefix; emit 1…M tokens</text>
+<text x="907" y="1133" class="body" text-anchor="start">publish target radix pages + reusable dSpark tail</text>
+<text x="907" y="1151" class="body" text-anchor="start">measured 2.643 emitted/spec cycle</text>
+<path d="M565,980 C565,1000 625,1000 625,1025" fill="none" stroke="#a978ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<path d="M852,1124 L885,1124" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<path d="M1125,1025 C1125,995 1010,996 1010,980" fill="none" stroke="#56d69c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<path d="M1125,1230 C1125,1260 615,1260 615,1230" fill="none" stroke="#a978ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+<text x="870" y="1277" class="small" text-anchor="middle">next recurrent cycle: accepted rows advance both caches</text>
+<rect x="1440" y="210" width="420" height="1080" rx="22" fill="url(#spark)" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2" filter="url(#shadow)"/>
+<text x="1472" y="252" class="section" text-anchor="start" fill="#a978ff">SPARK EXPERT FABRIC</text>
+<text x="1472" y="278" class="subtitle" text-anchor="start">four GB10 / sm_121 expert appliances</text>
+<text x="1472" y="315" class="box-title" text-anchor="start">ProtocolV2 verbs-host</text>
+<text x="1472" y="338" class="small" text-anchor="start">four persistent QP / buffer / graph lanes per Spark</text>
+<rect x="1472" y="375" width="356" height="150" rx="14" fill="#171d35" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<rect x="1472" y="375" width="6" height="150" rx="3" fill="#46d7e8" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
+<text x="1494" y="404" class="box-title" text-anchor="start">spark-0 · ostrich</text>
+<text x="1494" y="429" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
+<text x="1494" y="447" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
+<text x="1494" y="465" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="483" class="body" text-anchor="start">expert-local FP32 accumulation</text>
+<rect x="1472" y="565" width="356" height="150" rx="14" fill="#171d35" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
+<rect x="1472" y="565" width="6" height="150" rx="3" fill="#5d8cff" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
+<text x="1494" y="594" class="box-title" text-anchor="start">spark-1 · dodo</text>
+<text x="1494" y="619" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
+<text x="1494" y="637" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
+<text x="1494" y="655" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="673" class="body" text-anchor="start">expert-local FP32 accumulation</text>
+<rect x="1472" y="755" width="356" height="150" rx="14" fill="#171d35" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<rect x="1472" y="755" width="6" height="150" rx="3" fill="#a978ff" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
+<text x="1494" y="784" class="box-title" text-anchor="start">spark-2 · emu</text>
+<text x="1494" y="809" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
+<text x="1494" y="827" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
+<text x="1494" y="845" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="863" class="body" text-anchor="start">expert-local FP32 accumulation</text>
+<rect x="1472" y="945" width="356" height="150" rx="14" fill="#171d35" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<rect x="1472" y="945" width="6" height="150" rx="3" fill="#56d69c" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
+<text x="1494" y="974" class="box-title" text-anchor="start">spark-3 · kiwi</text>
+<text x="1494" y="999" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
+<text x="1494" y="1017" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
+<text x="1494" y="1035" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="1053" class="body" text-anchor="start">expert-local FP32 accumulation</text>
+<path d="M1301,879 C1390,879 1370,545 1472,545" fill="none" stroke="#a978ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<text x="1395" y="706" class="small" text-anchor="middle" fill="#a978ff">top-8 routes</text>
+<path d="M1472,1040 C1385,1040 1410,920 1301,920" fill="none" stroke="#56d69c" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
+<text x="1410" y="1008" class="small" text-anchor="middle" fill="#56d69c">reduced delta</text>
+<rect x="1472" y="1148" width="356" height="96" rx="12" fill="#201d2f" fill-opacity="1.0" stroke="#ffc35a" stroke-width="1.2"/>
+<text x="1492" y="1177" class="box-title" text-anchor="start">Reduction policy</text>
+<text x="1492" y="1200" class="small" text-anchor="start">small rows: direct BF16 response</text>
+<text x="1492" y="1218" class="small" text-anchor="start">≥16 rows: FP8 Spark-RDMA → BF16 owner</text>
+<text x="64" y="1364" class="subtitle" text-anchor="start">Measured on the maintained source tree. Headline timing is uninstrumented; synchronized stage timing is shown in the companion timeline.</text>
+<text x="1856" y="1364" class="mono" text-anchor="end">commit d5a0a367</text>
+</svg>
