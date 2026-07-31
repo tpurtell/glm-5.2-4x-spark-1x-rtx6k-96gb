@@ -151,68 +151,6 @@ pub struct GlmrtNvfp4RouteBatchedMetadata {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-pub struct GlmrtB12xSparkMlpBuffers {
-    pub input: GlmrtDeviceBuffer,
-    pub gate_weight: GlmrtDeviceBuffer,
-    pub gate_scale: GlmrtDeviceBuffer,
-    pub up_weight: GlmrtDeviceBuffer,
-    pub up_scale: GlmrtDeviceBuffer,
-    pub down_weight: GlmrtDeviceBuffer,
-    pub down_scale: GlmrtDeviceBuffer,
-    pub output: GlmrtDeviceBuffer,
-    pub input_packed: GlmrtDeviceBuffer,
-    pub input_scale: GlmrtDeviceBuffer,
-    pub gate_output: GlmrtDeviceBuffer,
-    pub up_output: GlmrtDeviceBuffer,
-    pub activation_packed: GlmrtDeviceBuffer,
-    pub activation_scale: GlmrtDeviceBuffer,
-    pub gate_scale_swizzled: GlmrtDeviceBuffer,
-    pub up_scale_swizzled: GlmrtDeviceBuffer,
-    pub down_scale_swizzled: GlmrtDeviceBuffer,
-    pub alphas: GlmrtDeviceBuffer,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GlmrtB12xSparkMoeTp4M1Buffers {
-    pub input_payload: GlmrtDeviceBuffer,
-    pub input_bf16: GlmrtDeviceBuffer,
-    pub w13_weight: GlmrtDeviceBuffer,
-    pub w13_scale: GlmrtDeviceBuffer,
-    pub w1_alphas: GlmrtDeviceBuffer,
-    pub a1_gscale: GlmrtDeviceBuffer,
-    pub a2_gscale: GlmrtDeviceBuffer,
-    pub intermediate: GlmrtDeviceBuffer,
-    pub w2_weight: GlmrtDeviceBuffer,
-    pub w2_scale: GlmrtDeviceBuffer,
-    pub w2_alphas: GlmrtDeviceBuffer,
-    pub topk_ids: GlmrtDeviceBuffer,
-    pub topk_weights: GlmrtDeviceBuffer,
-    pub output: GlmrtDeviceBuffer,
-    pub barrier_count: GlmrtDeviceBuffer,
-    pub barrier_epoch: GlmrtDeviceBuffer,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GlmrtB12xSparkW4a4MoeBuffers {
-    pub input: GlmrtDeviceBuffer,
-    pub topk_ids: GlmrtDeviceBuffer,
-    pub topk_weights: GlmrtDeviceBuffer,
-    pub w13_weight: GlmrtDeviceBuffer,
-    pub w13_scale: GlmrtDeviceBuffer,
-    pub w1_alphas: GlmrtDeviceBuffer,
-    pub a1_gscale: GlmrtDeviceBuffer,
-    pub w2_weight: GlmrtDeviceBuffer,
-    pub w2_scale: GlmrtDeviceBuffer,
-    pub w2_alphas: GlmrtDeviceBuffer,
-    pub a2_gscale: GlmrtDeviceBuffer,
-    pub output: GlmrtDeviceBuffer,
-    pub scratch: GlmrtDeviceBuffer,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
 pub struct GlmrtB12xSparkW4a16MoeBuffers {
     pub input: GlmrtDeviceBuffer,
     pub w13_weight: GlmrtDeviceBuffer,
@@ -231,10 +169,6 @@ pub struct GlmrtB12xSparkW4a16MoeBuffers {
     pub fc1_scratch: GlmrtDeviceBuffer,
     pub fc2_scratch: GlmrtDeviceBuffer,
     pub locks: GlmrtDeviceBuffer,
-    pub micro_w13_global_scale: GlmrtDeviceBuffer,
-    pub micro_w2_global_scale: GlmrtDeviceBuffer,
-    pub barrier_count: GlmrtDeviceBuffer,
-    pub barrier_epoch: GlmrtDeviceBuffer,
 }
 
 #[repr(C)]
@@ -1172,52 +1106,11 @@ type CudaNvfp4SiluGatedMlpRouteBf16GroupedStagedAccumulateF32AsyncFn =
     ) -> GlmrtStatus;
 type CudaB12xSparkAotAvailableFn = unsafe extern "C" fn(out_available: *mut c_int) -> GlmrtStatus;
 type CudaB12xSparkAotInitFn = unsafe extern "C" fn() -> GlmrtStatus;
-type CudaB12xSwizzleScaleAsyncFn = unsafe extern "C" fn(
-    input: GlmrtDeviceBuffer,
-    output: GlmrtDeviceBuffer,
-    rows: usize,
-    scale_cols: usize,
-    cuda_stream: *mut c_void,
-) -> GlmrtStatus;
 type CudaB12xQuantizeBf16Nvfp4RowPayloadAsyncFn = unsafe extern "C" fn(
     input: GlmrtDeviceBuffer,
     payload: GlmrtDeviceBuffer,
     rows: usize,
     hidden_dim: usize,
-    cuda_stream: *mut c_void,
-) -> GlmrtStatus;
-type CudaB12xPrepareNvfp4RowPayloadAsyncFn = unsafe extern "C" fn(
-    payload: GlmrtDeviceBuffer,
-    source_rows: usize,
-    source_row_stride_bytes: usize,
-    row_indices: GlmrtDeviceBuffer,
-    input_packed: GlmrtDeviceBuffer,
-    input_scale: GlmrtDeviceBuffer,
-    rows: usize,
-    hidden_dim: usize,
-    cuda_stream: *mut c_void,
-) -> GlmrtStatus;
-type CudaB12xSparkMlpAsyncFn = unsafe extern "C" fn(
-    buffers: *const GlmrtB12xSparkMlpBuffers,
-    rows: usize,
-    hidden_dim: usize,
-    intermediate_dim: usize,
-    output_dim: usize,
-    gate_scale_2: f32,
-    up_scale_2: f32,
-    down_scale_2: f32,
-    cuda_stream: *mut c_void,
-) -> GlmrtStatus;
-type CudaB12xSparkMoeTp4M1Nvfp4AsyncFn = unsafe extern "C" fn(
-    buffers: *const GlmrtB12xSparkMoeTp4M1Buffers,
-    input_payload_stride_bytes: usize,
-    cuda_stream: *mut c_void,
-) -> GlmrtStatus;
-type CudaB12xSparkW4a4PrefillTopk8Nvfp4AsyncFn = unsafe extern "C" fn(
-    buffers: *const GlmrtB12xSparkW4a4MoeBuffers,
-    input_payload: GlmrtDeviceBuffer,
-    input_payload_stride_bytes: usize,
-    rows: usize,
     cuda_stream: *mut c_void,
 ) -> GlmrtStatus;
 type CudaB12xW4a16PackWeightAsyncFn = unsafe extern "C" fn(
@@ -1265,24 +1158,6 @@ type CudaQuantizeBf16WeightNvfp4AsyncFn = unsafe extern "C" fn(
     rows: usize,
     cols: usize,
     global_scale: f32,
-    cuda_stream: *mut c_void,
-) -> GlmrtStatus;
-type CudaSparkInferSourceW4a16Topk8Nvfp4AsyncFn = unsafe extern "C" fn(
-    buffers: *const GlmrtB12xSparkW4a16MoeBuffers,
-    input_payload: GlmrtDeviceBuffer,
-    input_payload_stride_bytes: usize,
-    topk_ids: GlmrtDeviceBuffer,
-    rows: usize,
-    cuda_stream: *mut c_void,
-) -> GlmrtStatus;
-type CudaSparkInferSourceW4a16Topk8Nvfp4Fp8AsyncFn = unsafe extern "C" fn(
-    buffers: *const GlmrtB12xSparkW4a16MoeBuffers,
-    input_payload: GlmrtDeviceBuffer,
-    input_payload_stride_bytes: usize,
-    topk_ids: GlmrtDeviceBuffer,
-    rows: usize,
-    output_fp8: GlmrtDeviceBuffer,
-    output_fp8_row_stride_bytes: usize,
     cuda_stream: *mut c_void,
 ) -> GlmrtStatus;
 type CudaB12xGatherNvfp4RowsBf16AsyncFn = unsafe extern "C" fn(
@@ -5817,20 +5692,6 @@ impl NativeLibrary {
         self.status_to_result("glmrt_cuda_b12x_spark_aot_init", status)
     }
 
-    pub unsafe fn cuda_b12x_swizzle_scale_async(
-        &self,
-        input: GlmrtDeviceBuffer,
-        output: GlmrtDeviceBuffer,
-        rows: usize,
-        scale_cols: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaB12xSwizzleScaleAsyncFn> =
-            unsafe { self.lib.get(b"glmrt_cuda_b12x_swizzle_scale_async")? };
-        let status = unsafe { kernel_fn(input, output, rows, scale_cols, cuda_stream) };
-        self.status_to_result("glmrt_cuda_b12x_swizzle_scale_async", status)
-    }
-
     pub unsafe fn cuda_b12x_quantize_bf16_nvfp4_row_payload_async(
         &self,
         input: GlmrtDeviceBuffer,
@@ -5848,117 +5709,6 @@ impl NativeLibrary {
             "glmrt_cuda_b12x_quantize_bf16_nvfp4_row_payload_async",
             status,
         )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn cuda_b12x_prepare_nvfp4_row_payload_async(
-        &self,
-        payload: GlmrtDeviceBuffer,
-        source_rows: usize,
-        source_row_stride_bytes: usize,
-        row_indices: GlmrtDeviceBuffer,
-        input_packed: GlmrtDeviceBuffer,
-        input_scale: GlmrtDeviceBuffer,
-        rows: usize,
-        hidden_dim: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaB12xPrepareNvfp4RowPayloadAsyncFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_b12x_prepare_nvfp4_row_payload_async")?
-        };
-        let status = unsafe {
-            kernel_fn(
-                payload,
-                source_rows,
-                source_row_stride_bytes,
-                row_indices,
-                input_packed,
-                input_scale,
-                rows,
-                hidden_dim,
-                cuda_stream,
-            )
-        };
-        self.status_to_result("glmrt_cuda_b12x_prepare_nvfp4_row_payload_async", status)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn cuda_b12x_spark_mlp_async(
-        &self,
-        buffers: &GlmrtB12xSparkMlpBuffers,
-        rows: usize,
-        hidden_dim: usize,
-        intermediate_dim: usize,
-        output_dim: usize,
-        gate_scale_2: f32,
-        up_scale_2: f32,
-        down_scale_2: f32,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaB12xSparkMlpAsyncFn> =
-            unsafe { self.lib.get(b"glmrt_cuda_b12x_spark_mlp_async")? };
-        let status = unsafe {
-            kernel_fn(
-                buffers,
-                rows,
-                hidden_dim,
-                intermediate_dim,
-                output_dim,
-                gate_scale_2,
-                up_scale_2,
-                down_scale_2,
-                cuda_stream,
-            )
-        };
-        self.status_to_result("glmrt_cuda_b12x_spark_mlp_async", status)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn cuda_b12x_spark_mlp_prequantized_async(
-        &self,
-        buffers: &GlmrtB12xSparkMlpBuffers,
-        rows: usize,
-        hidden_dim: usize,
-        intermediate_dim: usize,
-        output_dim: usize,
-        gate_scale_2: f32,
-        up_scale_2: f32,
-        down_scale_2: f32,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaB12xSparkMlpAsyncFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_b12x_spark_mlp_prequantized_async")?
-        };
-        let status = unsafe {
-            kernel_fn(
-                buffers,
-                rows,
-                hidden_dim,
-                intermediate_dim,
-                output_dim,
-                gate_scale_2,
-                up_scale_2,
-                down_scale_2,
-                cuda_stream,
-            )
-        };
-        self.status_to_result("glmrt_cuda_b12x_spark_mlp_prequantized_async", status)
-    }
-
-    pub unsafe fn cuda_b12x_spark_moe_tp4_m1_nvfp4_async(
-        &self,
-        buffers: &GlmrtB12xSparkMoeTp4M1Buffers,
-        input_payload_stride_bytes: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaB12xSparkMoeTp4M1Nvfp4AsyncFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_b12x_spark_moe_tp4_m1_nvfp4_async")?
-        };
-        let status = unsafe { kernel_fn(buffers, input_payload_stride_bytes, cuda_stream) };
-        self.status_to_result("glmrt_cuda_b12x_spark_moe_tp4_m1_nvfp4_async", status)
     }
 
     pub unsafe fn cuda_b12x_w4a16_pack_weight_async(
@@ -6114,81 +5864,6 @@ impl NativeLibrary {
         let status =
             unsafe { kernel_fn(input, packed, scales, rows, cols, global_scale, cuda_stream) };
         self.status_to_result("glmrt_cuda_quantize_bf16_weight_nvfp4_async", status)
-    }
-
-    pub fn cuda_sparkinfer_source_w4a16_aot_available(&self) -> Result<bool> {
-        let available_fn: Symbol<CudaB12xSparkAotAvailableFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_sparkinfer_source_w4a16_aot_available")?
-        };
-        let mut available = 0;
-        let status = unsafe { available_fn(&mut available) };
-        self.status_to_result("glmrt_cuda_sparkinfer_source_w4a16_aot_available", status)?;
-        Ok(available != 0)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn cuda_sparkinfer_source_w4a16_topk8_nvfp4_async(
-        &self,
-        buffers: &GlmrtB12xSparkW4a16MoeBuffers,
-        input_payload: GlmrtDeviceBuffer,
-        input_payload_stride_bytes: usize,
-        topk_ids: GlmrtDeviceBuffer,
-        rows: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaSparkInferSourceW4a16Topk8Nvfp4AsyncFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_sparkinfer_source_w4a16_topk8_nvfp4_async")?
-        };
-        let status = unsafe {
-            kernel_fn(
-                buffers,
-                input_payload,
-                input_payload_stride_bytes,
-                topk_ids,
-                rows,
-                cuda_stream,
-            )
-        };
-        self.status_to_result(
-            "glmrt_cuda_sparkinfer_source_w4a16_topk8_nvfp4_async",
-            status,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn cuda_sparkinfer_source_w4a16_topk8_nvfp4_fp8_async(
-        &self,
-        buffers: &GlmrtB12xSparkW4a16MoeBuffers,
-        input_payload: GlmrtDeviceBuffer,
-        input_payload_stride_bytes: usize,
-        topk_ids: GlmrtDeviceBuffer,
-        rows: usize,
-        output_fp8: GlmrtDeviceBuffer,
-        output_fp8_row_stride_bytes: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaSparkInferSourceW4a16Topk8Nvfp4Fp8AsyncFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_sparkinfer_source_w4a16_topk8_nvfp4_fp8_async")?
-        };
-        let status = unsafe {
-            kernel_fn(
-                buffers,
-                input_payload,
-                input_payload_stride_bytes,
-                topk_ids,
-                rows,
-                output_fp8,
-                output_fp8_row_stride_bytes,
-                cuda_stream,
-            )
-        };
-        self.status_to_result(
-            "glmrt_cuda_sparkinfer_source_w4a16_topk8_nvfp4_fp8_async",
-            status,
-        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6352,60 +6027,6 @@ impl NativeLibrary {
         };
         self.status_to_result(
             "glmrt_cuda_b12x_spark_w4a16_m1_parity_grouped_wide_m2_8_nvfp4_async",
-            status,
-        )
-    }
-
-    pub unsafe fn cuda_b12x_spark_w4a16_modelopt_decode_m1_nvfp4_async(
-        &self,
-        buffers: &GlmrtB12xSparkW4a16MoeBuffers,
-        input_payload: GlmrtDeviceBuffer,
-        input_payload_stride_bytes: usize,
-        topk_ids: GlmrtDeviceBuffer,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaB12xSparkW4a16DecodeM1Nvfp4AsyncFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_b12x_spark_w4a16_modelopt_decode_m1_nvfp4_async")?
-        };
-        let status = unsafe {
-            kernel_fn(
-                buffers,
-                input_payload,
-                input_payload_stride_bytes,
-                topk_ids,
-                cuda_stream,
-            )
-        };
-        self.status_to_result(
-            "glmrt_cuda_b12x_spark_w4a16_modelopt_decode_m1_nvfp4_async",
-            status,
-        )
-    }
-
-    pub unsafe fn cuda_b12x_spark_w4a4_prefill_topk8_nvfp4_async(
-        &self,
-        buffers: &GlmrtB12xSparkW4a4MoeBuffers,
-        input_payload: GlmrtDeviceBuffer,
-        input_payload_stride_bytes: usize,
-        rows: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let kernel_fn: Symbol<CudaB12xSparkW4a4PrefillTopk8Nvfp4AsyncFn> = unsafe {
-            self.lib
-                .get(b"glmrt_cuda_b12x_spark_w4a4_prefill_topk8_nvfp4_async")?
-        };
-        let status = unsafe {
-            kernel_fn(
-                buffers,
-                input_payload,
-                input_payload_stride_bytes,
-                rows,
-                cuda_stream,
-            )
-        };
-        self.status_to_result(
-            "glmrt_cuda_b12x_spark_w4a4_prefill_topk8_nvfp4_async",
             status,
         )
     }

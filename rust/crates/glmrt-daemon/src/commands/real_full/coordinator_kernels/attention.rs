@@ -1,7 +1,8 @@
 use super::*;
 use crate::python_graph_capture::{
     attention_python_capture_enabled, coordinator_python_capture_enabled,
-    coordinator_python_capture_startup_open, launch_python_graph_capture, PythonDeviceBufferArg,
+    coordinator_python_capture_startup_open, launch_python_graph_capture,
+    query_python_bool_during_startup, PythonBoolQuery, PythonDeviceBufferArg,
     PythonGraphCaptureLaunch, PythonKernelArg,
 };
 use anyhow::{Context, Result};
@@ -99,6 +100,12 @@ const SPARKINFER_NVFP4_MLA_DECODE_PREPARE_FUNCTION: &str = "prepare_sparkinfer_n
 const SPARKINFER_NVFP4_MLA_DECODE_CAPTURE_FUNCTION: &str = "capture_sparkinfer_nvfp4_mla_decode";
 const SPARKINFER_NVFP4_MLA_PREFILL_PREPARE_FUNCTION: &str = "prepare_sparkinfer_nvfp4_mla_prefill";
 const SPARKINFER_NVFP4_MLA_PREFILL_CAPTURE_FUNCTION: &str = "capture_sparkinfer_nvfp4_mla_prefill";
+const SPARKINFER_GLM_H64_QUERY_PLAN_FUNCTION: &str =
+    "plan_sparkinfer_glm_h64_bf16_query_projection";
+const SPARKINFER_GLM_H64_QUERY_PREPARE_FUNCTION: &str =
+    "prepare_sparkinfer_glm_h64_bf16_query_projection";
+const SPARKINFER_GLM_H64_QUERY_CAPTURE_FUNCTION: &str =
+    "capture_sparkinfer_glm_h64_bf16_query_projection";
 const FLASHINFER_SINGLE_PREFILL_TMP_BYTES: usize = 32 * 1024 * 1024;
 const FLASHINFER_CUDNN_PREFILL_TMP_BYTES: usize = 128 * 1024 * 1024;
 const FLASHINFER_MLA_SUFFIX_QUERY_FLOOR_ROWS: usize = 512;
@@ -120,6 +127,68 @@ const GLM_DSA_PREFILL_QUERY_BUCKETS: [usize; 10] = [1, 8, 16, 32, 64, 128, 256, 
 const GLM_DSA_NVFP4_QUERY_BUCKETS: [usize; 12] =
     [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024, 2_048];
 pub(in crate::commands::real_full) const GLM_DSA_PREFILL_MAX_QUERY_ROWS: usize = 2_048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SparkinferGlmH64QueryPlanKey {
+    query_rows: usize,
+    heads: usize,
+    nope_dim: usize,
+    latent_dim: usize,
+    device_id: i32,
+}
+
+const fn sparkinfer_glm_h64_packed_decode_candidate(query_rows: usize) -> bool {
+    query_rows >= 2 && query_rows <= FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS
+}
+
+fn use_sparkinfer_glm_h64_packed_decode_query_projection(
+    query_rows: usize,
+    heads: usize,
+    nope_dim: usize,
+    latent_dim: usize,
+    device_id: i32,
+) -> Result<bool> {
+    static PLANS: OnceLock<Mutex<HashMap<SparkinferGlmH64QueryPlanKey, bool>>> = OnceLock::new();
+
+    // H64 is qualified only for packed decode M=2..16. Returning before the
+    // Python policy query keeps M=1 and every non-decode caller on the native
+    // route regardless of auto/force policy.
+    if !sparkinfer_glm_h64_packed_decode_candidate(query_rows) {
+        return Ok(false);
+    }
+    let key = SparkinferGlmH64QueryPlanKey {
+        query_rows,
+        heads,
+        nope_dim,
+        latent_dim,
+        device_id,
+    };
+    let plans = PLANS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut plans = plans
+        .lock()
+        .map_err(|_| anyhow::anyhow!("SparkInfer GLM H64 query planner cache is poisoned"))?;
+    if let Some(use_sparkinfer) = plans.get(&key) {
+        return Ok(*use_sparkinfer);
+    }
+    let kwargs = [
+        ("workload", PythonKernelArg::Str("packed_decode")),
+        ("query_rows", PythonKernelArg::Usize(query_rows)),
+        ("heads", PythonKernelArg::Usize(heads)),
+        ("nope_dim", PythonKernelArg::Usize(nope_dim)),
+        ("latent_dim", PythonKernelArg::Usize(latent_dim)),
+        ("device_id", PythonKernelArg::I64(i64::from(device_id))),
+    ];
+    let use_sparkinfer = query_python_bool_during_startup(PythonBoolQuery {
+        module: B12X_MLA_CAPTURE_MODULE,
+        function: SPARKINFER_GLM_H64_QUERY_PLAN_FUNCTION,
+        kwargs: &kwargs,
+    })
+    .with_context(|| {
+        format!("planning GLM H64 BF16 query projection workload=packed_decode M={query_rows}")
+    })?;
+    plans.insert(key, use_sparkinfer);
+    Ok(use_sparkinfer)
+}
 // One million physical tokens leaves room above the planned 600K shared pool.
 // The paged-tiled selector's scratch is bounded by its 32K K supertile rather
 // than total cache pages; q=2048 still needs 369,116,160 bytes at 600K.
@@ -143,7 +212,7 @@ const W8A16_ASYNC_ATTENTION_ENV: &str = "GLMRT_COORDINATOR_W8A16_ASYNC_ATTENTION
 const PACKED_FP8_MLA_DIRECT_HIDDEN_OUTPUT_ENV: &str =
     "GLMRT_REAL_FULL_PACKED_FP8_MLA_DIRECT_HIDDEN_OUTPUT";
 
-fn glm_dsa_sparse_mla_attention_topk(
+pub(in crate::commands::real_full) fn glm_dsa_sparse_mla_attention_topk(
     kv_dtype: KvCacheDType,
     query_bucket_rows: usize,
     total_rows: usize,
@@ -160,7 +229,10 @@ fn glm_dsa_sparse_mla_attention_topk(
         .unwrap_or(GLM_DSA_PREFILL_TOPK)
 }
 
-fn glm_dsa_sparse_mla_query_bucket(kv_dtype: KvCacheDType, query_rows: usize) -> Option<usize> {
+pub(in crate::commands::real_full) fn glm_dsa_sparse_mla_query_bucket(
+    kv_dtype: KvCacheDType,
+    query_rows: usize,
+) -> Option<usize> {
     let buckets = if matches!(kv_dtype, KvCacheDType::Bf16 | KvCacheDType::Nvfp4) {
         GLM_DSA_NVFP4_QUERY_BUCKETS.as_slice()
     } else {
@@ -168,6 +240,88 @@ fn glm_dsa_sparse_mla_query_bucket(kv_dtype: KvCacheDType, query_rows: usize) ->
     };
     buckets.iter().copied().find(|bucket| query_rows <= *bucket)
 }
+
+pub(in crate::commands::real_full) fn audit_glm_dsa_nvfp4_short_k_prefill_graph_retention(
+    query_rows: usize,
+    sparse_topk: usize,
+) -> Result<()> {
+    const HEADS: usize = 64;
+    const NOPE_DIM: usize = 192;
+    const ROPE_DIM: usize = 64;
+    let attention_scale = ((NOPE_DIM + ROPE_DIM) as f32).sqrt().recip();
+
+    anyhow::ensure!(
+        glm_dsa_sparse_mla_query_bucket(KvCacheDType::Nvfp4, query_rows) == Some(query_rows),
+        "NVFP4 short-K retention audit requires an exact query bucket, got {query_rows}"
+    );
+    anyhow::ensure!(
+        matches!(sparse_topk, 128 | 512 | 1_024 | 2_048),
+        "NVFP4 short-K retention audit does not recognize sparse top-K {sparse_topk}"
+    );
+    let max_pages = GLM_DSA_SPARSE_MLA_PREFILL_WORKSPACE.with(|workspace| {
+        let workspace = workspace
+            .try_borrow()
+            .map_err(|_| anyhow::anyhow!("GLM DSA sparse MLA workspace is already borrowed"))?;
+        anyhow::ensure!(
+            workspace.initialized,
+            "GLM DSA sparse MLA workspace was not initialized before retention audit"
+        );
+        Ok::<_, anyhow::Error>(workspace.max_pages)
+    })?;
+    let signature = CoordinatorCudaGraphSignature::glm_dsa_sparse_mla_prefill(
+        query_rows,
+        HEADS,
+        GLM52_MLA_KV_LORA_RANK,
+        ROPE_DIM,
+        sparse_topk,
+        max_pages,
+        attention_scale,
+        false,
+    );
+    let expected_full_identities = (0..GLM52_NUM_HIDDEN_LAYERS)
+        .filter(|layer_id| {
+            glm_dsa_index_source_layer(*layer_id).is_some_and(|(_, full_indexer)| full_indexer)
+        })
+        .count();
+    let expected_shared_identities = (0..GLM52_NUM_HIDDEN_LAYERS)
+        .filter(|layer_id| {
+            glm_dsa_index_source_layer(*layer_id).is_some_and(|(_, full_indexer)| !full_indexer)
+        })
+        .count();
+    let graph_key = coord_attention_graph_key_for_layer_rows(0, query_rows)?;
+    with_coordinator_cuda_graph_slot(&graph_key, |_library, slot| {
+        let retained_full_identities = slot
+            .captured_graphs
+            .iter()
+            .filter(|entry| {
+                entry.program == CoordinatorCudaGraphProgram::LayerGlmDsaSparseMlaPrefillFull
+                    && entry.signature == signature
+            })
+            .count();
+        let retained_shared_identities = slot
+            .captured_graphs
+            .iter()
+            .filter(|entry| {
+                entry.program == CoordinatorCudaGraphProgram::LayerGlmDsaSparseMlaPrefillShared
+                    && entry.signature == signature
+            })
+            .count();
+        anyhow::ensure!(
+            retained_full_identities >= expected_full_identities
+                && retained_shared_identities >= expected_shared_identities,
+            "NVFP4 short-K prefill graphs were invalidated by an outer startup recapture: query_bucket={query_rows} sparse_topk={sparse_topk} retained_full_identity_count={retained_full_identities} expected_full_identity_count={expected_full_identities} retained_shared_identity_count={retained_shared_identities} expected_shared_identity_count={expected_shared_identities}"
+        );
+        eprintln!(
+            "real_full_startup_graph_retention_audit backend=nvfp4 stage=post-outer-recapture query_bucket={} sparse_topk={} retained_full_identity_count={} retained_shared_identity_count={}",
+            query_rows,
+            sparse_topk,
+            retained_full_identities,
+            retained_shared_identities,
+        );
+        Ok(())
+    })
+}
+
 const GLMRT_B12X_MLA_MODULE_ENV: &str = "GLMRT_B12X_MLA_MODULE";
 const GLMRT_B12X_MLA_FUNCTION_ENV: &str = "GLMRT_B12X_MLA_FUNCTION";
 
@@ -4347,7 +4501,18 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
             weight_head_stride,
             combined_query_row_bytes,
         };
-        let capture_identity = flashinfer_packed_fp8_mla_capture_identity(full_graph_buffers);
+        let use_sparkinfer_h64_query_projection =
+            use_sparkinfer_glm_h64_packed_decode_query_projection(
+                query_rows,
+                heads,
+                nope_dim,
+                rank,
+                kv_b_weight.device_id,
+            )?;
+        let capture_identity = flashinfer_packed_fp8_mla_capture_identity(
+            full_graph_buffers,
+            use_sparkinfer_h64_query_projection,
+        );
         if coordinator_python_capture_startup_open() {
             if query_rows == 1 {
                 ensure_flashinfer_packed_fp8_mla_decode_graphs(
@@ -4363,11 +4528,14 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                     } else {
                         0
                     },
+                    use_sparkinfer_h64_query_projection,
                     capture_identity,
                 )?;
                 if let Some(stable_graph_buffers) = stable_one_row_graph_buffers {
-                    let stable_capture_identity =
-                        flashinfer_packed_fp8_mla_capture_identity(stable_graph_buffers);
+                    let stable_capture_identity = flashinfer_packed_fp8_mla_capture_identity(
+                        stable_graph_buffers,
+                        use_sparkinfer_h64_query_projection,
+                    );
                     ensure_flashinfer_packed_fp8_mla_decode_graphs(
                         library,
                         slot,
@@ -4381,6 +4549,7 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                         } else {
                             0
                         },
+                        use_sparkinfer_h64_query_projection,
                         stable_capture_identity,
                     )?;
                 }
@@ -4415,7 +4584,11 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                         rows,
                         true,
                         0,
-                        flashinfer_packed_fp8_mla_capture_identity(staged_graph_buffers),
+                        use_sparkinfer_h64_query_projection,
+                        flashinfer_packed_fp8_mla_capture_identity(
+                            staged_graph_buffers,
+                            use_sparkinfer_h64_query_projection,
+                        ),
                     )?;
                 }
             } else {
@@ -4439,6 +4612,14 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                     hidden_projection_w8a16_packed_o: None,
                     ..full_graph_buffers
                 };
+                let one_row_use_sparkinfer_h64_query_projection =
+                    use_sparkinfer_glm_h64_packed_decode_query_projection(
+                        1,
+                        heads,
+                        nope_dim,
+                        rank,
+                        kv_b_weight.device_id,
+                    )?;
                 ensure_flashinfer_packed_fp8_mla_decode_graphs(
                     library,
                     slot,
@@ -4455,7 +4636,11 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                     } else {
                         0
                     },
-                    flashinfer_packed_fp8_mla_capture_identity(one_row_graph_buffers),
+                    one_row_use_sparkinfer_h64_query_projection,
+                    flashinfer_packed_fp8_mla_capture_identity(
+                        one_row_graph_buffers,
+                        one_row_use_sparkinfer_h64_query_projection,
+                    ),
                 )?;
             }
 
@@ -4486,8 +4671,18 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                         .flatten(),
                     ..batched_graph_buffers
                 };
-                let batched_capture_identity =
-                    flashinfer_packed_fp8_mla_capture_identity(capture_graph_buffers);
+                let batched_use_sparkinfer_h64_query_projection =
+                    use_sparkinfer_glm_h64_packed_decode_query_projection(
+                        capture_query_rows,
+                        heads,
+                        nope_dim,
+                        rank,
+                        kv_b_weight.device_id,
+                    )?;
+                let batched_capture_identity = flashinfer_packed_fp8_mla_capture_identity(
+                    capture_graph_buffers,
+                    batched_use_sparkinfer_h64_query_projection,
+                );
                 ensure_flashinfer_packed_fp8_mla_decode_graphs(
                     library,
                     slot,
@@ -4504,6 +4699,7 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                     } else {
                         0
                     },
+                    batched_use_sparkinfer_h64_query_projection,
                     batched_capture_identity,
                 )?;
             }
@@ -4602,7 +4798,10 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                 )
             } else if let Some(stable_graph_buffers) = stable_one_row_graph_buffers {
                 (
-                    flashinfer_packed_fp8_mla_capture_identity(stable_graph_buffers),
+                    flashinfer_packed_fp8_mla_capture_identity(
+                        stable_graph_buffers,
+                        use_sparkinfer_h64_query_projection,
+                    ),
                     stable_graph_buffers.hidden_projection,
                     requested_hidden_projection_output,
                 )
@@ -6448,6 +6647,57 @@ fn glm_dsa_sparse_mla_python_buffers(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
+fn launch_sparkinfer_glm_h64_query_projection(
+    function: &'static str,
+    cuda_stream: *mut c_void,
+    q_nope: GlmrtDeviceBuffer,
+    weight: GlmrtDeviceBuffer,
+    q_pe: GlmrtDeviceBuffer,
+    out: GlmrtDeviceBuffer,
+    query_rows: usize,
+    heads: usize,
+    nope_dim: usize,
+    rope_dim: usize,
+    latent_dim: usize,
+    weight_head_stride: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        latent_dim > 0 && weight_head_stride % latent_dim == 0,
+        "GLM H64 query weight head stride {weight_head_stride} is not divisible by latent dim {latent_dim}"
+    );
+    let weight_head_width = weight_head_stride / latent_dim;
+    let python_buffers = [
+        python_device_buffer_arg("q_nope", q_nope),
+        python_device_buffer_arg("weight", weight),
+        python_device_buffer_arg("q_pe", q_pe),
+        python_device_buffer_arg("out", out),
+    ];
+    let kwargs = [
+        ("query_rows", PythonKernelArg::Usize(query_rows)),
+        ("heads", PythonKernelArg::Usize(heads)),
+        ("nope_dim", PythonKernelArg::Usize(nope_dim)),
+        ("rope_dim", PythonKernelArg::Usize(rope_dim)),
+        ("latent_dim", PythonKernelArg::Usize(latent_dim)),
+        (
+            "weight_head_width",
+            PythonKernelArg::Usize(weight_head_width),
+        ),
+    ];
+    launch_python_graph_capture(PythonGraphCaptureLaunch {
+        module: B12X_MLA_CAPTURE_MODULE,
+        function,
+        cuda_stream,
+        buffers: &python_buffers,
+        kwargs: &kwargs,
+    })
+    .with_context(|| {
+        format!(
+            "launching SparkInfer GLM H64 BF16 query projection function={function} M={query_rows}"
+        )
+    })
+}
+
 fn stage_flashinfer_hidden_projection(
     projection: Option<FlashinferMlaHiddenProjection>,
     staging_output: GlmrtDeviceBuffer,
@@ -6476,6 +6726,7 @@ fn ensure_flashinfer_packed_fp8_mla_decode_graphs(
     capture_rows: usize,
     initialize_kv: bool,
     capture_index_base: usize,
+    use_sparkinfer_h64_query_projection: bool,
     capture_identity: usize,
 ) -> Result<()> {
     let query_rows = geometry.query_rows;
@@ -6596,7 +6847,29 @@ fn ensure_flashinfer_packed_fp8_mla_decode_graphs(
                     )
                     .context("initializing packed FP8 MLA physical indices")?;
             }
-            enqueue_flashinfer_packed_fp8_mla_query(library, slot.stream_ptr(), buffers, geometry)?;
+            if use_sparkinfer_h64_query_projection {
+                launch_sparkinfer_glm_h64_query_projection(
+                    SPARKINFER_GLM_H64_QUERY_PREPARE_FUNCTION,
+                    slot.stream_ptr(),
+                    buffers.q_nope,
+                    buffers.kv_b_weight,
+                    buffers.q_rope,
+                    buffers.flashinfer.q,
+                    geometry.query_rows,
+                    geometry.heads,
+                    geometry.nope_dim,
+                    geometry.rope_dim,
+                    geometry.rank,
+                    geometry.weight_head_stride,
+                )?;
+            }
+            enqueue_flashinfer_packed_fp8_mla_query_routed(
+                library,
+                slot.stream_ptr(),
+                buffers,
+                geometry,
+                use_sparkinfer_h64_query_projection,
+            )?;
         }
         launch_python_graph_capture(PythonGraphCaptureLaunch {
             module: B12X_MLA_CAPTURE_MODULE,
@@ -6648,11 +6921,12 @@ fn ensure_flashinfer_packed_fp8_mla_decode_graphs(
                             )
                             .context("capturing packed FP8 MLA physical-index init")?;
                     }
-                    enqueue_flashinfer_packed_fp8_mla_query(
+                    enqueue_flashinfer_packed_fp8_mla_query_routed(
                         library,
                         cuda_stream,
                         buffers,
                         geometry,
+                        use_sparkinfer_h64_query_projection,
                     )?;
                 }
                 launch_python_graph_capture(PythonGraphCaptureLaunch {
@@ -6684,6 +6958,7 @@ fn ensure_flashinfer_packed_fp8_mla_decode_graphs(
 
 fn flashinfer_packed_fp8_mla_capture_identity(
     buffers: FlashinferPackedFp8MlaFullGraphBuffers,
+    use_sparkinfer_h64_query_projection: bool,
 ) -> usize {
     let (hidden_weight, hidden_output) = buffers
         .hidden_projection
@@ -6732,7 +7007,34 @@ fn flashinfer_packed_fp8_mla_capture_identity(
         hidden_w8a16.map_or(0, |w8a16| w8a16.weight.ptr as usize),
         hidden_w8a16.map_or(0, |w8a16| w8a16.scales.ptr as usize),
         hidden_w8a16.map_or(0, |w8a16| usize::from(w8a16.packed_layout)),
+        usize::from(use_sparkinfer_h64_query_projection),
     ])
+}
+
+unsafe fn enqueue_flashinfer_packed_fp8_mla_query_routed(
+    library: &'static NativeLibrary,
+    stream: *mut c_void,
+    buffers: FlashinferPackedFp8MlaFullGraphBuffers,
+    geometry: FlashinferPackedFp8MlaFullGraphGeometry,
+    use_sparkinfer_h64_query_projection: bool,
+) -> Result<()> {
+    if !use_sparkinfer_h64_query_projection {
+        return enqueue_flashinfer_packed_fp8_mla_query(library, stream, buffers, geometry);
+    }
+    launch_sparkinfer_glm_h64_query_projection(
+        SPARKINFER_GLM_H64_QUERY_CAPTURE_FUNCTION,
+        stream,
+        buffers.q_nope,
+        buffers.kv_b_weight,
+        buffers.q_rope,
+        buffers.flashinfer.q,
+        geometry.query_rows,
+        geometry.heads,
+        geometry.nope_dim,
+        geometry.rope_dim,
+        geometry.rank,
+        geometry.weight_head_stride,
+    )
 }
 
 unsafe fn enqueue_flashinfer_packed_fp8_mla_query(
@@ -9371,9 +9673,10 @@ mod flashinfer_capture_shape_tests {
         flashinfer_mla_graph_signature, glm_dsa_index_source_layer,
         glm_dsa_sparse_mla_attention_topk, glm_dsa_sparse_mla_query_bucket, native_library_path,
         native_library_version_has_cuda, parse_flashinfer_cudnn_mla_suffix_query_capacity,
-        stage_flashinfer_hidden_projection, with_coordinator_cuda_graph_slot,
-        CoordinatorCudaGraphProgram, FlashinferGlmDsaSparseMlaPrefillInput,
-        FlashinferMlaCaptureShape, FlashinferMlaHiddenProjection, OwnedCoordinatorDeviceBuffer,
+        sparkinfer_glm_h64_packed_decode_candidate, stage_flashinfer_hidden_projection,
+        with_coordinator_cuda_graph_slot, CoordinatorCudaGraphProgram,
+        FlashinferGlmDsaSparseMlaPrefillInput, FlashinferMlaCaptureShape,
+        FlashinferMlaHiddenProjection, OwnedCoordinatorDeviceBuffer,
         FLASHINFER_PACKED_FP8_MLA_ROW_BYTES, SPARKINFER_GLM_DSA_SPARSE_NVFP4_MLA_BACKEND,
     };
     use crate::commands::real_full::coordinator_kernels::cuda_native_library;
@@ -9384,6 +9687,64 @@ mod flashinfer_capture_shape_tests {
         GLM52_MLA_ROPE_THETA,
     };
     use glmrt_ffi::GlmrtDeviceBuffer;
+
+    #[test]
+    fn sparkinfer_h64_is_confined_to_packed_decode_m2_through_m16() {
+        assert!(!sparkinfer_glm_h64_packed_decode_candidate(0));
+        assert!(!sparkinfer_glm_h64_packed_decode_candidate(1));
+        for query_rows in 2..=16 {
+            assert!(sparkinfer_glm_h64_packed_decode_candidate(query_rows));
+        }
+        assert!(!sparkinfer_glm_h64_packed_decode_candidate(17));
+        assert!(!sparkinfer_glm_h64_packed_decode_candidate(2_048));
+    }
+
+    #[test]
+    fn sparkinfer_h64_policy_cannot_change_the_native_prefill_graph_path() {
+        let source = include_str!("attention.rs");
+        let prefill_entry = source_between(
+            source,
+            "pub(in crate::commands::real_full) fn flashinfer_glm_dsa_sparse_mla_prefill_device_buffers(",
+            "\nfn glm_dsa_output_validate_enabled(",
+        );
+        let capture_identity = source_between(
+            source,
+            "\nfn glm_dsa_sparse_mla_capture_identity(",
+            "\nfn ensure_glm_dsa_sparse_mla_prefill_graph(",
+        );
+        let graph_builder = source_between(
+            source,
+            "\nfn ensure_glm_dsa_sparse_mla_prefill_graph(",
+            "\nfn enqueue_glm_dsa_sparse_mla_bf16_attention(",
+        );
+        let native_query = source_between(
+            source,
+            "\nunsafe fn enqueue_glm_dsa_sparse_mla_query(",
+            "\nunsafe fn enqueue_glm_dsa_sparse_mla_output(",
+        );
+
+        for section in [prefill_entry, capture_identity, graph_builder, native_query] {
+            assert!(
+                !section.contains("glm_h64_query_projection"),
+                "prefill must not consult or launch the H64 policy"
+            );
+            assert!(
+                !section.contains("SPARKINFER_GLM_H64"),
+                "prefill must retain its policy-independent native graph path"
+            );
+        }
+        assert!(graph_builder.contains("enqueue_glm_dsa_sparse_mla_query("));
+        assert!(!graph_builder.contains("enqueue_glm_dsa_sparse_mla_query_routed("));
+    }
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start = source.find(start).expect("source start anchor");
+        let end = source[start..]
+            .find(end)
+            .map(|offset| start + offset)
+            .expect("source end anchor");
+        &source[start..end]
+    }
 
     #[test]
     fn glm52_flashinfer_accepts_full_and_tp4_head_counts() {

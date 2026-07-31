@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import _pinned_sparkinfer
+
 import argparse
-import importlib.metadata
 import os
 from pathlib import Path
 
@@ -14,13 +15,15 @@ TOP_K = 8
 def export_kernels(output_dir: Path, target_sms: int) -> None:
     # CuTe's C exporter needs the compiled IR, which executable-only cache hits
     # do not retain.
-    os.environ["B12X_CUTE_COMPILE_DISK_CACHE"] = "0"
-    os.environ["B12X_CUTE_COMPILE_MEMORY_CACHE"] = "0"
+    os.environ["SPARKINFER_COMPILE_DISK_CACHE"] = "0"
+    os.environ["SPARKINFER_COMPILE_MEMORY_CACHE"] = "0"
 
     import cuda.bindings.driver as cuda
     import torch
-    import b12x.moe.fused.w4a16.kernel as w4a16_kernel
-    from b12x.moe.fused.w4a16.host import select_route_block_size_m
+    import sparkinfer.moe._shared.kernels.w4a16.kernel as w4a16_kernel
+    from sparkinfer.moe._shared.kernels.w4a16.host import (
+        select_route_block_size_m,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.cuda.init()
@@ -92,7 +95,7 @@ def export_kernels(output_dir: Path, target_sms: int) -> None:
 
     config_lines = ["#pragma once"]
     metadata_lines = [
-        f"b12x_version={importlib.metadata.version('b12x')}",
+        f"sparkinfer_version={_pinned_sparkinfer.VERSION}",
         f"target_sms={sms}",
     ]
     for rows in ROWS:

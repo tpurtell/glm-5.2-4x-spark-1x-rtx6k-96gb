@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import _pinned_sparkinfer  # noqa: F401
+
 import argparse
 import ctypes
 import json
@@ -281,7 +283,7 @@ def comparison(reference: torch.Tensor, candidate: torch.Tensor) -> tuple[bool, 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep off-path B12X W4A16 coordinator tiles and persistent grids "
+            "Sweep off-path SparkInfer W4A16 coordinator tiles and persistent grids "
             "against the production native AOT result."
         )
     )
@@ -313,7 +315,7 @@ def main() -> None:
     if min(args.warmup, args.iterations, args.repeats) < 1:
         parser.error("warmup, iterations, and repeats must be positive")
 
-    from b12x.moe.fused.w4a16.kernel import (
+    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
         _cutlass_element_dtype,
         compile_w4a16_gemm,
         cuda,
@@ -497,6 +499,12 @@ def main() -> None:
         cute.AddressSpace.gmem,
         assumed_align=16,
     )
+    candidate_output_pointer = make_ptr(
+        _cutlass_element_dtype("bf16"),
+        candidate_output.data_ptr(),
+        cute.AddressSpace.gmem,
+        assumed_align=16,
+    )
     for tile in args.tiles:
         compiled = compile_w4a16_gemm(
             size_m=projection.rows,
@@ -535,8 +543,9 @@ def main() -> None:
                     )
                 compiled.compiled(
                     input_pointer,
+                    input_pointer,
                     packed_weight.view(torch.int32),
-                    candidate_output,
+                    candidate_output_pointer,
                     packed_scale.view(torch.int32),
                     global_scale,
                     packed_routes,

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import _pinned_sparkinfer  # noqa: F401
+
 import argparse
 import ctypes
 import json
@@ -120,7 +122,7 @@ def route_metadata(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Tune one production-specialized B12X Spark top-1 W4A16 kernel "
+            "Tune one production-specialized SparkInfer top-1 W4A16 kernel "
             "without allocating all expert weights."
         )
     )
@@ -203,7 +205,7 @@ def main() -> None:
     ).view(torch.float8_e4m3fn)
     global_scale = torch.ones(args.weight_sets, dtype=torch.float32, device=device)
 
-    from b12x.moe.fused.w4a16.prepare import (
+    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
     )
 
@@ -228,8 +230,10 @@ def main() -> None:
     max_m_blocks = capacity_rows
     fused = None
     if not args.native_only:
-        from b12x.moe.fused.w4a16 import kernel as w4a16_kernel
-        from b12x.moe.fused.w4a16.kernel import compile_w4a16_fused_moe
+        from sparkinfer.moe._shared.kernels.w4a16 import kernel as w4a16_kernel
+        from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+            compile_w4a16_fused_moe,
+        )
 
         original_init = w4a16_kernel.W4A16FusedMoeKernel.__init__
 
@@ -428,7 +432,7 @@ def main() -> None:
     launch_candidate = None
     candidate_output = None
     if not args.native_only:
-        from b12x.moe.fused.w4a16.kernel import (
+        from sparkinfer.moe._shared.kernels.w4a16.kernel import (
             _cutlass_element_dtype,
             cuda,
             cute,
@@ -465,19 +469,23 @@ def main() -> None:
         topk_weights = torch.ones(
             (capacity_rows, 1), dtype=torch.float32, device=device
         )
+        rotation_placeholder = torch.zeros(1, dtype=torch.float16, device=device)
 
         def launch_candidate_impl(grid: int) -> None:
             # Resolve the stream under capture. Caching the pointer before capture
             # silently records an empty graph with current CuTe/PyTorch builds.
             stream = torch.cuda.current_stream()
             candidate_locks.zero_()
+            hidden_pointer = make_ptr(
+                _cutlass_element_dtype("bf16"),
+                hidden.data_ptr(),
+                cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
             fused.compiled(
-                make_ptr(
-                    _cutlass_element_dtype("bf16"),
-                    hidden.data_ptr(),
-                    cute.AddressSpace.gmem,
-                    assumed_align=16,
-                ),
+                hidden_pointer,
+                hidden_pointer,
+                hidden_pointer,
                 prepared.w13.view(torch.int32).view(-1),
                 prepared.w2.view(torch.int32).view(-1),
                 candidate_fc1,
@@ -501,6 +509,9 @@ def main() -> None:
                 candidate_fc1_scratch,
                 candidate_fc2_scratch,
                 candidate_locks,
+                rotation_placeholder,
+                rotation_placeholder,
+                rotation_placeholder,
                 rows,
                 grid,
                 cuda.CUstream(stream.cuda_stream),

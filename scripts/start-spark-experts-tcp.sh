@@ -25,7 +25,7 @@ Environment:
   GLMRT_SPARK_EXPERT_REAL_LAYER     default: all for real start-only serving
   GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_GRAPHS
                                       forward to Spark expert containers; default: 1 in real mode
-  GLMRT_B12X_SPARK_AOT               build direct B12X AOT kernels; default: 1 in real mode
+  GLMRT_B12X_SPARK_AOT               build direct SparkInfer AOT kernels; default: 1 in real mode
   GLMRT_B12X_SPARK_GROUPED_DECODE    grouped TP4 M=1/topk=8 decode; default: 1
   GLMRT_B12X_SPARK_W4A16_M1_FUSED_SUM
                                       atomic M=1 top-k accumulation; default: 1 in real mode
@@ -142,6 +142,9 @@ if [[ "$dry_run" == "1" ]]; then
     printf 'GLMRT_B12X_SPARK_AOT=0\n'
   fi
   printf 'GLMRT_B12X_SPARK_GROUPED_DECODE=%s\n' "${GLMRT_B12X_SPARK_GROUPED_DECODE:-1}"
+  if [[ "${GLMRT_SERVE_PROFILE+x}" ]]; then
+    printf 'GLMRT_SERVE_PROFILE=%s\n' "$GLMRT_SERVE_PROFILE"
+  fi
   if [[ "${GLMRT_B12X_SPARK_W4A16_M1_FUSED_SUM+x}" ]]; then
     printf 'GLMRT_B12X_SPARK_W4A16_M1_FUSED_SUM=%s\n' "$GLMRT_B12X_SPARK_W4A16_M1_FUSED_SUM"
   elif [[ "$mode" == "real" ]]; then

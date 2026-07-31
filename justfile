@@ -62,12 +62,15 @@ build-native-coordinator-test:
   python="{{justfile_directory()}}/.venv/bin/python"; \
     test -x "$python"; \
     cmake -S native -B native/build-cuda-rdma-coordinator-aot -G Ninja \
+      -U GLMRT_ENABLE_B12X_AOT \
+      -U GLMRT_ENABLE_B12X_COORDINATOR_AOT \
       -DGLMRT_ENABLE_CUDA=ON \
       -DGLMRT_ENABLE_RDMA=ON \
-      -DGLMRT_ENABLE_B12X_AOT=OFF \
-      -DGLMRT_ENABLE_B12X_COORDINATOR_AOT=ON \
+      -DGLMRT_ENABLE_SPARKINFER_AOT=OFF \
+      -DGLMRT_ENABLE_SPARKINFER_COORDINATOR_AOT=ON \
       -DGLMRT_ENABLE_W8A16_AOT=ON \
-      -DGLMRT_ENABLE_SPARKINFER_SOURCE_W4A16_AOT=OFF \
+      -DGLMRT_SPARKINFER_SOURCE_DIR="{{justfile_directory()}}/third_party/sparkinfer" \
+      -DGLMRT_SPARKINFER_LOCK_FILE="{{justfile_directory()}}/third_party/sparkinfer.lock.json" \
       -DGLMRT_ENABLE_NCCL=OFF \
       -DPython3_EXECUTABLE="$python" \
       -DGLMRT_CUDA_ARCHITECTURES=120
@@ -116,7 +119,7 @@ test-rust-full-attention NATIVE_LIB="native/build-cuda-rdma-coordinator-aot/libg
     LD_LIBRARY_PATH="$python_lib:${LD_LIBRARY_PATH:-}" GLMRT_NATIVE_LIB="$native_lib" GLMRT_REAL_FULL_CUDA_REFERENCE_KERNELS=1 cargo test --manifest-path rust/Cargo.toml -p glmrt-daemon real_checkpoint_layer_ordered_full_output_mla_rope_attention_mlp_probe_when_available -- --ignored
 
 test-python:
-  cd python && uv run pytest
+  cd python && uv run pytest reference/tests ../scripts/tests
 
 test-native:
   cmake -S native -B native/build -G Ninja -DGLMRT_ENABLE_CUDA=OFF -DGLMRT_ENABLE_RDMA=OFF

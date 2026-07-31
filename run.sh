@@ -52,6 +52,7 @@ release_need curl
 release_need ss
 release_need nvidia-smi
 release_need sha256sum
+release_need python3
 
 if ((restart && dry_run)); then
   release_die "--restart and --dry-run are mutually exclusive"
@@ -60,6 +61,27 @@ fi
 docker info >/dev/null 2>&1 || release_die "local Docker daemon is unavailable"
 docker image inspect "$COORDINATOR_DOCKER_INFERENCE" >/dev/null 2>&1 ||
   release_die "coordinator image is missing: $COORDINATOR_DOCKER_INFERENCE (run ./build.sh)"
+sparkinfer_commit="$(
+  python3 "$repo_root/scripts/verify-sparkinfer-source.py" \
+    --source "$repo_root/third_party/sparkinfer" \
+    --lock "$repo_root/third_party/sparkinfer.lock.json" \
+    --print-revision
+)"
+coordinator_sparkinfer_commit="$(
+  docker image inspect -f '{{index .Config.Labels "io.glmrt.sparkinfer.revision"}}' \
+    "$COORDINATOR_DOCKER_INFERENCE"
+)"
+[[ "$coordinator_sparkinfer_commit" == "$sparkinfer_commit" ]] ||
+  release_die "coordinator image uses SparkInfer $coordinator_sparkinfer_commit; expected $sparkinfer_commit (run ./build.sh)"
+coordinator_engine_commit="$(
+  docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$COORDINATOR_DOCKER_INFERENCE"
+)"
+case "$coordinator_engine_commit" in
+  ""|"<no value>"|unknown|unknown-*)
+    release_die "coordinator image has no concrete GLMRT engine revision (run ./build.sh)"
+    ;;
+esac
 
 hosts_csv="$(release_hosts_csv)"
 lane_a_csv="$(release_lane_a_csv)"
@@ -81,6 +103,18 @@ for host in "$SPARK_0_HOST" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
     "docker info >/dev/null && docker image inspect '$SPARK_EXPERT_DOCKER_INFERENCE' >/dev/null" ||
     release_die "$host is unreachable or lacks image $SPARK_EXPERT_DOCKER_INFERENCE"
+  remote_sparkinfer_commit="$(
+    ssh -o BatchMode=yes "$host" \
+      "docker image inspect -f '{{index .Config.Labels \"io.glmrt.sparkinfer.revision\"}}' '$SPARK_EXPERT_DOCKER_INFERENCE'"
+  )"
+  [[ "$remote_sparkinfer_commit" == "$sparkinfer_commit" ]] ||
+    release_die "$host Spark image uses SparkInfer $remote_sparkinfer_commit; expected $sparkinfer_commit (run ./build.sh)"
+  remote_engine_commit="$(
+    ssh -o BatchMode=yes "$host" \
+      "docker image inspect -f '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' '$SPARK_EXPERT_DOCKER_INFERENCE'"
+  )"
+  [[ "$remote_engine_commit" == "$coordinator_engine_commit" ]] ||
+    release_die "$host Spark image uses GLMRT engine $remote_engine_commit; coordinator uses $coordinator_engine_commit (run ./build.sh)"
   if ssh -o BatchMode=yes "$host" "docker ps --format '{{.Names}}' | grep -Fx '$release_container'" >/dev/null; then
     image_state="$(
       ssh -o BatchMode=yes "$host" bash -s -- \
@@ -174,6 +208,9 @@ deployment_fingerprint="$(
     jq -S . "$resolved_json"
     printf '%s\n' \
       "$ADDR" "$EXPERT_PORT" \
+      "$coordinator_engine_commit" \
+      "$SPARKINFER_GLM_H64_QUERY_PROJECTION" \
+      "$DSPARK_FIXED_DRAFTS" \
       "$SPARK_0_HOST" "$SPARK_0_LANE_A" "$SPARK_0_LANE_B" \
       "$SPARK_1_HOST" "$SPARK_1_LANE_A" "$SPARK_1_LANE_B" \
       "$SPARK_2_HOST" "$SPARK_2_LANE_A" "$SPARK_2_LANE_B" \
@@ -270,6 +307,7 @@ fi
 
 check_local_resources() {
   local available_kib gpu_line total_mib free_mib
+  local min_gpu_mib=$((80 * 1024))
   available_kib="$(awk '/MemAvailable:/{print $2}' /proc/meminfo)"
   ((available_kib >= 8 * 1024 * 1024)) ||
     release_die "coordinator has less than 8 GiB available system memory"
@@ -277,19 +315,24 @@ check_local_resources() {
   IFS=, read -r total_mib free_mib <<<"$gpu_line"
   total_mib="$(release_trim "$total_mib")"
   free_mib="$(release_trim "$free_mib")"
-  ((free_mib >= 80 * 1024)) ||
-    release_die "coordinator GPU has only ${free_mib} MiB free of ${total_mib} MiB"
+  ((free_mib >= min_gpu_mib)) ||
+    release_die "coordinator GPU has only ${free_mib} MiB free of ${total_mib} MiB; at least ${min_gpu_mib} MiB (80 GiB) is required"
   echo "  coordinator: RAM $((available_kib / 1024)) MiB available; GPU ${free_mib}/${total_mib} MiB free"
 }
 
 check_remote_resources() {
   local host="$1"
-  ssh -o BatchMode=yes "$host" bash -s -- "$SPARK_EXPERT_DOCKER_INFERENCE" <<'REMOTE'
+  local min_unified_gib="$2"
+  ssh -o BatchMode=yes "$host" bash -s -- \
+    "$SPARK_EXPERT_DOCKER_INFERENCE" "$min_unified_gib" <<'REMOTE'
 set -euo pipefail
 image="$1"
+min_unified_gib="$2"
+min_unified_kib=$((min_unified_gib * 1024 * 1024))
+min_unified_mib=$((min_unified_gib * 1024))
 available_kib="$(awk '/MemAvailable:/{print $2}' /proc/meminfo)"
-if ((available_kib < 64 * 1024 * 1024)); then
-  echo "only $((available_kib / 1024)) MiB unified system/GPU memory is available" >&2
+if ((available_kib < min_unified_kib)); then
+  echo "only $((available_kib / 1024)) MiB unified system/GPU memory is available; at least ${min_unified_mib} MiB (${min_unified_gib} GiB) is required" >&2
   exit 2
 fi
 gpu_line="$(
@@ -301,8 +344,8 @@ IFS=, read -r total_mib free_mib <<<"$gpu_line"
 total_mib="${total_mib//[[:space:]]/}"
 free_mib="${free_mib//[[:space:]]/}"
 if [[ "$total_mib" =~ ^[0-9]+$ && "$free_mib" =~ ^[0-9]+$ ]] &&
-  ((free_mib < 64 * 1024)); then
-  echo "GPU has only ${free_mib} MiB free of ${total_mib} MiB" >&2
+  ((free_mib < min_unified_mib)); then
+  echo "GPU has only ${free_mib} MiB free of ${total_mib} MiB; at least ${min_unified_mib} MiB (${min_unified_gib} GiB) is required" >&2
   exit 2
 fi
 if [[ "$total_mib" =~ ^[0-9]+$ && "$free_mib" =~ ^[0-9]+$ ]]; then
@@ -315,9 +358,16 @@ REMOTE
 
 echo "== checking launch headroom =="
 check_local_resources
+spark_min_unified_gib=105
 for host in "$SPARK_0_HOST" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
-  echo "  $host: $(check_remote_resources "$host")"
+  remote_resources=""
+  if ! remote_resources="$(check_remote_resources "$host" "$spark_min_unified_gib")"; then
+    release_die "$host failed launch headroom check; refusing to start any release containers"
+  fi
+  echo "  $host: $remote_resources"
 done
+echo "  SparkInfer H64 query projection: $SPARKINFER_GLM_H64_QUERY_PROJECTION"
+echo "  fixed dSpark drafts: ${DSPARK_FIXED_DRAFTS:-adaptive}"
 if ((dry_run)); then
   echo "Dry-run checks passed."
   exit 0
@@ -332,6 +382,11 @@ export GLMRT_SPARK_HOSTS="$hosts_csv"
 export GLMRT_REAL_FULL_SERVE_EXPERT_HOSTS="$expert_hosts_csv"
 export GLMRT_SPARK_IMAGE="$SPARK_EXPERT_DOCKER_INFERENCE"
 export GLMRT_SPARK_PREBUILT=1
+# Release images already contain the verified binary, native library, Python
+# sources, and pinned SparkInfer tree.  Staging the mutable checkout is both
+# unnecessary and unsafe: an old root-owned build tree can make rsync fail
+# before the prebuilt container is even launched.
+export GLMRT_SPARK_SKIP_STAGE=1
 export GLMRT_RELEASE_CONFIG_SHA256="$deployment_fingerprint"
 export GLMRT_SPARK_CONTAINER_PREFIX="$spark_container_prefix"
 export GLMRT_SPARK_EXPERT_PORT="$EXPERT_PORT"
@@ -355,6 +410,8 @@ jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$en
   echo "GLMRT_REAL_FULL_SERVE_EXPERT_HOSTS=$expert_hosts_csv"
   echo "GLMRT_SPARK_HOSTS=$hosts_csv"
   echo "GLMRT_SPARK_EXPERT_PORT=$EXPERT_PORT"
+  echo "GLMRT_SPARKINFER_GLM_H64_BF16_QUERY_PROJECTION=$SPARKINFER_GLM_H64_QUERY_PROJECTION"
+  echo "GLMRT_REAL_FULL_DSPARK_FIXED_DRAFTS=$DSPARK_FIXED_DRAFTS"
   echo "GLMRT_REAL_FULL_SERVE_START_EXPERTS=0"
   echo "GLMRT_REAL_FULL_SERVE_BUILD_DAEMON=0"
   echo "GLMRT_REAL_FULL_SERVE_BUILD_NATIVE=0"
@@ -428,5 +485,7 @@ echo "GLMRT release server is ready at http://127.0.0.1:${ADDR##*:}/v1/"
 echo "  profile:     $PROFILE"
 echo "  model:       $RELEASE_MODEL_ID"
 echo "  speculation: $SPECULATION"
+echo "  H64 query:   $SPARKINFER_GLM_H64_QUERY_PROJECTION"
+echo "  fixed draft: ${DSPARK_FIXED_DRAFTS:-adaptive}"
 echo "  concurrency: $CONCURRENCY"
 echo "  containers:  $coordinator_container + four $spark_container_prefix experts"

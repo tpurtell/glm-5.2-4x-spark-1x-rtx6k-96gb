@@ -725,34 +725,6 @@ extern "C" glmrt_status_t glmrt_cuda_b12x_spark_aot_init(void) {
   return fail(GLMRT_STATUS_CUDA_UNAVAILABLE, "Spark B12X AOT kernels are not built");
 }
 
-extern "C" glmrt_status_t glmrt_cuda_b12x_swizzle_scale_async(glmrt_device_buffer_t,
-                                                               glmrt_device_buffer_t, size_t,
-                                                               size_t, void*) {
-  return fail(GLMRT_STATUS_CUDA_UNAVAILABLE, "Spark B12X AOT kernels are not built");
-}
-
-extern "C" glmrt_status_t glmrt_cuda_b12x_prepare_nvfp4_row_payload_async(
-    glmrt_device_buffer_t, size_t, size_t, glmrt_device_buffer_t, glmrt_device_buffer_t,
-    glmrt_device_buffer_t, size_t, size_t, void*) {
-  return fail(GLMRT_STATUS_CUDA_UNAVAILABLE, "Spark B12X AOT kernels are not built");
-}
-
-extern "C" glmrt_status_t glmrt_cuda_b12x_spark_mlp_async(
-    const glmrt_b12x_spark_mlp_buffers_t*, size_t, size_t, size_t, size_t, float, float, float,
-    void*) {
-  return fail(GLMRT_STATUS_CUDA_UNAVAILABLE, "Spark B12X AOT kernels are not built");
-}
-
-extern "C" glmrt_status_t glmrt_cuda_b12x_spark_mlp_prequantized_async(
-    const glmrt_b12x_spark_mlp_buffers_t*, size_t, size_t, size_t, size_t, float, float, float,
-    void*) {
-  return fail(GLMRT_STATUS_CUDA_UNAVAILABLE, "Spark B12X AOT kernels are not built");
-}
-
-extern "C" glmrt_status_t glmrt_cuda_b12x_spark_moe_tp4_m1_nvfp4_async(
-    const glmrt_b12x_spark_moe_tp4_m1_buffers_t*, size_t, void*) {
-  return fail(GLMRT_STATUS_CUDA_UNAVAILABLE, "Spark B12X AOT kernels are not built");
-}
 #endif
 
 #if !GLMRT_NATIVE_ENABLE_CUDA

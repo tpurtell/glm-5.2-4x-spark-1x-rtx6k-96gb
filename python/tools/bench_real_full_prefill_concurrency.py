@@ -140,13 +140,25 @@ def request_one(
             event = json.loads(payload)
             for choice in event.get("choices") or []:
                 content = (choice.get("delta") or {}).get("content")
-                if content:
+                # A sampled token may decode to an empty string or whitespace.
+                # Its SSE delta still marks TTFT and must not invalidate an
+                # otherwise complete measurement.
+                if content is not None:
                     if first_token_at is None:
                         first_token_at = time.perf_counter()
                     output_parts.append(content)
             if "metrics" in event:
                 metrics = event["metrics"]
     response_end = time.perf_counter()
+    if (
+        first_token_at is None
+        and metrics is not None
+        and int(metrics.get("output_tokens") or 0) > 0
+    ):
+        # Some valid token IDs decode to no UTF-8 content, so the API has no
+        # content delta to emit. With max_tokens=1 the terminal metrics event
+        # is the client-observable completion boundary for that token.
+        first_token_at = response_end
     if metrics is None or first_token_at is None:
         raise RuntimeError(f"lane {lane} completed without token/metrics")
     content = "".join(output_parts)
@@ -325,7 +337,15 @@ def main() -> None:
     root = repo_root()
     tokenizer_path = (args.tokenizer or default_tokenizer_path()).resolve()
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
-    corpus, corpus_sha256 = load_corpus(args.source)
+    source_labels = [source.name for source in args.source]
+    if len(set(source_labels)) != len(source_labels):
+        raise SystemExit(
+            "prefill source basenames must be unique for stable corpus identity"
+        )
+    corpus, corpus_sha256 = load_corpus(
+        args.source,
+        source_labels=source_labels,
+    )
     corpus_ids = tokenizer.encode(corpus, add_special_tokens=False).ids
     source_token_plan = args.source_token_plan or [args.source_tokens] * args.concurrency
     max_token_plan = args.max_token_plan or [args.max_tokens] * args.concurrency
@@ -416,7 +436,9 @@ def main() -> None:
         "commit": git_commit(root),
         "model": MODEL_ID,
         "endpoint": args.endpoint,
-        "sources": [str(source.resolve()) for source in args.source],
+        # Paths are command-level provenance, not prompt identity. Stable labels
+        # keep byte-identical frozen corpora pairable across qualification roots.
+        "sources": source_labels,
         "corpus_sha256": corpus_sha256,
         "source_token_plan": source_token_plan,
         "max_token_plan": max_token_plan,

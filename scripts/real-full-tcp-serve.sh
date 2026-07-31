@@ -100,7 +100,7 @@ Environment:
       timeout for precompile warmup frames; default: 120000
   GLMRT_REAL_FULL_PROTOCOL_V2_TIMEOUT_MS
       sparse expert request timeout used by the coordinator; default: 120000
-      in this launcher so cold B12X graph capture does not fail the first
+      in this launcher so cold SparkInfer graph capture does not fail the first
       real request.
   GLMRT_REAL_FULL_SERVE_PREWARM_REQUEST
       set 0 to skip one real scheduler decode prewarm before serving;
@@ -124,7 +124,8 @@ Environment:
       set 0 to disable CUDA graph replay for routed NVFP4 projection kernels;
       default: 1 for real Spark expert startup.
   GLMRT_B12X
-      set 0 to disable coordinator Python graph capture/B12X paths; default: 1.
+      compatibility name: set 0 to disable coordinator Python graph
+      capture/SparkInfer paths; default: 1.
   GLMRT_REAL_FULL_REQUEST_THREAD_PINNED
       keep each sequence's graph capture and replay on one CUDA-owning host thread;
       defaults to 1 when GLMRT_B12X=1 and otherwise defaults to 0.
@@ -386,24 +387,38 @@ configure_host_python() {
 import os
 import sys
 import sysconfig
+from pathlib import Path
 
 module_paths = []
 for path in sys.path:
     if path and "site-packages" in path and path not in module_paths:
         module_paths.append(path)
+nccl_root = next(
+    (
+        Path(path) / "nvidia" / "nccl"
+        for path in module_paths
+        if (Path(path) / "nvidia" / "nccl" / "include" / "nccl.h").is_file()
+    ),
+    None,
+)
 print(sys.base_prefix)
 print(sysconfig.get_config_var("LIBDIR") or "")
 print(os.pathsep.join(module_paths))
+print(nccl_root or "")
 PY
 )"
   local python_base
   local python_sysconfig_lib
   local python_module_path
+  local python_nccl_root
   python_base="$(sed -n '1p' <<<"$python_config")"
   python_sysconfig_lib="$(sed -n '2p' <<<"$python_config")"
   python_module_path="$(sed -n '3p' <<<"$python_config")"
+  python_nccl_root="$(sed -n '4p' <<<"$python_config")"
   host_python_home="$python_base"
   host_python_module_path="$python_module_path"
+  host_nccl_include_dir="${GLMRT_NCCL_INCLUDE_DIR:-}"
+  host_nccl_library="${GLMRT_NCCL_LIBRARY:-}"
 
   local python_libs=()
   if [ -n "${GLMRT_PYTHON_LIBDIR:-}" ]; then
@@ -411,6 +426,21 @@ PY
   fi
   if [ -n "$python_sysconfig_lib" ]; then
     python_libs+=("$python_sysconfig_lib")
+  fi
+  if [ -n "$python_nccl_root" ]; then
+    python_libs+=("$python_nccl_root/lib")
+    if [ -z "$host_nccl_include_dir" ]; then
+      host_nccl_include_dir="$python_nccl_root/include"
+    fi
+    if [ -z "$host_nccl_library" ]; then
+      local nccl_library
+      for nccl_library in "$python_nccl_root"/lib/libnccl.so*; do
+        if [ -f "$nccl_library" ]; then
+          host_nccl_library="$nccl_library"
+          break
+        fi
+      done
+    fi
   fi
   if [ -n "${GLMRT_CUTE_DSL_LIBDIR:-}" ]; then
     python_libs+=("$GLMRT_CUTE_DSL_LIBDIR")
@@ -431,6 +461,23 @@ PY
     python_path="$(IFS=:; printf '%s' "${python_libs[*]}")"
     export LD_LIBRARY_PATH="$python_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   fi
+}
+
+configure_pinned_sparkinfer() {
+  local sparkinfer_source="$repo_root/third_party/sparkinfer"
+  local sparkinfer_lock="$repo_root/third_party/sparkinfer.lock.json"
+  local python_paths=("$sparkinfer_source")
+  if [ -n "$host_python_module_path" ]; then
+    python_paths+=("$host_python_module_path")
+  fi
+  if [ -n "${PYTHONPATH:-}" ]; then
+    python_paths+=("$PYTHONPATH")
+  fi
+  export PYTHONPATH="$(IFS=:; printf '%s' "${python_paths[*]}")"
+  "$GLMRT_PYTHON" "$repo_root/scripts/verify-sparkinfer-source.py" \
+    --source "$sparkinfer_source" \
+    --lock "$sparkinfer_lock" \
+    --assert-import-source
 }
 
 require_bool_flag() {
@@ -510,30 +557,60 @@ wait_for_tcp() {
   return 1
 }
 
-warmup_expert_id_for_owner() {
+warmup_expert_ids_for_owner() {
   local owner="$1"
+  local count="$2"
   if [ -z "$loadplan" ]; then
     case "$owner" in
-      spark-[0-3]) echo "${owner#spark-}"; return ;;
+      spark-[0-3])
+        local owner_index="${owner#spark-}"
+        local -a expert_ids=()
+        local expert_id="$owner_index"
+        while [ "${#expert_ids[@]}" -lt "$count" ]; do
+          if [ "$expert_id" -ge 256 ]; then
+            echo "cannot infer ${count} warmup experts for runtime role ${owner}" >&2
+            exit 2
+          fi
+          expert_ids+=("$expert_id")
+          expert_id=$((expert_id + 4))
+        done
+        (IFS=,; echo "${expert_ids[*]}")
+        return
+        ;;
       *)
         echo "cannot infer a warmup expert for runtime role ${owner}" >&2
         exit 2
         ;;
     esac
   fi
-  local expert_id
-  expert_id="$(
-    jq -r --arg owner "$owner" --argjson layer "$warmup_layer_id" '
-      .assignments[]
-      | select(.owner == $owner and .layer_id == $layer and (.tensor_name | endswith(".gate_proj.weight")))
-      | .expert_id
-    ' "$loadplan" | sort -n | head -n1
-  )"
-  if [ -z "$expert_id" ] || [ "$expert_id" = "null" ]; then
-    echo "no owned layer ${warmup_layer_id} gate projection expert found for ${owner} in ${loadplan}" >&2
+  local expert_ids
+  if ! expert_ids="$(
+    jq -er \
+      --arg owner "$owner" \
+      --argjson layer "$warmup_layer_id" \
+      --argjson count "$count" '
+      [
+        .assignments[]
+        | select(
+            .owner == $owner
+            and .layer_id == $layer
+            and .expert_id != null
+            and (.tensor_name | endswith(".gate_proj.weight"))
+          )
+        | .expert_id
+      ]
+      | unique
+      | sort
+      | select(length >= $count)
+      | .[:$count]
+      | map(tostring)
+      | join(",")
+    ' "$loadplan"
+  )"; then
+    echo "fewer than ${count} owned layer ${warmup_layer_id} gate projection experts found for ${owner} in ${loadplan}" >&2
     exit 2
   fi
-  echo "$expert_id"
+  echo "$expert_ids"
 }
 
 warmup_protocol_v2_experts() {
@@ -542,19 +619,27 @@ warmup_protocol_v2_experts() {
     return
   fi
 
-  echo "== warming Spark experts with binary ProtocolV2 precompile frames transport=${coordinator_transport} ==" >&2
+  local wire_contract="bf16-in/bf16-out"
+  local warmup_routes_per_row=1
+  local -a wire_args=()
+
+  echo "== warming Spark experts with binary ProtocolV2 precompile frames transport=${coordinator_transport} wire=${wire_contract} ==" >&2
   IFS=',' read -r -a entries <<< "$expert_hosts"
   for entry in "${entries[@]}"; do
     local owner
     local addr_part
     local expert_id
+    local expert_ids
     owner="$(target_owner "$entry")"
     addr_part="$(target_addr "$entry")"
     if [[ "$addr_part" != *:* ]]; then
       addr_part="${addr_part}:${expert_port}"
     fi
-    expert_id="$(warmup_expert_id_for_owner "$owner")"
-    echo "protocol_v2_warmup owner=${owner} addr=${addr_part} layer_id=${warmup_layer_id} expert_id=${expert_id} iterations=${warmup_iterations} timeout_ms=${warmup_timeout_ms}" >&2
+    # Distinct owner-valid IDs exercise the production top-k metadata shape
+    # while remaining valid for both role-filtered and TP-sharded experts.
+    expert_ids="$(warmup_expert_ids_for_owner "$owner" "$warmup_routes_per_row")"
+    expert_id="${expert_ids%%,*}"
+    echo "protocol_v2_warmup owner=${owner} addr=${addr_part} layer_id=${warmup_layer_id} expert_id=${expert_id} expert_ids=${expert_ids} routes_per_row=${warmup_routes_per_row} iterations=${warmup_iterations} timeout_ms=${warmup_timeout_ms}" >&2
     "$bin" bench-protocol-v2-tcp \
       --addr "$addr_part" \
       --transport "$coordinator_transport" \
@@ -572,8 +657,11 @@ warmup_protocol_v2_experts() {
       --prefill-chain-rows "$warmup_prefill_chain_rows" \
       --layer-id "$warmup_layer_id" \
       --expert-id "$expert_id" \
+      --expert-ids "$expert_ids" \
+      --routes-per-row "$warmup_routes_per_row" \
       --expected-executor "$warmup_expected_executor" \
       --require-expected-executor \
+      "${wire_args[@]}" \
       --timeout-ms "$warmup_measured_timeout_ms" >/dev/null
   done
 }
@@ -807,20 +895,33 @@ if [ -n "$loadplan" ]; then
 fi
 
 configure_host_python
+configure_pinned_sparkinfer
 
 if [ "$require_cuda" = "1" ]; then
   if [ "$build_native" = "1" ] && [ "$native_lib_explicit" = "0" ]; then
+    nccl_cmake_args=()
+    if [ -n "$host_nccl_include_dir" ] && [ -n "$host_nccl_library" ]; then
+      nccl_cmake_args+=(
+        "-DGLMRT_NCCL_INCLUDE_DIR=$host_nccl_include_dir"
+        "-DGLMRT_NCCL_LIBRARY=$host_nccl_library"
+      )
+    fi
     native_rdma=OFF
     if [ "$coordinator_transport" = "verbs-host" ]; then
       native_rdma=ON
     fi
     cmake -S native -B "$(dirname "$native_lib")" -G Ninja \
+      -U GLMRT_ENABLE_B12X_AOT \
+      -U GLMRT_ENABLE_B12X_COORDINATOR_AOT \
       -DGLMRT_ENABLE_CUDA=ON \
       -DGLMRT_ENABLE_RDMA="$native_rdma" \
-      -DGLMRT_ENABLE_B12X_AOT=OFF \
-      -DGLMRT_ENABLE_B12X_COORDINATOR_AOT="${GLMRT_B12X_COORDINATOR_AOT:-ON}" \
+      -DGLMRT_ENABLE_SPARKINFER_AOT=OFF \
+      -DGLMRT_ENABLE_SPARKINFER_COORDINATOR_AOT="${GLMRT_SPARKINFER_COORDINATOR_AOT:-${GLMRT_B12X_COORDINATOR_AOT:-ON}}" \
+      -DGLMRT_SPARKINFER_SOURCE_DIR="$repo_root/third_party/sparkinfer" \
+      -DGLMRT_SPARKINFER_LOCK_FILE="$repo_root/third_party/sparkinfer.lock.json" \
       -DGLMRT_ENABLE_W8A16_AOT="$w8a16_aot" \
       -DGLMRT_ENABLE_NCCL=ON \
+      "${nccl_cmake_args[@]}" \
       -DPython3_EXECUTABLE="$GLMRT_PYTHON" \
       -DGLMRT_CUDA_ARCHITECTURES="${GLMRT_CUDA_ARCH:-120}"
     cmake --build "$(dirname "$native_lib")"
@@ -935,9 +1036,6 @@ if [ ! -x "$bin" ]; then
 fi
 
 export PYTHONHOME="${PYTHONHOME:-$host_python_home}"
-if [ -n "$host_python_module_path" ]; then
-  export PYTHONPATH="$host_python_module_path${PYTHONPATH:+:$PYTHONPATH}"
-fi
 
 if [ -n "$expert_warmup_status_file" ]; then
   status_tmp="${expert_warmup_status_file}.tmp"

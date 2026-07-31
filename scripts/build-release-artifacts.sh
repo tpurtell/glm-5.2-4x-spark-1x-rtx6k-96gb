@@ -14,13 +14,13 @@ output_dir="$(realpath -m "$4")"
 
 case "$role" in
   coordinator)
-    b12x_aot=OFF
+    sparkinfer_aot=OFF
     coordinator_aot=ON
     w8a16_aot=ON
     nccl=OFF
     ;;
   expert)
-    b12x_aot=ON
+    sparkinfer_aot=ON
     coordinator_aot=OFF
     w8a16_aot=OFF
     nccl=ON
@@ -42,6 +42,9 @@ esac
   echo "SOURCE_DIR is missing THIRD_PARTY_NOTICES.md" >&2
   exit 2
 }
+python3 "$source_dir/scripts/verify-sparkinfer-source.py" \
+  --source "$source_dir/third_party/sparkinfer" \
+  --lock "$source_dir/third_party/sparkinfer.lock.json"
 
 build_root="$(mktemp -d /tmp/glmrt-release-build.XXXXXX)"
 trap 'rm -rf "$build_root"' EXIT
@@ -49,7 +52,19 @@ mkdir -p "$build_root/source"
 tar \
   -C "$source_dir" \
   --exclude=.git \
+  --exclude='*/.git' \
   --exclude=.venv \
+  --exclude=.mypy_cache \
+  --exclude='*/.mypy_cache' \
+  --exclude=.pytest_cache \
+  --exclude='*/.pytest_cache' \
+  --exclude=.ruff_cache \
+  --exclude='*/.ruff_cache' \
+  --exclude=__pycache__ \
+  --exclude='*/__pycache__' \
+  --exclude='*.pyc' \
+  --exclude='*.pyo' \
+  --exclude=.glmrt-cache \
   --exclude=.glmrt-release \
   --exclude=.glmrt-release-image \
   --exclude=dist \
@@ -57,6 +72,11 @@ tar \
   --exclude='native/build*' \
   -cf - . |
   tar -C "$build_root/source" -xf -
+
+python3 "$build_root/source/scripts/verify-sparkinfer-source.py" \
+  --source "$build_root/source/third_party/sparkinfer" \
+  --lock "$build_root/source/third_party/sparkinfer.lock.json" \
+  --require-no-python-cache
 
 export PYO3_PYTHON=python3
 cargo build \
@@ -70,10 +90,11 @@ cmake \
   -G Ninja \
   -DGLMRT_ENABLE_CUDA=ON \
   -DGLMRT_ENABLE_RDMA=ON \
-  -DGLMRT_ENABLE_B12X_AOT="$b12x_aot" \
-  -DGLMRT_ENABLE_B12X_COORDINATOR_AOT="$coordinator_aot" \
+  -DGLMRT_ENABLE_SPARKINFER_AOT="$sparkinfer_aot" \
+  -DGLMRT_ENABLE_SPARKINFER_COORDINATOR_AOT="$coordinator_aot" \
   -DGLMRT_ENABLE_W8A16_AOT="$w8a16_aot" \
-  -DGLMRT_ENABLE_SPARKINFER_SOURCE_W4A16_AOT=OFF \
+  -DGLMRT_SPARKINFER_SOURCE_DIR="$build_root/source/third_party/sparkinfer" \
+  -DGLMRT_SPARKINFER_LOCK_FILE="$build_root/source/third_party/sparkinfer.lock.json" \
   -DGLMRT_ENABLE_NCCL="$nccl" \
   -DPython3_EXECUTABLE="$(command -v python3)" \
   -DGLMRT_CUDA_ARCHITECTURES="$cuda_arch"
@@ -85,6 +106,26 @@ install -m 0755 "$build_root/native/libglmrt_native.so" "$output_dir/libglmrt_na
 install -m 0644 \
   "$build_root/source/THIRD_PARTY_NOTICES.md" \
   "$output_dir/THIRD_PARTY_NOTICES.md"
+install -m 0644 \
+  "$build_root/source/third_party/sparkinfer/LICENSE" \
+  "$output_dir/SPARKINFER_LICENSE"
+python3 "$build_root/source/scripts/sparkinfer-release-provenance.py" \
+  --source "$build_root/source/third_party/sparkinfer" \
+  --lock "$build_root/source/third_party/sparkinfer.lock.json" \
+  --license "$output_dir/SPARKINFER_LICENSE" \
+  --notices "$output_dir/THIRD_PARTY_NOTICES.md" \
+  --write "$output_dir/SPARKINFER_PROVENANCE.json"
+(
+  cd "$output_dir"
+  sha256sum \
+    THIRD_PARTY_NOTICES.md \
+    SPARKINFER_PROVENANCE.json \
+    SPARKINFER_LICENSE >SPARKINFER_SHA256SUMS
+  sha256sum -c SPARKINFER_SHA256SUMS
+)
 test -x "$output_dir/glmrt"
 test -s "$output_dir/libglmrt_native.so"
 test -s "$output_dir/THIRD_PARTY_NOTICES.md"
+test -s "$output_dir/SPARKINFER_PROVENANCE.json"
+test -s "$output_dir/SPARKINFER_LICENSE"
+test -s "$output_dir/SPARKINFER_SHA256SUMS"

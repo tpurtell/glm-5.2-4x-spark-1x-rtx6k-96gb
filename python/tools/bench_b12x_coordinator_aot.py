@@ -126,7 +126,7 @@ def configure_abi(lib: ctypes.CDLL, projection: Projection) -> ctypes._CFuncPtr:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Validate and time coordinator decode-only B12X W4A16 AOT kernels."
+        description="Validate and time coordinator decode-only SparkInfer W4A16 AOT kernels."
     )
     parser.add_argument("--native-lib", type=Path, required=True)
     parser.add_argument("--projection", choices=tuple(PROJECTIONS), required=True)

@@ -65,17 +65,34 @@ def parse_case(value: str) -> tuple[int, int, str]:
     return input_tokens, output_tokens, label
 
 
-def load_corpus(paths: list[Path]) -> tuple[str, str]:
+def load_corpus(
+    paths: list[Path],
+    *,
+    source_labels: list[str] | None = None,
+) -> tuple[str, str]:
+    if source_labels is not None:
+        if len(source_labels) != len(paths):
+            raise ValueError("source_labels length must match paths")
+        if (
+            any(not label or "\0" in label for label in source_labels)
+            or len(set(source_labels)) != len(source_labels)
+        ):
+            raise ValueError("source_labels must be unique, nonempty strings")
     sections: list[str] = []
     digest = hashlib.sha256()
-    for path in paths:
+    for index, path in enumerate(paths):
         resolved = path.resolve()
         data = resolved.read_bytes()
-        digest.update(str(resolved).encode())
+        label = (
+            str(resolved)
+            if source_labels is None
+            else source_labels[index]
+        )
+        digest.update(label.encode())
         digest.update(b"\0")
         digest.update(data)
         digest.update(b"\0")
-        sections.append(f"\n\n===== {path} =====\n\n{data.decode('utf-8')}")
+        sections.append(f"\n\n===== {label} =====\n\n{data.decode('utf-8')}")
     return "".join(sections), digest.hexdigest()
 
 

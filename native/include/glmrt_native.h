@@ -99,62 +99,6 @@ typedef struct glmrt_nvfp4_route_batched_metadata_t {
   float down_scale_2;
 } glmrt_nvfp4_route_batched_metadata_t;
 
-typedef struct glmrt_b12x_spark_mlp_buffers_t {
-  glmrt_device_buffer_t input;
-  glmrt_device_buffer_t gate_weight;
-  glmrt_device_buffer_t gate_scale;
-  glmrt_device_buffer_t up_weight;
-  glmrt_device_buffer_t up_scale;
-  glmrt_device_buffer_t down_weight;
-  glmrt_device_buffer_t down_scale;
-  glmrt_device_buffer_t output;
-  glmrt_device_buffer_t input_packed;
-  glmrt_device_buffer_t input_scale;
-  glmrt_device_buffer_t gate_output;
-  glmrt_device_buffer_t up_output;
-  glmrt_device_buffer_t activation_packed;
-  glmrt_device_buffer_t activation_scale;
-  glmrt_device_buffer_t gate_scale_swizzled;
-  glmrt_device_buffer_t up_scale_swizzled;
-  glmrt_device_buffer_t down_scale_swizzled;
-  glmrt_device_buffer_t alphas;
-} glmrt_b12x_spark_mlp_buffers_t;
-
-typedef struct glmrt_b12x_spark_moe_tp4_m1_buffers_t {
-  glmrt_device_buffer_t input_payload;
-  glmrt_device_buffer_t input_bf16;
-  glmrt_device_buffer_t w13_weight;
-  glmrt_device_buffer_t w13_scale;
-  glmrt_device_buffer_t w1_alphas;
-  glmrt_device_buffer_t a1_gscale;
-  glmrt_device_buffer_t a2_gscale;
-  glmrt_device_buffer_t intermediate;
-  glmrt_device_buffer_t w2_weight;
-  glmrt_device_buffer_t w2_scale;
-  glmrt_device_buffer_t w2_alphas;
-  glmrt_device_buffer_t topk_ids;
-  glmrt_device_buffer_t topk_weights;
-  glmrt_device_buffer_t output;
-  glmrt_device_buffer_t barrier_count;
-  glmrt_device_buffer_t barrier_epoch;
-} glmrt_b12x_spark_moe_tp4_m1_buffers_t;
-
-typedef struct glmrt_b12x_spark_w4a4_moe_buffers_t {
-  glmrt_device_buffer_t input;
-  glmrt_device_buffer_t topk_ids;
-  glmrt_device_buffer_t topk_weights;
-  glmrt_device_buffer_t w13_weight;
-  glmrt_device_buffer_t w13_scale;
-  glmrt_device_buffer_t w1_alphas;
-  glmrt_device_buffer_t a1_gscale;
-  glmrt_device_buffer_t w2_weight;
-  glmrt_device_buffer_t w2_scale;
-  glmrt_device_buffer_t w2_alphas;
-  glmrt_device_buffer_t a2_gscale;
-  glmrt_device_buffer_t output;
-  glmrt_device_buffer_t scratch;
-} glmrt_b12x_spark_w4a4_moe_buffers_t;
-
 typedef struct glmrt_b12x_spark_w4a16_moe_buffers_t {
   glmrt_device_buffer_t input;
   glmrt_device_buffer_t w13_weight;
@@ -173,10 +117,6 @@ typedef struct glmrt_b12x_spark_w4a16_moe_buffers_t {
   glmrt_device_buffer_t fc1_scratch;
   glmrt_device_buffer_t fc2_scratch;
   glmrt_device_buffer_t locks;
-  glmrt_device_buffer_t micro_w13_global_scale;
-  glmrt_device_buffer_t micro_w2_global_scale;
-  glmrt_device_buffer_t barrier_count;
-  glmrt_device_buffer_t barrier_epoch;
 } glmrt_b12x_spark_w4a16_moe_buffers_t;
 
 typedef struct glmrt_b12x_coordinator_w4a16_buffers_t {
@@ -640,34 +580,9 @@ glmrt_status_t glmrt_cuda_nvfp4_silu_gated_mlp_route_bf16_batched_staged_single_
     size_t max_intermediate, size_t output_dim, void* cuda_stream);
 glmrt_status_t glmrt_cuda_b12x_spark_aot_available(int* out_available);
 glmrt_status_t glmrt_cuda_b12x_spark_aot_init(void);
-glmrt_status_t glmrt_cuda_b12x_swizzle_scale_async(glmrt_device_buffer_t input,
-                                                   glmrt_device_buffer_t output, size_t rows,
-                                                   size_t scale_cols, void* cuda_stream);
 glmrt_status_t glmrt_cuda_b12x_quantize_bf16_nvfp4_row_payload_async(
     glmrt_device_buffer_t input, glmrt_device_buffer_t payload, size_t rows, size_t hidden_dim,
     void* cuda_stream);
-glmrt_status_t glmrt_cuda_b12x_prepare_nvfp4_row_payload_async(
-    glmrt_device_buffer_t payload, size_t source_rows, size_t source_row_stride_bytes,
-    glmrt_device_buffer_t row_indices, glmrt_device_buffer_t input_packed,
-    glmrt_device_buffer_t input_scale, size_t rows, size_t hidden_dim, void* cuda_stream);
-glmrt_status_t glmrt_cuda_b12x_spark_mlp_async(
-    const glmrt_b12x_spark_mlp_buffers_t* buffers, size_t rows, size_t hidden_dim,
-    size_t intermediate_dim, size_t output_dim, float gate_scale_2, float up_scale_2,
-    float down_scale_2, void* cuda_stream);
-glmrt_status_t glmrt_cuda_b12x_spark_mlp_prequantized_async(
-    const glmrt_b12x_spark_mlp_buffers_t* buffers, size_t rows, size_t hidden_dim,
-    size_t intermediate_dim, size_t output_dim, float gate_scale_2, float up_scale_2,
-    float down_scale_2, void* cuda_stream);
-glmrt_status_t glmrt_cuda_b12x_spark_moe_tp4_m1_nvfp4_async(
-    const glmrt_b12x_spark_moe_tp4_m1_buffers_t* buffers,
-    size_t input_payload_stride_bytes, void* cuda_stream);
-glmrt_status_t glmrt_cuda_b12x_spark_w4a4_prefill_topk8_bf16_async(
-    const glmrt_b12x_spark_w4a4_moe_buffers_t* buffers, size_t rows,
-    void* cuda_stream);
-glmrt_status_t glmrt_cuda_b12x_spark_w4a4_prefill_topk8_nvfp4_async(
-    const glmrt_b12x_spark_w4a4_moe_buffers_t* buffers,
-    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
-    size_t rows, void* cuda_stream);
 glmrt_status_t glmrt_cuda_b12x_w4a16_pack_weight_async(
     glmrt_device_buffer_t source, glmrt_device_buffer_t destination, size_t size_k,
     size_t size_n, size_t row_rotation, void* cuda_stream);
@@ -686,18 +601,6 @@ glmrt_status_t glmrt_cuda_quantize_bf16_weight_nvfp4_async(
     glmrt_device_buffer_t input, glmrt_device_buffer_t packed,
     glmrt_device_buffer_t scales, size_t rows, size_t cols,
     float global_scale, void* cuda_stream);
-glmrt_status_t glmrt_cuda_sparkinfer_source_w4a16_aot_available(
-    int* out_available);
-glmrt_status_t glmrt_cuda_sparkinfer_source_w4a16_topk8_nvfp4_async(
-    const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers,
-    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
-    glmrt_device_buffer_t topk_ids, size_t rows, void* cuda_stream);
-glmrt_status_t glmrt_cuda_sparkinfer_source_w4a16_topk8_nvfp4_fp8_async(
-    const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers,
-    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
-    glmrt_device_buffer_t topk_ids, size_t rows,
-    glmrt_device_buffer_t output_fp8, size_t output_fp8_row_stride_bytes,
-    void* cuda_stream);
 glmrt_status_t glmrt_cuda_b12x_gather_nvfp4_rows_bf16_async(
     glmrt_device_buffer_t payload, size_t source_rows, size_t source_row_stride_bytes,
     glmrt_device_buffer_t row_indices, glmrt_device_buffer_t output, size_t rows,
@@ -731,10 +634,6 @@ glmrt_status_t glmrt_cuda_b12x_spark_w4a16_decode_m1_nvfp4_grid_candidate_async(
     const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers,
     glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
     glmrt_device_buffer_t topk_ids, int grid_x, void* cuda_stream);
-glmrt_status_t glmrt_cuda_b12x_spark_w4a16_modelopt_decode_m1_nvfp4_async(
-    const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers,
-    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
-    glmrt_device_buffer_t topk_ids, void* cuda_stream);
 glmrt_status_t glmrt_cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_async(
     const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers,
     glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,

@@ -1,4 +1,5 @@
 .git
+**/.git
 .venv
 **/.venv
 .glmrt-cache
@@ -9,9 +10,12 @@ target
 native/build
 native/build-*
 **/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
 **/__pycache__
 reports/phase0_artifacts/benchmarks/*.tmp
 reports/phase0_artifacts/*.json
 reports/phase0_artifacts/*.md
 reports/phase0_artifacts/logs
 *.pyc
+*.pyo

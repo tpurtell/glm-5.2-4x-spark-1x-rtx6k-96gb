@@ -102,7 +102,7 @@ glmrt_status_t validate_buffers(
   PREFIX##_Tensor_a_bf16_flat_t input{buffers->input.ptr};                    \
   PREFIX##_Tensor_b_i32_flat_t weight{buffers->weight.ptr};                   \
   PREFIX##_Tensor_c_bf16_flat_t output{buffers->output.ptr};                  \
-  PREFIX##_Tensor_scales_i32_flat_t scales{buffers->scale.ptr};               \
+  PREFIX##_Tensor_scales_f32_flat_t scales{buffers->scale.ptr};               \
   PREFIX##_Tensor_global_scale_t global_scale{buffers->global_scale.ptr};     \
   PREFIX##_Tensor_packed_route_indices_t routes{                              \
       buffers->packed_route_indices.ptr};                                     \

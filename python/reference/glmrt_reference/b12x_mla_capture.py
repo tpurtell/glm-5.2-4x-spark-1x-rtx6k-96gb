@@ -36,7 +36,168 @@ _FLASHINFER_PACKED_FP8_MLA_PREPARED: set[tuple[Any, ...]] = set()
 _FLASHINFER_PACKED_FP8_MLA_PREFILL_PREPARED: set[tuple[Any, ...]] = set()
 _SPARKINFER_NVFP4_MLA_DECODE_PREPARED: set[tuple[Any, ...]] = set()
 _SPARKINFER_NVFP4_MLA_PREFILL_PREPARED: set[tuple[Any, ...]] = set()
+_SPARKINFER_GLM_H64_QUERY_PREPARED: set[tuple[int, int]] = set()
+_SPARKINFER_GLM_H64_QUERY_LOGGED_PLANS: set[tuple[Any, ...]] = set()
 _B12X_GLM_DSA_INDEXER_STATES: dict[tuple[Any, ...], Any] = {}
+_SPARKINFER_GLM_H64_QUERY_POLICY_ENV = (
+    "GLMRT_SPARKINFER_GLM_H64_BF16_QUERY_PROJECTION"
+)
+
+
+def plan_sparkinfer_glm_h64_bf16_query_projection(
+    *,
+    workload: str,
+    query_rows: int,
+    heads: int,
+    nope_dim: int,
+    latent_dim: int,
+    device_id: int,
+) -> bool:
+    """Return SparkInfer's capture-static GLM H64 query-projection route."""
+
+    import sys
+
+    import torch
+    from sparkinfer.gemm.mla_query_projection import plan_glm_h64_bf16
+
+    policy = os.environ.get(
+        _SPARKINFER_GLM_H64_QUERY_POLICY_ENV, "auto"
+    ).strip().lower()
+    if policy not in {"auto", "force", "disable"}:
+        raise ValueError(
+            f"{_SPARKINFER_GLM_H64_QUERY_POLICY_ENV} must be auto, force, "
+            f"or disable, got {policy!r}"
+        )
+    plan = plan_glm_h64_bf16(
+        workload=workload,
+        policy=policy,
+        query_rows=int(query_rows),
+        num_heads=int(heads),
+        nope_dim=int(nope_dim),
+        latent_dim=int(latent_dim),
+        output_dtype=torch.bfloat16,
+        device=torch.device("cuda", int(device_id)),
+    )
+    log_key = (
+        int(device_id),
+        workload,
+        int(query_rows),
+        policy,
+        plan.backend,
+        plan.reason,
+    )
+    if log_key not in _SPARKINFER_GLM_H64_QUERY_LOGGED_PLANS:
+        print(
+            "glmrt_sparkinfer_glm_h64_query_projection "
+            f"device={device_id} workload={workload} rows={query_rows} "
+            f"policy={policy} backend={plan.backend} reason={plan.reason}",
+            file=sys.stderr,
+        )
+        _SPARKINFER_GLM_H64_QUERY_LOGGED_PLANS.add(log_key)
+    return bool(plan.use_sparkinfer)
+
+
+def prepare_sparkinfer_glm_h64_bf16_query_projection(
+    ctx: dict[str, Any], **kwargs: Any
+) -> None:
+    """Compile and first-launch SparkInfer's one-launch GLM H64 kernel."""
+
+    _run_sparkinfer_glm_h64_bf16_query_projection(
+        ctx, prepare_only=True, **kwargs
+    )
+
+
+def capture_sparkinfer_glm_h64_bf16_query_projection(
+    ctx: dict[str, Any], **kwargs: Any
+) -> None:
+    """Project q-nope and append q-RoPE directly into the caller output."""
+
+    _run_sparkinfer_glm_h64_bf16_query_projection(
+        ctx, prepare_only=False, **kwargs
+    )
+
+
+def _run_sparkinfer_glm_h64_bf16_query_projection(
+    ctx: dict[str, Any], *, prepare_only: bool, **kwargs: Any
+) -> None:
+    import torch
+    from sparkinfer.gemm.mla_query_projection import (
+        prewarm_glm_h64_bf16,
+        run_glm_h64_bf16,
+    )
+
+    query_rows = int(kwargs["query_rows"])
+    heads = int(kwargs["heads"])
+    nope_dim = int(kwargs["nope_dim"])
+    rope_dim = int(kwargs["rope_dim"])
+    latent_dim = int(kwargs["latent_dim"])
+    weight_head_width = int(kwargs["weight_head_width"])
+    if (
+        heads != 64
+        or nope_dim != 192
+        or rope_dim != 64
+        or latent_dim != 512
+        or weight_head_width < nope_dim
+        or not 1 <= query_rows <= 32
+    ):
+        raise ValueError(
+            "SparkInfer GLM H64 BF16 query projection requires H=64, "
+            "M=1..32, q-nope=192, q-RoPE=64, latent=512, and a resident "
+            f"weight head width >=192; got H={heads}, M={query_rows}, "
+            f"q-nope={nope_dim}, q-RoPE={rope_dim}, latent={latent_dim}, "
+            f"weight_head_width={weight_head_width}"
+        )
+
+    buffers = ctx["buffers"]
+    device_id = int(buffers["q_nope"]["device_id"])
+    for name in ("weight", "q_pe", "out"):
+        if int(buffers[name]["device_id"]) != device_id:
+            raise ValueError(
+                "SparkInfer GLM H64 BF16 query projection buffers must share "
+                f"one device; q_nope is cuda:{device_id}, {name} is "
+                f"cuda:{buffers[name]['device_id']}"
+            )
+    required_bytes = {
+        "q_nope": query_rows * heads * nope_dim * 2,
+        "weight": heads * weight_head_width * latent_dim * 2,
+        "q_pe": query_rows * heads * rope_dim * 2,
+        "out": query_rows * heads * (latent_dim + rope_dim) * 2,
+    }
+    for name, required in required_bytes.items():
+        available = int(buffers[name]["bytes"])
+        if available < required:
+            raise ValueError(
+                f"SparkInfer GLM H64 BF16 {name} needs {required} bytes, "
+                f"got {available}"
+            )
+
+    stream = torch.cuda.ExternalStream(int(ctx["cuda_stream"]), device=device_id)
+    with torch.cuda.device(device_id), torch.cuda.stream(stream):
+        resident_weight = _bf16_tensor(
+            buffers["weight"], (heads, weight_head_width, latent_dim)
+        )
+        weight = resident_weight[:, :nope_dim, :]
+        if prepare_only:
+            block_m = 16 if query_rows <= 16 else 32
+            prepared_key = (device_id, block_m)
+            if prepared_key not in _SPARKINFER_GLM_H64_QUERY_PREPARED:
+                prewarm_glm_h64_bf16(
+                    weight,
+                    (query_rows,),
+                    stream=stream,
+                    synchronize=False,
+                )
+                _SPARKINFER_GLM_H64_QUERY_PREPARED.add(prepared_key)
+            return
+
+        q_nope = _bf16_tensor(
+            buffers["q_nope"], (query_rows, heads, nope_dim)
+        ).permute(1, 0, 2)
+        q_pe = _bf16_tensor(buffers["q_pe"], (query_rows, heads, rope_dim))
+        out = _bf16_tensor(
+            buffers["out"], (query_rows, heads, latent_dim + rope_dim)
+        )
+        run_glm_h64_bf16(q_nope, weight, q_pe, out, stream=stream)
 
 
 @cache
@@ -124,9 +285,9 @@ def _run_b12x_glm_dsa_indexer_prefill(
     ctx: dict[str, Any], *, prepare_only: bool, **kwargs: Any
 ) -> None:
     import torch
-    from b12x.attention.indexer.paged import index_topk_fp8
-    from b12x.attention.indexer.scratch import (
-        B12XIndexerPagedScratchCaps,
+    from sparkinfer.attention.nsa_indexer.paged import index_topk_fp8
+    from sparkinfer.attention.nsa_indexer.scratch import (
+        SPARKINFERIndexerPagedScratchCaps,
         plan_indexer_paged_scratch,
     )
 
@@ -159,7 +320,7 @@ def _run_b12x_glm_dsa_indexer_prefill(
     # flight beside the terminal decode row and must use the multi-row tiled
     # selector; the batched decode route is not reliable for real q>1 inputs.
     selector_mode = "decode" if query_rows == 1 else "prefill"
-    # A single decode row already consumes exactly one page-table row. B12X's
+    # A single decode row already consumes exactly one page-table row. SparkInfer's
     # fused q=1 route requires the ordinary (non-shared) contract. Multi-row
     # radix attention uses one physical page-ID row through a stride-zero
     # shared view instead of materializing query_rows copies.
@@ -222,7 +383,7 @@ def _run_b12x_glm_dsa_indexer_prefill(
 
         state = _B12X_GLM_DSA_INDEXER_STATES.get(state_key)
         if state is None:
-            caps = B12XIndexerPagedScratchCaps(
+            caps = SPARKINFERIndexerPagedScratchCaps(
                 device=q_fp8.device,
                 num_q_heads=_GLM_DSA_INDEX_HEADS,
                 max_q_rows=query_rows,
@@ -258,10 +419,10 @@ def _run_b12x_glm_dsa_indexer_prefill(
 
         binding, _ = state
         if query_rows == 1:
-            from b12x.attention.indexer.fused_indexer import (
+            from sparkinfer.attention.nsa_indexer.fused_indexer import (
                 run_fused_paged_indexer,
             )
-            from b12x.attention.indexer.kernel import (
+            from sparkinfer.attention.nsa_indexer.kernel import (
                 _split_index_k_cache_runtime_views,
             )
 
@@ -1108,9 +1269,9 @@ def _run_flashinfer_mla_rope_attention(
 
 
 def capture_mla_rope_attention(ctx: dict[str, Any], **kwargs: Any) -> None:
-    """Capture the GLM_NSA b12x MLA kernel from GLMRT raw pointer metadata.
+    """Capture the GLM_NSA SparkInfer MLA kernel from GLMRT raw pointer metadata.
 
-    This adapter intentionally supports only the b12x GLM_NSA absorbed-MLA
+    This adapter intentionally supports only the SparkInfer GLM_NSA absorbed-MLA
     contract: 8 local heads, q_nope/kv_nope/v_dim=512 and q/k_rope=64. Smaller
     debug MLA shapes stay on the Rust CUDA reference path.
     """
@@ -1124,9 +1285,15 @@ def capture_mla_rope_attention(ctx: dict[str, Any], **kwargs: Any) -> None:
         return
 
     import torch
-    from b12x.attention.mla.prefill_mg import run_unified_prefill_mg
-    from b12x.attention.mla.reference import pack_mla_kv_cache_reference
-    from b12x.attention.mla.traits import ComputeMode, ModelType, ScaleFormat
+    from sparkinfer.attention._shared.mla.prefill_mg import run_unified_prefill_mg
+    from sparkinfer.attention._shared.mla.reference import (
+        pack_mla_kv_cache_reference,
+    )
+    from sparkinfer.attention._shared.mla.traits import (
+        ComputeMode,
+        ModelType,
+        ScaleFormat,
+    )
 
     rows = int(kwargs["rows"])
     heads = int(kwargs["heads"])
@@ -1141,11 +1308,11 @@ def capture_mla_rope_attention(ctx: dict[str, Any], **kwargs: Any) -> None:
         or v_dim != _GLM_NSA_V_DIM
     ):
         raise ValueError(
-            "b12x GLM_NSA MLA capture requires heads=8, nope_dim=512, "
+            "SparkInfer GLM_NSA MLA capture requires heads=8, nope_dim=512, "
             "rope_dim=64, and v_dim=512"
         )
     if rows <= 0 or rows > _GLM_NSA_TOPK:
-        raise ValueError(f"b12x GLM_NSA MLA capture requires rows in [1, 512], got {rows}")
+        raise ValueError(f"SparkInfer GLM_NSA MLA capture requires rows in [1, 512], got {rows}")
 
     buffers = ctx["buffers"]
     device_id = int(buffers["q_nope"]["device_id"])

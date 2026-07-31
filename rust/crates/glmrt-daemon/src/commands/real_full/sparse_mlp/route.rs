@@ -1,19 +1,16 @@
 use anyhow::{Context, Result};
 use glmrt_core::{
     plan_completion_first_routes, CompletionRoutePlanEntry, DType, TensorCatalog, TensorInfo,
-    GLM52_FIRST_K_DENSE_REPLACE,
 };
 use glmrt_ffi::{
-    GlmrtB12xSparkMlpBuffers, GlmrtB12xSparkMoeTp4M1Buffers, GlmrtB12xSparkW4a16MoeBuffers,
-    GlmrtB12xSparkW4a4MoeBuffers, GlmrtDeviceBuffer, GlmrtHostBuffer, GlmrtNcclComm,
+    GlmrtB12xSparkW4a16MoeBuffers, GlmrtDeviceBuffer, GlmrtHostBuffer, GlmrtNcclComm,
     GlmrtNvfp4RouteBatchedMetadata, GlmrtRouteShardReductionBuffers, NativeLibrary,
     GLMRT_DEVICE_BUFFER_FLAG_MANAGED, GLMRT_ROUTE_SHARD_LOCAL_BF16, GLMRT_ROUTE_SHARD_LOCAL_F32,
     GLMRT_ROUTE_SHARD_WIRE_BF16, GLMRT_ROUTE_SHARD_WIRE_FP8_E4M3_ROW_SCALED,
     GLMRT_ROUTE_SHARD_WIRE_NVFP4_E2M1_FP8_E4M3,
 };
 use glmrt_loader::{
-    dtype_byte_width, load_tensor_bytes, load_tensor_rows, read_tensor_rows_into, LoadedTensor,
-    LoadedTensorRows,
+    dtype_byte_width, load_tensor_bytes, load_tensor_rows, LoadedTensor, LoadedTensorRows,
 };
 use glmrt_transport::{protocol_v2_verbs_host_execution_lanes, ExpertProtocolV2StreamPlan};
 use io_uring::{opcode, types, IoUring};
@@ -22,7 +19,6 @@ use std::{
     env,
     ffi::c_void,
     fs::{File, OpenOptions},
-    hash::{Hash, Hasher},
     ops::Deref,
     os::unix::fs::OpenOptionsExt,
     os::{fd::AsRawFd, unix::fs::FileExt},
@@ -47,16 +43,11 @@ use super::super::intermediate_sharding::{
     ExpertIntermediateShard, SparkExpertReduction,
 };
 use super::super::rdma_reduction::SparkExpertRdmaReduction;
-use super::math::{
-    bf16_bytes_to_f32, dot_packed_nvfp4, f8e4m3_byte_to_f32, first_f32_scalar, silu,
-    tensor_row_bytes,
-};
+use super::math::{bf16_bytes_to_f32, dot_packed_nvfp4, first_f32_scalar, silu, tensor_row_bytes};
 use super::router::ScoredRoute;
 
 const REAL_FULL_CUDA_REFERENCE_KERNELS_ENV: &str = "GLMRT_REAL_FULL_CUDA_REFERENCE_KERNELS";
 const REAL_FULL_CUDA_ROUTE_VALIDATE_ENV: &str = "GLMRT_REAL_FULL_CUDA_ROUTE_VALIDATE";
-const REAL_FULL_NVFP4_ROUTE_MANAGED_PROJECTIONS_ENV: &str =
-    "GLMRT_REAL_FULL_NVFP4_ROUTE_MANAGED_PROJECTIONS";
 const REAL_FULL_NVFP4_ROUTE_CUDA_GRAPHS_ENV: &str = "GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_GRAPHS";
 const REAL_FULL_NVFP4_ROUTE_GROUPED_MULTIROW_ENV: &str =
     "GLMRT_REAL_FULL_NVFP4_ROUTE_GROUPED_MULTIROW";
@@ -67,10 +58,6 @@ const REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING_ENV: &str =
     "GLMRT_REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING";
 const REAL_FULL_B12X_SPARK_DIRECT_ROUTE_ENV: &str = "GLMRT_B12X_SPARK_DIRECT_ROUTE";
 const REAL_FULL_B12X_SPARK_GROUPED_DECODE_ENV: &str = "GLMRT_B12X_SPARK_GROUPED_DECODE";
-const REAL_FULL_B12X_SPARK_W4A16_PACKED_ENV: &str = "GLMRT_B12X_SPARK_W4A16_PACKED";
-const REAL_FULL_SPARKINFER_SOURCE_W4A16_ENV: &str = "GLMRT_SPARKINFER_SOURCE_W4A16";
-const REAL_FULL_SPARKINFER_SOURCE_W4A16_DIRECT_MAX_ROWS_ENV: &str =
-    "GLMRT_SPARKINFER_SOURCE_W4A16_DIRECT_MAX_ROWS";
 const REAL_FULL_B12X_SPARK_W4A16_SMALL_M_MODE_ENV: &str = "GLMRT_B12X_SPARK_W4A16_SMALL_M_MODE";
 const REAL_FULL_B12X_SPARK_W4A16_DEVICE_WEIGHTS_ENV: &str = "GLMRT_B12X_SPARK_W4A16_DEVICE_WEIGHTS";
 const REAL_FULL_B12X_SPARK_ROUTE_LANES_ENV: &str = "GLMRT_B12X_SPARK_ROUTE_LANES";
@@ -92,8 +79,6 @@ const CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_DEVICE_OUTPUT_BACKEND: &str =
 const B12X_SPARK_DIRECT_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND: &str =
     "b12x-spark-aot-direct-nvfp4-route-bf16-staged-accumulated";
 const RETAINED_BF16_MTP_ROUTE_BACKEND: &str = "retained-bf16-mtp-cublas-route-bf16-accumulated";
-const MIXED_B12X_SPARK_DIRECT_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND: &str =
-    "mixed-b12x-spark-aot-direct-nvfp4-route-bf16-staged-accumulated";
 const B12X_SPARK_AOT_MAX_ROWS: usize = 256;
 const B12X_SPARK_ROUTE_MAX_LANES: usize = 4;
 const B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS: usize = 2048;
@@ -103,7 +88,6 @@ const B12X_W4A16_MAX_PACKED_ROUTE_SLOTS: usize = 32_512;
 const B12X_W4A16_MAX_ROUTE_BLOCKS: usize = 760;
 const B12X_W4A16_SCRATCH_ELEMENTS: usize = 3_145_728;
 const B12X_W4A16_LOCK_ELEMENTS: usize = 1_026;
-const B12X_W4A4_PREFILL_SCRATCH_BYTES: usize = 46_459_260;
 const STREAMING_FIRST_RESPONSE_ROWS: usize = 32;
 const STREAMING_RESPONSE_MAX_ROWS: usize = 256;
 const SPARK_COLLECTIVE_REQUEST_STRIDE: u64 = 65_536;
@@ -341,8 +325,6 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static CUDA_ROUTE_VALIDATION_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
         const { std::cell::Cell::new(None) };
-    static MANAGED_PROJECTIONS_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
-        const { std::cell::Cell::new(None) };
     static ROUTE_CUDA_GRAPHS_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
         const { std::cell::Cell::new(None) };
 }
@@ -457,36 +439,25 @@ impl RouteTensorCache {
             .cuda
             .as_ref()
             .map(|cuda| {
-                let projection_entries = if cuda.b12x_w4a16_packed {
-                    cuda.expert_slabs
-                        .values()
-                        .map(|slab| slab.expert_count * 3)
-                        .sum()
-                } else {
-                    cuda.projections.len()
-                };
-                let managed_projection_entries = if cuda.b12x_w4a16_packed {
-                    cuda.expert_slabs
-                        .values()
-                        .map(|slab| slab.managed_projection_entries())
-                        .sum()
-                } else {
-                    cuda.projections
-                        .values()
-                        .filter(|projection| projection.uses_managed_storage())
-                        .count()
-                };
+                let projection_entries = cuda
+                    .expert_slabs
+                    .values()
+                    .map(|slab| slab.expert_count * 3)
+                    .sum();
+                let managed_projection_entries = cuda
+                    .expert_slabs
+                    .values()
+                    .map(|slab| slab.managed_projection_entries())
+                    .sum();
                 (
                     projection_entries,
                     cuda.projection_uploads,
-                    cuda.cache_hits,
-                    cuda.projection_evictions,
+                    0,
+                    0,
                     cuda.active_layer,
                     managed_projection_entries,
-                    cuda.managed_projection_allocations,
-                    cuda.graphs.len()
-                        + cuda.grouped_decode_graphs.len()
-                        + cuda.packed_w4a16_decode_graphs.len()
+                    false,
+                    cuda.packed_w4a16_decode_graphs.len()
                         + cuda.packed_w4a16_stream_decode_graphs.len(),
                     cuda.graph_captures,
                     cuda.graph_launches,
@@ -581,18 +552,12 @@ struct RouteCudaCache {
     b12x_lane_events: Vec<RouteCudaEvent>,
     completion_stream: RouteCudaStream,
     metadata_ready_event: RouteCudaEvent,
-    projections: HashMap<RoutedQuantProjectionKey, Arc<DeviceRoutedQuantProjection>>,
     expert_slabs: HashMap<usize, Arc<RouteCudaLayerExpertSlab>>,
     bf16_expert_slabs: HashMap<usize, Arc<RouteCudaBf16LayerExpertSlab>>,
     projection_uploads: usize,
-    cache_hits: usize,
-    projection_evictions: usize,
     active_layer: Option<usize>,
     workspace: RouteCudaWorkspace,
     b12x_aux_workspaces: Vec<RouteCudaWorkspace>,
-    managed_projection_allocations: bool,
-    graphs: HashMap<RouteCudaGraphKey, CapturedRouteCudaGraph>,
-    grouped_decode_graphs: HashMap<GroupedDecodeCudaGraphKey, CapturedRouteCudaGraph>,
     packed_w4a16_decode_graphs: HashMap<PackedW4a16DecodeCudaGraphKey, CapturedRouteCudaGraph>,
     packed_w4a16_stream_decode_graphs:
         HashMap<PackedW4a16StreamDecodeCudaGraphKey, CapturedRouteCudaGraph>,
@@ -600,7 +565,6 @@ struct RouteCudaCache {
     graph_launches: usize,
     b12x_aot_enabled: bool,
     b12x_w4a16_packed: bool,
-    sparkinfer_source_w4a16: bool,
     grouped_decode_observed: bool,
 }
 
@@ -631,21 +595,7 @@ impl RouteCudaCache {
                 .cuda_b12x_spark_aot_init()
                 .context("initializing Spark B12X AOT kernels")?;
         }
-        let sparkinfer_source_w4a16_requested =
-            b12x_aot_enabled && sparkinfer_source_w4a16_enabled();
-        let sparkinfer_source_w4a16 = if sparkinfer_source_w4a16_requested {
-            anyhow::ensure!(
-                library
-                    .cuda_sparkinfer_source_w4a16_aot_available()
-                    .context("querying SparkInfer source W4A16 AOT availability")?,
-                "{REAL_FULL_SPARKINFER_SOURCE_W4A16_ENV}=1 requires a native build with GLMRT_ENABLE_SPARKINFER_SOURCE_W4A16_AOT=ON"
-            );
-            true
-        } else {
-            false
-        };
-        let b12x_w4a16_packed =
-            b12x_aot_enabled && !sparkinfer_source_w4a16 && b12x_spark_w4a16_packed_enabled();
+        let b12x_w4a16_packed = b12x_aot_enabled;
         let library = Arc::new(library);
         let stream = RouteCudaStream::new(Arc::clone(&library))?;
         let completion_stream = RouteCudaStream::new(Arc::clone(&library))?;
@@ -696,25 +646,18 @@ impl RouteCudaCache {
             b12x_lane_events,
             completion_stream,
             metadata_ready_event,
-            projections: HashMap::new(),
             expert_slabs: HashMap::new(),
             bf16_expert_slabs: HashMap::new(),
             projection_uploads: 0,
-            cache_hits: 0,
-            projection_evictions: 0,
             active_layer: None,
             workspace: RouteCudaWorkspace::default(),
             b12x_aux_workspaces,
-            managed_projection_allocations: managed_route_projections_enabled(),
-            graphs: HashMap::new(),
-            grouped_decode_graphs: HashMap::new(),
             packed_w4a16_decode_graphs: HashMap::new(),
             packed_w4a16_stream_decode_graphs: HashMap::new(),
             graph_captures: 0,
             graph_launches: 0,
             b12x_aot_enabled,
             b12x_w4a16_packed,
-            sparkinfer_source_w4a16,
             grouped_decode_observed: false,
         })
     }
@@ -755,25 +698,18 @@ impl RouteCudaCache {
             b12x_lane_events,
             completion_stream,
             metadata_ready_event,
-            projections: self.projections.clone(),
             expert_slabs: self.expert_slabs.clone(),
             bf16_expert_slabs: self.bf16_expert_slabs.clone(),
             projection_uploads: 0,
-            cache_hits: 0,
-            projection_evictions: 0,
             active_layer: self.active_layer,
             workspace: RouteCudaWorkspace::default(),
             b12x_aux_workspaces,
-            managed_projection_allocations: self.managed_projection_allocations,
-            graphs: HashMap::new(),
-            grouped_decode_graphs: HashMap::new(),
             packed_w4a16_decode_graphs: HashMap::new(),
             packed_w4a16_stream_decode_graphs: HashMap::new(),
             graph_captures: 0,
             graph_launches: 0,
             b12x_aot_enabled: self.b12x_aot_enabled,
             b12x_w4a16_packed: self.b12x_w4a16_packed,
-            sparkinfer_source_w4a16: self.sparkinfer_source_w4a16,
             grouped_decode_observed: false,
         })
     }
@@ -837,7 +773,6 @@ impl RouteCudaCache {
         hidden_dim: usize,
         intermediate_dim: usize,
         output_dim: usize,
-        require_w4a4_scratch: bool,
     ) -> Result<Vec<B12xSparkAotRouteWorkspaceBuffers>> {
         anyhow::ensure!(
             lane_count > 0 && lane_count <= self.b12x_lane_count(),
@@ -851,7 +786,6 @@ impl RouteCudaCache {
             hidden_dim,
             intermediate_dim,
             output_dim,
-            require_w4a4_scratch,
         )?);
         for workspace in self.b12x_aux_workspaces.iter_mut().take(lane_count - 1) {
             workspaces.push(workspace.ensure_b12x_aot_route_buffers(
@@ -860,7 +794,6 @@ impl RouteCudaCache {
                 hidden_dim,
                 intermediate_dim,
                 output_dim,
-                require_w4a4_scratch,
             )?);
         }
         Ok(workspaces)
@@ -868,249 +801,6 @@ impl RouteCudaCache {
 
     fn prepare_layer(&mut self, layer_id: usize) {
         self.active_layer = Some(layer_id);
-    }
-
-    fn device_projection(
-        &mut self,
-        key: RoutedQuantProjectionKey,
-        projection: &RoutedQuantProjection,
-        cuda_stream: *mut c_void,
-    ) -> Result<Arc<DeviceRoutedQuantProjection>> {
-        if let Some(device_projection) = self.projections.get(&key) {
-            self.cache_hits += 1;
-            return Ok(Arc::clone(device_projection));
-        }
-
-        let device_projection = Arc::new(DeviceRoutedQuantProjection::from_host(
-            Arc::clone(&self.library),
-            projection,
-            cuda_stream,
-            &mut self.workspace,
-            self.managed_projection_allocations,
-            self.b12x_aot_enabled,
-        )?);
-        self.projection_uploads += 1;
-        self.projections.insert(key, Arc::clone(&device_projection));
-        Ok(device_projection)
-    }
-
-    fn device_projection_for_source(
-        &mut self,
-        catalog: &TensorCatalog,
-        source: &Bf16RouteProjection,
-        cuda_stream: *mut c_void,
-    ) -> Result<Arc<DeviceRoutedQuantProjection>> {
-        if let Some(projection) = &source.host {
-            return self.device_projection(source.key.clone(), projection, cuda_stream);
-        }
-        self.device_projection_from_catalog(catalog, source.key.clone(), cuda_stream)
-    }
-
-    fn device_projection_from_catalog(
-        &mut self,
-        catalog: &TensorCatalog,
-        key: RoutedQuantProjectionKey,
-        cuda_stream: *mut c_void,
-    ) -> Result<Arc<DeviceRoutedQuantProjection>> {
-        if let Some(device_projection) = self.projections.get(&key) {
-            self.cache_hits += 1;
-            return Ok(Arc::clone(device_projection));
-        }
-
-        let device_projection = Arc::new(DeviceRoutedQuantProjection::from_catalog_rows(
-            Arc::clone(&self.library),
-            catalog,
-            &key,
-            cuda_stream,
-            &mut self.workspace,
-            self.managed_projection_allocations,
-            self.b12x_aot_enabled,
-        )?);
-        self.projection_uploads += 1;
-        self.projections.insert(key, Arc::clone(&device_projection));
-        Ok(device_projection)
-    }
-
-    fn device_projection_view_for_source(
-        &mut self,
-        catalog: &TensorCatalog,
-        source: &Bf16RouteProjection,
-        cuda_stream: *mut c_void,
-    ) -> Result<DeviceRoutedQuantProjectionView> {
-        self.device_projection_for_source(catalog, source, cuda_stream)
-            .map(DeviceRoutedQuantProjectionView::from_projection)
-    }
-
-    unsafe fn launch_or_capture_host_accumulation_graph(
-        &mut self,
-        workspace: RouteCudaAccumulationWorkspaceBuffers,
-        pinned_payloads: RouteCudaPinnedPayloadBuffers,
-        route_metadata_payload: GlmrtHostBuffer,
-        pinned_output: GlmrtHostBuffer,
-        row_count: usize,
-        route_count: usize,
-        hidden_dim: usize,
-        hidden_row_stride_elems: usize,
-        max_intermediate_rows: usize,
-        output_rows: usize,
-        hidden_bytes: usize,
-        scatter_index_bytes: usize,
-        route_weight_bytes: usize,
-        route_metadata_bytes: usize,
-        output_values: usize,
-        output_bytes: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let key = RouteCudaGraphKey::new(
-            workspace,
-            pinned_payloads,
-            route_metadata_payload,
-            pinned_output,
-            row_count,
-            route_count,
-            hidden_dim,
-            hidden_row_stride_elems,
-            max_intermediate_rows,
-            output_rows,
-            hidden_bytes,
-            scatter_index_bytes,
-            route_weight_bytes,
-            route_metadata_bytes,
-            output_values,
-            output_bytes,
-        );
-        if let Some(graph) = self.graphs.get(&key) {
-            unsafe {
-                self.library
-                    .cuda_graph_launch(graph.graph_exec, cuda_stream)
-                    .context("launching captured NVFP4 host-input route graph")?;
-            }
-            self.graph_launches += 1;
-            return Ok(());
-        }
-
-        unsafe {
-            self.library
-                .cuda_graph_begin_capture(cuda_stream)
-                .context("beginning NVFP4 host-input route graph capture")?;
-            enqueue_host_accumulation_graph_ops(
-                &self.library,
-                workspace,
-                pinned_payloads,
-                route_metadata_payload,
-                pinned_output,
-                row_count,
-                route_count,
-                hidden_dim,
-                hidden_row_stride_elems,
-                max_intermediate_rows,
-                output_rows,
-                hidden_bytes,
-                scatter_index_bytes,
-                route_weight_bytes,
-                route_metadata_bytes,
-                output_values,
-                output_bytes,
-                cuda_stream,
-            )?;
-            let capture = self
-                .library
-                .cuda_graph_end_capture_retained(cuda_stream)
-                .context("ending NVFP4 host-input route graph capture")?;
-            let graph = CapturedRouteCudaGraph::new(Arc::clone(&self.library), capture)?;
-            self.graphs.insert(key, graph);
-            self.graph_captures += 1;
-            let graph = self
-                .graphs
-                .get(&key)
-                .expect("captured NVFP4 route graph was inserted");
-            self.library
-                .cuda_graph_launch(graph.graph_exec, cuda_stream)
-                .context("launching newly captured NVFP4 host-input route graph")?;
-        }
-        self.graph_launches += 1;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn launch_or_capture_grouped_decode_graph(
-        &mut self,
-        layer_id: usize,
-        workspace: RouteCudaAccumulationWorkspaceBuffers,
-        pinned_payloads: RouteCudaPinnedPayloadBuffers,
-        route_metadata_payload: GlmrtHostBuffer,
-        layer_buffers: B12xSparkMoeTp4LayerBuffers,
-        b12x_workspace: B12xSparkAotRouteWorkspaceBuffers,
-        input_payload_stride_bytes: usize,
-        hidden_bytes: usize,
-        scatter_index_bytes: usize,
-        route_weight_bytes: usize,
-        route_metadata_bytes: usize,
-        output_values: usize,
-        output_rows: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let key = GroupedDecodeCudaGraphKey::new(
-            layer_id,
-            workspace,
-            pinned_payloads,
-            route_metadata_payload,
-            layer_buffers,
-            b12x_workspace,
-            input_payload_stride_bytes,
-            hidden_bytes,
-            scatter_index_bytes,
-            route_weight_bytes,
-            route_metadata_bytes,
-            output_values,
-            output_rows,
-        );
-        if let Some(graph) = self.grouped_decode_graphs.get(&key) {
-            self.library
-                .cuda_graph_launch(graph.graph_exec, cuda_stream)
-                .context("launching captured grouped B12X decode graph")?;
-            self.graph_launches += 1;
-            return Ok(());
-        }
-
-        self.library
-            .cuda_graph_begin_capture(cuda_stream)
-            .context("beginning grouped B12X decode graph capture")?;
-        enqueue_grouped_decode_graph_ops(
-            &self.library,
-            workspace,
-            pinned_payloads,
-            route_metadata_payload,
-            layer_buffers,
-            b12x_workspace,
-            input_payload_stride_bytes,
-            hidden_bytes,
-            route_weight_bytes,
-            route_metadata_bytes,
-            output_rows,
-            cuda_stream,
-        )?;
-        let capture = self
-            .library
-            .cuda_graph_end_capture_retained(cuda_stream)
-            .context("ending grouped B12X decode graph capture")?;
-        let graph = CapturedRouteCudaGraph::new_with_node_requirements(
-            Arc::clone(&self.library),
-            capture,
-            true,
-            "grouped B12X decode graph",
-        )?;
-        self.grouped_decode_graphs.insert(key, graph);
-        self.graph_captures += 1;
-        let graph = self
-            .grouped_decode_graphs
-            .get(&key)
-            .expect("captured grouped B12X decode graph was inserted");
-        self.library
-            .cuda_graph_launch(graph.graph_exec, cuda_stream)
-            .context("launching newly captured grouped B12X decode graph")?;
-        self.graph_launches += 1;
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1434,18 +1124,9 @@ impl RouteCudaEventTimeline {
     }
 }
 
-fn source_prefill_frontier_timing_sample(layer_id: usize, rows: usize) -> bool {
-    static SAMPLES: AtomicUsize = AtomicUsize::new(0);
-    if layer_id != GLM52_FIRST_K_DENSE_REPLACE || rows != B12X_SPARK_AOT_MAX_ROWS {
-        return false;
-    }
-    SAMPLES.fetch_add(1, Ordering::Relaxed) < 2
-}
-
 #[derive(Default)]
 struct RouteCudaWorkspace {
     hidden: Option<OwnedDeviceAllocation>,
-    activation_workspace: Option<OwnedDeviceAllocation>,
     accumulator: Option<OwnedDeviceAllocation>,
     final_output: Option<OwnedDeviceAllocation>,
     scatter_index: Option<OwnedDeviceAllocation>,
@@ -1458,17 +1139,6 @@ struct RouteCudaWorkspace {
     completion_reduction_recv: Option<OwnedDeviceAllocation>,
     b12x_compact_hidden: Option<OwnedDeviceAllocation>,
     b12x_group_output: Option<OwnedDeviceAllocation>,
-    b12x_input_packed: Option<OwnedDeviceAllocation>,
-    b12x_input_scale: Option<OwnedDeviceAllocation>,
-    b12x_gate_output: Option<OwnedDeviceAllocation>,
-    b12x_up_output: Option<OwnedDeviceAllocation>,
-    b12x_activation_packed: Option<OwnedDeviceAllocation>,
-    b12x_activation_scale: Option<OwnedDeviceAllocation>,
-    b12x_projection_scale_swizzle: Option<OwnedDeviceAllocation>,
-    b12x_alphas: Option<OwnedDeviceAllocation>,
-    b12x_moe_intermediate: Option<OwnedDeviceAllocation>,
-    b12x_moe_barrier_count: Option<OwnedDeviceAllocation>,
-    b12x_moe_barrier_epoch: Option<OwnedDeviceAllocation>,
     b12x_w4a16_fc1_output: Option<OwnedDeviceAllocation>,
     b12x_w4a16_activated: Option<OwnedDeviceAllocation>,
     b12x_w4a16_packed_route_indices: Option<OwnedDeviceAllocation>,
@@ -1478,7 +1148,6 @@ struct RouteCudaWorkspace {
     b12x_w4a16_fc1_scratch: Option<OwnedDeviceAllocation>,
     b12x_w4a16_fc2_scratch: Option<OwnedDeviceAllocation>,
     b12x_w4a16_locks: Option<OwnedDeviceAllocation>,
-    b12x_w4a4_scratch: Option<OwnedDeviceAllocation>,
     b12x_w4a16_pack_source: Option<OwnedDeviceAllocation>,
     startup_nvfp4_weight: Option<OwnedDeviceAllocation>,
     startup_nvfp4_scale: Option<OwnedDeviceAllocation>,
@@ -1487,7 +1156,6 @@ struct RouteCudaWorkspace {
     pinned_route_weights: Option<OwnedPinnedHostAllocation>,
     pinned_route_metadata: Option<OwnedPinnedHostAllocation>,
     pinned_projection_weight: Option<OwnedPinnedHostAllocation>,
-    pinned_projection_scale: Option<OwnedPinnedHostAllocation>,
     pinned_output: Option<OwnedPinnedHostAllocation>,
     pinned_completion_indices: Option<OwnedPinnedHostAllocation>,
     pinned_completion_output: Option<OwnedPinnedHostAllocation>,
@@ -1498,7 +1166,6 @@ struct RouteCudaWorkspace {
 #[derive(Clone, Copy)]
 struct RouteCudaAccumulationWorkspaceBuffers {
     hidden: GlmrtDeviceBuffer,
-    activation_workspace: GlmrtDeviceBuffer,
     accumulator: GlmrtDeviceBuffer,
     final_output: GlmrtDeviceBuffer,
     scatter_index: GlmrtDeviceBuffer,
@@ -1544,16 +1211,6 @@ struct RouteCudaStreamingCompletionPlan {
 struct B12xSparkAotRouteWorkspaceBuffers {
     compact_hidden: GlmrtDeviceBuffer,
     group_output: GlmrtDeviceBuffer,
-    input_packed: GlmrtDeviceBuffer,
-    input_scale: GlmrtDeviceBuffer,
-    gate_output: GlmrtDeviceBuffer,
-    up_output: GlmrtDeviceBuffer,
-    activation_packed: GlmrtDeviceBuffer,
-    activation_scale: GlmrtDeviceBuffer,
-    alphas: GlmrtDeviceBuffer,
-    moe_intermediate: GlmrtDeviceBuffer,
-    moe_barrier_count: GlmrtDeviceBuffer,
-    moe_barrier_epoch: GlmrtDeviceBuffer,
     w4a16_fc1_output: GlmrtDeviceBuffer,
     w4a16_activated: GlmrtDeviceBuffer,
     w4a16_packed_route_indices: GlmrtDeviceBuffer,
@@ -1563,256 +1220,6 @@ struct B12xSparkAotRouteWorkspaceBuffers {
     w4a16_fc1_scratch: GlmrtDeviceBuffer,
     w4a16_fc2_scratch: GlmrtDeviceBuffer,
     w4a16_locks: GlmrtDeviceBuffer,
-    w4a4_scratch: GlmrtDeviceBuffer,
-}
-
-struct DeviceRoutedQuantProjectionView {
-    _owner: Arc<DeviceRoutedQuantProjection>,
-    weight: GlmrtDeviceBuffer,
-    weight_scale: GlmrtDeviceBuffer,
-    weight_row_stride_bytes: usize,
-    weight_scale_row_stride_bytes: usize,
-    weight_scale_b12x_swizzled: bool,
-}
-
-impl DeviceRoutedQuantProjectionView {
-    fn from_projection(projection: Arc<DeviceRoutedQuantProjection>) -> Self {
-        let weight = projection.weight.buffer();
-        let weight_scale = projection.weight_scale.buffer();
-        let weight_row_stride_bytes = projection.weight_row_stride_bytes;
-        let weight_scale_row_stride_bytes = projection.weight_scale_row_stride_bytes;
-        let weight_scale_b12x_swizzled = projection.weight_scale_b12x_swizzled;
-        Self {
-            _owner: projection,
-            weight,
-            weight_scale,
-            weight_row_stride_bytes,
-            weight_scale_row_stride_bytes,
-            weight_scale_b12x_swizzled,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq)]
-struct RouteCudaGraphKey {
-    hidden_device_ptr: usize,
-    scatter_index_device_ptr: usize,
-    route_weights_device_ptr: usize,
-    route_metadata_device_ptr: usize,
-    activation_workspace_device_ptr: usize,
-    accumulator_device_ptr: usize,
-    final_output_device_ptr: usize,
-    hidden_host_ptr: usize,
-    scatter_index_host_ptr: usize,
-    route_weights_host_ptr: usize,
-    route_metadata_host_ptr: usize,
-    output_host_ptr: usize,
-    row_count: usize,
-    route_count: usize,
-    hidden_dim: usize,
-    hidden_row_stride_elems: usize,
-    max_intermediate_rows: usize,
-    output_rows: usize,
-    hidden_bytes: usize,
-    scatter_index_bytes: usize,
-    route_weight_bytes: usize,
-    route_metadata_bytes: usize,
-    output_values: usize,
-    output_bytes: usize,
-}
-
-impl RouteCudaGraphKey {
-    fn new(
-        workspace: RouteCudaAccumulationWorkspaceBuffers,
-        pinned_payloads: RouteCudaPinnedPayloadBuffers,
-        route_metadata_payload: GlmrtHostBuffer,
-        pinned_output: GlmrtHostBuffer,
-        row_count: usize,
-        route_count: usize,
-        hidden_dim: usize,
-        hidden_row_stride_elems: usize,
-        max_intermediate_rows: usize,
-        output_rows: usize,
-        hidden_bytes: usize,
-        scatter_index_bytes: usize,
-        route_weight_bytes: usize,
-        route_metadata_bytes: usize,
-        output_values: usize,
-        output_bytes: usize,
-    ) -> Self {
-        Self {
-            hidden_device_ptr: workspace.hidden.ptr as usize,
-            scatter_index_device_ptr: workspace.scatter_index.ptr as usize,
-            route_weights_device_ptr: workspace.route_weights.ptr as usize,
-            route_metadata_device_ptr: workspace.route_metadata.ptr as usize,
-            activation_workspace_device_ptr: workspace.activation_workspace.ptr as usize,
-            accumulator_device_ptr: workspace.accumulator.ptr as usize,
-            final_output_device_ptr: workspace.final_output.ptr as usize,
-            hidden_host_ptr: pinned_payloads.hidden.ptr as usize,
-            scatter_index_host_ptr: pinned_payloads.scatter_index.ptr as usize,
-            route_weights_host_ptr: pinned_payloads.route_weights.ptr as usize,
-            route_metadata_host_ptr: route_metadata_payload.ptr as usize,
-            output_host_ptr: pinned_output.ptr as usize,
-            row_count,
-            route_count,
-            hidden_dim,
-            hidden_row_stride_elems,
-            max_intermediate_rows,
-            output_rows,
-            hidden_bytes,
-            scatter_index_bytes,
-            route_weight_bytes,
-            route_metadata_bytes,
-            output_values,
-            output_bytes,
-        }
-    }
-}
-
-impl PartialEq for RouteCudaGraphKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.hidden_device_ptr == other.hidden_device_ptr
-            && self.scatter_index_device_ptr == other.scatter_index_device_ptr
-            && self.route_weights_device_ptr == other.route_weights_device_ptr
-            && self.route_metadata_device_ptr == other.route_metadata_device_ptr
-            && self.activation_workspace_device_ptr == other.activation_workspace_device_ptr
-            && self.accumulator_device_ptr == other.accumulator_device_ptr
-            && self.final_output_device_ptr == other.final_output_device_ptr
-            && self.hidden_host_ptr == other.hidden_host_ptr
-            && self.scatter_index_host_ptr == other.scatter_index_host_ptr
-            && self.route_weights_host_ptr == other.route_weights_host_ptr
-            && self.route_metadata_host_ptr == other.route_metadata_host_ptr
-            && self.output_host_ptr == other.output_host_ptr
-            && self.row_count == other.row_count
-            && self.route_count == other.route_count
-            && self.hidden_dim == other.hidden_dim
-            && self.hidden_row_stride_elems == other.hidden_row_stride_elems
-            && self.max_intermediate_rows == other.max_intermediate_rows
-            && self.output_rows == other.output_rows
-            && self.hidden_bytes == other.hidden_bytes
-            && self.scatter_index_bytes == other.scatter_index_bytes
-            && self.route_weight_bytes == other.route_weight_bytes
-            && self.route_metadata_bytes == other.route_metadata_bytes
-            && self.output_values == other.output_values
-            && self.output_bytes == other.output_bytes
-    }
-}
-
-impl Hash for RouteCudaGraphKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.hidden_device_ptr.hash(state);
-        self.scatter_index_device_ptr.hash(state);
-        self.route_weights_device_ptr.hash(state);
-        self.route_metadata_device_ptr.hash(state);
-        self.activation_workspace_device_ptr.hash(state);
-        self.accumulator_device_ptr.hash(state);
-        self.final_output_device_ptr.hash(state);
-        self.hidden_host_ptr.hash(state);
-        self.scatter_index_host_ptr.hash(state);
-        self.route_weights_host_ptr.hash(state);
-        self.route_metadata_host_ptr.hash(state);
-        self.output_host_ptr.hash(state);
-        self.row_count.hash(state);
-        self.route_count.hash(state);
-        self.hidden_dim.hash(state);
-        self.hidden_row_stride_elems.hash(state);
-        self.max_intermediate_rows.hash(state);
-        self.output_rows.hash(state);
-        self.hidden_bytes.hash(state);
-        self.scatter_index_bytes.hash(state);
-        self.route_weight_bytes.hash(state);
-        self.route_metadata_bytes.hash(state);
-        self.output_values.hash(state);
-        self.output_bytes.hash(state);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct GroupedDecodeCudaGraphKey {
-    layer_id: usize,
-    hidden_device_ptr: usize,
-    scatter_index_device_ptr: usize,
-    route_weights_device_ptr: usize,
-    route_metadata_device_ptr: usize,
-    accumulator_device_ptr: usize,
-    final_output_device_ptr: usize,
-    hidden_host_ptr: usize,
-    scatter_index_host_ptr: usize,
-    route_weights_host_ptr: usize,
-    route_metadata_host_ptr: usize,
-    w13_weight_ptr: usize,
-    w13_scale_ptr: usize,
-    w1_alphas_ptr: usize,
-    a1_gscale_ptr: usize,
-    a2_gscale_ptr: usize,
-    w2_weight_ptr: usize,
-    w2_scale_ptr: usize,
-    w2_alphas_ptr: usize,
-    input_bf16_ptr: usize,
-    group_output_ptr: usize,
-    intermediate_ptr: usize,
-    barrier_count_ptr: usize,
-    barrier_epoch_ptr: usize,
-    input_payload_stride_bytes: usize,
-    hidden_bytes: usize,
-    scatter_index_bytes: usize,
-    route_weight_bytes: usize,
-    route_metadata_bytes: usize,
-    output_values: usize,
-    output_rows: usize,
-}
-
-impl GroupedDecodeCudaGraphKey {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        layer_id: usize,
-        workspace: RouteCudaAccumulationWorkspaceBuffers,
-        pinned_payloads: RouteCudaPinnedPayloadBuffers,
-        route_metadata_payload: GlmrtHostBuffer,
-        layer_buffers: B12xSparkMoeTp4LayerBuffers,
-        b12x_workspace: B12xSparkAotRouteWorkspaceBuffers,
-        input_payload_stride_bytes: usize,
-        hidden_bytes: usize,
-        scatter_index_bytes: usize,
-        route_weight_bytes: usize,
-        route_metadata_bytes: usize,
-        output_values: usize,
-        output_rows: usize,
-    ) -> Self {
-        Self {
-            layer_id,
-            hidden_device_ptr: workspace.hidden.ptr as usize,
-            scatter_index_device_ptr: workspace.scatter_index.ptr as usize,
-            route_weights_device_ptr: workspace.route_weights.ptr as usize,
-            route_metadata_device_ptr: workspace.route_metadata.ptr as usize,
-            accumulator_device_ptr: workspace.accumulator.ptr as usize,
-            final_output_device_ptr: workspace.final_output.ptr as usize,
-            hidden_host_ptr: pinned_payloads.hidden.ptr as usize,
-            scatter_index_host_ptr: pinned_payloads.scatter_index.ptr as usize,
-            route_weights_host_ptr: pinned_payloads.route_weights.ptr as usize,
-            route_metadata_host_ptr: route_metadata_payload.ptr as usize,
-            w13_weight_ptr: layer_buffers.w13_weight.ptr as usize,
-            w13_scale_ptr: layer_buffers.w13_scale.ptr as usize,
-            w1_alphas_ptr: layer_buffers.w1_alphas.ptr as usize,
-            a1_gscale_ptr: layer_buffers.a1_gscale.ptr as usize,
-            a2_gscale_ptr: layer_buffers.a2_gscale.ptr as usize,
-            w2_weight_ptr: layer_buffers.w2_weight.ptr as usize,
-            w2_scale_ptr: layer_buffers.w2_scale.ptr as usize,
-            w2_alphas_ptr: layer_buffers.w2_alphas.ptr as usize,
-            input_bf16_ptr: b12x_workspace.compact_hidden.ptr as usize,
-            group_output_ptr: b12x_workspace.group_output.ptr as usize,
-            intermediate_ptr: b12x_workspace.moe_intermediate.ptr as usize,
-            barrier_count_ptr: b12x_workspace.moe_barrier_count.ptr as usize,
-            barrier_epoch_ptr: b12x_workspace.moe_barrier_epoch.ptr as usize,
-            input_payload_stride_bytes,
-            hidden_bytes,
-            scatter_index_bytes,
-            route_weight_bytes,
-            route_metadata_bytes,
-            output_values,
-            output_rows,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1934,13 +1341,6 @@ struct CapturedRouteCudaGraph {
 }
 
 impl CapturedRouteCudaGraph {
-    fn new(
-        library: Arc<NativeLibrary>,
-        capture: glmrt_ffi::GlmrtCudaGraphCaptureInfo,
-    ) -> Result<Self> {
-        Self::new_with_node_requirements(library, capture, true, "NVFP4 route graph")
-    }
-
     fn new_with_node_requirements(
         library: Arc<NativeLibrary>,
         capture: glmrt_ffi::GlmrtCudaGraphCaptureInfo,
@@ -2142,216 +1542,9 @@ unsafe fn enqueue_packed_w4a16_decode_graph_ops(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe fn enqueue_grouped_decode_graph_ops(
-    library: &NativeLibrary,
-    workspace: RouteCudaAccumulationWorkspaceBuffers,
-    pinned_payloads: RouteCudaPinnedPayloadBuffers,
-    route_metadata_payload: GlmrtHostBuffer,
-    layer_buffers: B12xSparkMoeTp4LayerBuffers,
-    b12x_workspace: B12xSparkAotRouteWorkspaceBuffers,
-    input_payload_stride_bytes: usize,
-    hidden_bytes: usize,
-    route_weight_bytes: usize,
-    route_metadata_bytes: usize,
-    output_rows: usize,
-    cuda_stream: *mut c_void,
-) -> Result<()> {
-    let input_payload = device_buffer_byte_view(
-        workspace.hidden,
-        0,
-        input_payload_stride_bytes,
-        "grouped decode graph NVFP4 input payload",
-    )?;
-    let group_output = device_buffer_byte_view(
-        b12x_workspace.group_output,
-        0,
-        output_rows * std::mem::size_of::<u16>(),
-        "grouped decode graph BF16 output",
-    )?;
-    let topk_ids = device_buffer_byte_view(
-        workspace.route_metadata,
-        0,
-        8 * std::mem::size_of::<i32>(),
-        "grouped decode graph expert IDs",
-    )?;
-    let topk_weights = device_buffer_byte_view(
-        workspace.route_weights,
-        0,
-        8 * std::mem::size_of::<f32>(),
-        "grouped decode graph route weights",
-    )?;
-    let buffers = GlmrtB12xSparkMoeTp4M1Buffers {
-        input_payload,
-        input_bf16: b12x_workspace.compact_hidden,
-        w13_weight: layer_buffers.w13_weight,
-        w13_scale: layer_buffers.w13_scale,
-        w1_alphas: layer_buffers.w1_alphas,
-        a1_gscale: layer_buffers.a1_gscale,
-        a2_gscale: layer_buffers.a2_gscale,
-        intermediate: b12x_workspace.moe_intermediate,
-        w2_weight: layer_buffers.w2_weight,
-        w2_scale: layer_buffers.w2_scale,
-        w2_alphas: layer_buffers.w2_alphas,
-        topk_ids,
-        topk_weights,
-        output: group_output,
-        barrier_count: b12x_workspace.moe_barrier_count,
-        barrier_epoch: b12x_workspace.moe_barrier_epoch,
-    };
-    unsafe {
-        library
-            .copy_host_buffer_h2d_async(
-                workspace.hidden,
-                pinned_payloads.hidden,
-                hidden_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing grouped decode graph hidden H2D copy")?;
-        library
-            .copy_host_buffer_h2d_async(
-                workspace.route_weights,
-                pinned_payloads.route_weights,
-                route_weight_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing grouped decode graph route-weight H2D copy")?;
-        library
-            .copy_host_buffer_h2d_async(
-                workspace.route_metadata,
-                route_metadata_payload,
-                route_metadata_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing grouped decode graph expert-ID H2D copy")?;
-        library
-            .cuda_b12x_spark_moe_tp4_m1_nvfp4_async(
-                &buffers,
-                input_payload_stride_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing grouped B12X TP4 decode graph MoE")?;
-    }
-    Ok(())
-}
-
-unsafe fn enqueue_host_accumulation_graph_ops(
-    library: &NativeLibrary,
-    workspace: RouteCudaAccumulationWorkspaceBuffers,
-    pinned_payloads: RouteCudaPinnedPayloadBuffers,
-    route_metadata_payload: GlmrtHostBuffer,
-    pinned_output: GlmrtHostBuffer,
-    row_count: usize,
-    route_count: usize,
-    hidden_dim: usize,
-    hidden_row_stride_elems: usize,
-    max_intermediate_rows: usize,
-    output_rows: usize,
-    hidden_bytes: usize,
-    scatter_index_bytes: usize,
-    route_weight_bytes: usize,
-    route_metadata_bytes: usize,
-    output_values: usize,
-    output_bytes: usize,
-    cuda_stream: *mut c_void,
-) -> Result<()> {
-    unsafe {
-        library
-            .copy_host_buffer_h2d_async(
-                workspace.hidden,
-                pinned_payloads.hidden,
-                hidden_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing captured NVFP4 BF16 route hidden H2D copy")?;
-        library
-            .copy_host_buffer_h2d_async(
-                workspace.scatter_index,
-                pinned_payloads.scatter_index,
-                scatter_index_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing captured NVFP4 BF16 route row-index H2D copy")?;
-        library
-            .copy_host_buffer_h2d_async(
-                workspace.route_weights,
-                pinned_payloads.route_weights,
-                route_weight_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing captured NVFP4 BF16 route weight H2D copy")?;
-        library
-            .copy_host_buffer_h2d_async(
-                workspace.route_metadata,
-                route_metadata_payload,
-                route_metadata_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing captured NVFP4 BF16 route metadata H2D copy")?;
-        if row_count == 1 {
-            library
-                .cuda_nvfp4_silu_gated_mlp_route_bf16_batched_staged_single_row_bf16_async(
-                    workspace.hidden,
-                    workspace.scatter_index,
-                    workspace.route_weights,
-                    workspace.route_metadata,
-                    workspace.activation_workspace,
-                    workspace.final_output,
-                    row_count,
-                    route_count,
-                    hidden_dim,
-                    hidden_row_stride_elems,
-                    max_intermediate_rows,
-                    output_rows,
-                    cuda_stream,
-                )
-                .context("enqueueing captured single-row CUDA NVFP4 routed expert BF16 MLP")?;
-        } else {
-            library
-                .cuda_zero_f32_async(workspace.accumulator, output_values, cuda_stream)
-                .context("enqueueing captured NVFP4 BF16 route F32 accumulator zero")?;
-            library
-                .cuda_nvfp4_silu_gated_mlp_route_bf16_batched_staged_accumulate_f32_async(
-                    workspace.hidden,
-                    workspace.scatter_index,
-                    workspace.route_weights,
-                    workspace.route_metadata,
-                    workspace.activation_workspace,
-                    workspace.accumulator,
-                    row_count,
-                    route_count,
-                    hidden_dim,
-                    hidden_row_stride_elems,
-                    max_intermediate_rows,
-                    output_rows,
-                    cuda_stream,
-                )
-                .context("enqueueing captured CUDA NVFP4 routed expert BF16 MLP")?;
-            library
-                .cuda_f32_to_bf16_async(
-                    workspace.accumulator,
-                    workspace.final_output,
-                    output_values,
-                    cuda_stream,
-                )
-                .context("enqueueing captured NVFP4 route output BF16 pack")?;
-        }
-        library
-            .copy_d2h_host_buffer_async(
-                pinned_output,
-                workspace.final_output,
-                output_bytes,
-                cuda_stream,
-            )
-            .context("enqueueing captured NVFP4 route output D2H copy")?;
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy)]
 enum RouteCudaProjectionStageSlot {
     Weight,
-    Scale,
 }
 
 impl RouteCudaWorkspace {
@@ -2359,7 +1552,6 @@ impl RouteCudaWorkspace {
         &mut self,
         library: Arc<NativeLibrary>,
         hidden_bytes: usize,
-        activation_workspace_bytes: usize,
         accumulator_bytes: usize,
         final_output_bytes: usize,
         scatter_index_bytes: usize,
@@ -2371,12 +1563,6 @@ impl RouteCudaWorkspace {
             Arc::clone(&library),
             hidden_bytes,
             "NVFP4 BF16 route hidden workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.activation_workspace,
-            Arc::clone(&library),
-            activation_workspace_bytes,
-            "NVFP4 BF16 route activation workspace",
         )?;
         Self::ensure_buffer(
             &mut self.accumulator,
@@ -2420,11 +1606,6 @@ impl RouteCudaWorkspace {
                 .hidden
                 .as_ref()
                 .expect("hidden buffer ensured")
-                .buffer(),
-            activation_workspace: self
-                .activation_workspace
-                .as_ref()
-                .expect("activation workspace buffer ensured")
                 .buffer(),
             accumulator: self
                 .accumulator
@@ -2693,7 +1874,6 @@ impl RouteCudaWorkspace {
         hidden_dim: usize,
         intermediate_dim: usize,
         output_dim: usize,
-        require_w4a4_scratch: bool,
     ) -> Result<B12xSparkAotRouteWorkspaceBuffers> {
         let capacity_rows = b12x_w4a16_capacity_rows(rows)?;
         let compact_hidden_bytes =
@@ -2704,18 +1884,6 @@ impl RouteCudaWorkspace {
             2,
             "B12X output",
         )?;
-        let input_packed_bytes =
-            checked_matrix_bytes(capacity_rows, hidden_dim / 2, 1, "B12X input FP4")?;
-        let input_scale_bytes = b12x_scale_storage_bytes(capacity_rows, hidden_dim)?;
-        let intermediate_bf16_bytes =
-            checked_matrix_bytes(capacity_rows, intermediate_dim, 2, "B12X intermediate")?;
-        let activation_packed_bytes = checked_matrix_bytes(
-            capacity_rows,
-            intermediate_dim / 2,
-            1,
-            "B12X activation FP4",
-        )?;
-        let activation_scale_bytes = b12x_scale_storage_bytes(capacity_rows, intermediate_dim)?;
         let w4a16_routed_rows = capacity_rows
             .checked_mul(8)
             .context("B12X W4A16 routed row count overflow")?;
@@ -2742,66 +1910,6 @@ impl RouteCudaWorkspace {
             Arc::clone(&library),
             group_output_bytes,
             "b12x Spark direct route compact output workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_input_packed,
-            Arc::clone(&library),
-            input_packed_bytes,
-            "b12x Spark AOT input FP4 workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_input_scale,
-            Arc::clone(&library),
-            input_scale_bytes,
-            "b12x Spark AOT input scale workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_gate_output,
-            Arc::clone(&library),
-            intermediate_bf16_bytes,
-            "b12x Spark AOT gate output workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_up_output,
-            Arc::clone(&library),
-            intermediate_bf16_bytes,
-            "b12x Spark AOT up output workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_activation_packed,
-            Arc::clone(&library),
-            activation_packed_bytes,
-            "b12x Spark AOT activation FP4 workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_activation_scale,
-            Arc::clone(&library),
-            activation_scale_bytes,
-            "b12x Spark AOT activation scale workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_alphas,
-            Arc::clone(&library),
-            3 * std::mem::size_of::<f32>(),
-            "b12x Spark AOT alpha workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_moe_intermediate,
-            Arc::clone(&library),
-            8 * 512 * std::mem::size_of::<u16>(),
-            "b12x Spark grouped MoE intermediate workspace",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_moe_barrier_count,
-            Arc::clone(&library),
-            std::mem::size_of::<i32>(),
-            "b12x Spark grouped MoE barrier count",
-        )?;
-        Self::ensure_buffer(
-            &mut self.b12x_moe_barrier_epoch,
-            Arc::clone(&library),
-            std::mem::size_of::<i32>(),
-            "b12x Spark grouped MoE barrier epoch",
         )?;
         Self::ensure_buffer(
             &mut self.b12x_w4a16_fc1_output,
@@ -2860,14 +1968,6 @@ impl RouteCudaWorkspace {
             B12X_W4A16_LOCK_ELEMENTS * std::mem::size_of::<i32>(),
             "b12x Spark W4A16 locks",
         )?;
-        if require_w4a4_scratch {
-            Self::ensure_buffer(
-                &mut self.b12x_w4a4_scratch,
-                library,
-                B12X_W4A4_PREFILL_SCRATCH_BYTES,
-                "b12x Spark W4A4 prefill scratch",
-            )?;
-        }
         Ok(B12xSparkAotRouteWorkspaceBuffers {
             compact_hidden: self
                 .b12x_compact_hidden
@@ -2878,56 +1978,6 @@ impl RouteCudaWorkspace {
                 .b12x_group_output
                 .as_ref()
                 .expect("b12x group output buffer ensured")
-                .buffer(),
-            input_packed: self
-                .b12x_input_packed
-                .as_ref()
-                .expect("b12x input FP4 buffer ensured")
-                .buffer(),
-            input_scale: self
-                .b12x_input_scale
-                .as_ref()
-                .expect("b12x input scale buffer ensured")
-                .buffer(),
-            gate_output: self
-                .b12x_gate_output
-                .as_ref()
-                .expect("b12x gate output buffer ensured")
-                .buffer(),
-            up_output: self
-                .b12x_up_output
-                .as_ref()
-                .expect("b12x up output buffer ensured")
-                .buffer(),
-            activation_packed: self
-                .b12x_activation_packed
-                .as_ref()
-                .expect("b12x activation FP4 buffer ensured")
-                .buffer(),
-            activation_scale: self
-                .b12x_activation_scale
-                .as_ref()
-                .expect("b12x activation scale buffer ensured")
-                .buffer(),
-            alphas: self
-                .b12x_alphas
-                .as_ref()
-                .expect("b12x alpha buffer ensured")
-                .buffer(),
-            moe_intermediate: self
-                .b12x_moe_intermediate
-                .as_ref()
-                .expect("b12x grouped MoE intermediate ensured")
-                .buffer(),
-            moe_barrier_count: self
-                .b12x_moe_barrier_count
-                .as_ref()
-                .expect("b12x grouped MoE barrier count ensured")
-                .buffer(),
-            moe_barrier_epoch: self
-                .b12x_moe_barrier_epoch
-                .as_ref()
-                .expect("b12x grouped MoE barrier epoch ensured")
                 .buffer(),
             w4a16_fc1_output: self
                 .b12x_w4a16_fc1_output
@@ -2974,100 +2024,10 @@ impl RouteCudaWorkspace {
                 .as_ref()
                 .expect("b12x W4A16 locks ensured")
                 .buffer(),
-            w4a4_scratch: self
-                .b12x_w4a4_scratch
-                .as_ref()
-                .map(OwnedDeviceAllocation::buffer)
-                .unwrap_or_default(),
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn pack_w4a16_projection(
-        &mut self,
-        library: Arc<NativeLibrary>,
-        source_parts: &[&[u8]],
-        destination: GlmrtDeviceBuffer,
-        size_k: usize,
-        size_n: usize,
-        row_rotation: usize,
-        scale_factor: Option<f32>,
-        cuda_stream: *mut c_void,
-        label: &str,
-    ) -> Result<()> {
-        let source_bytes = source_parts.iter().try_fold(0_usize, |total, part| {
-            total
-                .checked_add(part.len())
-                .with_context(|| format!("{label} source byte count overflow"))
-        })?;
-        let expected_bytes = size_n
-            .checked_mul(size_k / if scale_factor.is_some() { 16 } else { 2 })
-            .with_context(|| format!("{label} packed byte count overflow"))?;
-        anyhow::ensure!(
-            source_bytes == expected_bytes && destination.bytes >= expected_bytes,
-            "{label} has source/destination bytes {source_bytes}/{}, expected {expected_bytes}",
-            destination.bytes
-        );
-        let staging_slot = if scale_factor.is_some() {
-            &mut self.pinned_projection_scale
-        } else {
-            &mut self.pinned_projection_weight
-        };
-        Self::ensure_pinned_buffer(staging_slot, Arc::clone(&library), source_bytes, label)?;
-        let staging = staging_slot.as_mut().expect("W4A16 staging buffer ensured");
-        let staging_slice = staging.as_mut_slice(source_bytes)?;
-        let mut offset = 0;
-        for part in source_parts {
-            staging_slice[offset..offset + part.len()].copy_from_slice(part);
-            offset += part.len();
-        }
-        let staging_buffer = staging.buffer();
-        Self::ensure_buffer(
-            &mut self.b12x_w4a16_pack_source,
-            Arc::clone(&library),
-            source_bytes,
-            "b12x Spark W4A16 pack source",
-        )?;
-        let source = self
-            .b12x_w4a16_pack_source
-            .as_ref()
-            .expect("W4A16 pack source ensured")
-            .buffer();
-        unsafe {
-            library
-                .copy_host_buffer_h2d_async(source, staging_buffer, source_bytes, cuda_stream)
-                .with_context(|| format!("copying {label} to the Spark GPU"))?;
-            if let Some(scale_factor) = scale_factor {
-                library
-                    .cuda_b12x_w4a16_pack_scale_async(
-                        source,
-                        destination,
-                        size_k,
-                        size_n,
-                        row_rotation,
-                        scale_factor,
-                        cuda_stream,
-                    )
-                    .with_context(|| format!("packing {label}"))?;
-            } else {
-                library
-                    .cuda_b12x_w4a16_pack_weight_async(
-                        source,
-                        destination,
-                        size_k,
-                        size_n,
-                        row_rotation,
-                        cuda_stream,
-                    )
-                    .with_context(|| format!("packing {label}"))?;
-            }
-            library
-                .cuda_stream_synchronize(cuda_stream)
-                .with_context(|| format!("synchronizing {label} packing"))?;
-        }
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn quantize_bf16_projection_into_w4a16(
         &mut self,
@@ -3196,117 +2156,6 @@ impl RouteCudaWorkspace {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn transform_w4a16_scale_in_place(
-        &mut self,
-        library: Arc<NativeLibrary>,
-        destination: GlmrtDeviceBuffer,
-        size_k: usize,
-        size_n: usize,
-        row_rotation: usize,
-        scale_factor: f32,
-        cuda_stream: *mut c_void,
-        label: &str,
-    ) -> Result<()> {
-        let bytes = size_n
-            .checked_mul(size_k / 16)
-            .with_context(|| format!("{label} byte count overflow"))?;
-        anyhow::ensure!(
-            destination.bytes >= bytes,
-            "{label} destination has {} bytes, needs {bytes}",
-            destination.bytes
-        );
-        Self::ensure_buffer(
-            &mut self.b12x_w4a16_pack_source,
-            Arc::clone(&library),
-            bytes,
-            "SparkInfer source W4A16 scale transform source",
-        )?;
-        let source = self
-            .b12x_w4a16_pack_source
-            .as_ref()
-            .expect("source W4A16 transform buffer ensured")
-            .buffer();
-        unsafe {
-            library
-                .copy_d2d_async(source, destination, bytes, cuda_stream)
-                .with_context(|| format!("copying {label} into transform workspace"))?;
-            library
-                .cuda_b12x_w4a16_pack_scale_async(
-                    source,
-                    destination,
-                    size_k,
-                    size_n,
-                    row_rotation,
-                    scale_factor,
-                    cuda_stream,
-                )
-                .with_context(|| format!("transforming {label}"))?;
-        }
-        Ok(())
-    }
-
-    fn upload_projection_rows_to_device(
-        &mut self,
-        library: Arc<NativeLibrary>,
-        catalog: &TensorCatalog,
-        tensor_name: &str,
-        row_count: usize,
-        label: &str,
-        slot: RouteCudaProjectionStageSlot,
-        cuda_stream: *mut c_void,
-        managed: bool,
-        b12x_scale_shape: Option<(usize, usize)>,
-    ) -> Result<OwnedDeviceAllocation> {
-        let staging_slot = match slot {
-            RouteCudaProjectionStageSlot::Weight => &mut self.pinned_projection_weight,
-            RouteCudaProjectionStageSlot::Scale => &mut self.pinned_projection_scale,
-        };
-        let bytes = tensor_rows_byte_count(catalog, tensor_name, row_count)?;
-        let allocation =
-            OwnedDeviceAllocation::new_with_kind(Arc::clone(&library), bytes, label, managed)?;
-        Self::ensure_pinned_buffer(staging_slot, Arc::clone(&library), bytes, label)?;
-        let staging = staging_slot.as_mut().expect("projection staging ensured");
-        read_tensor_rows_into(
-            catalog,
-            tensor_name,
-            0,
-            row_count,
-            staging.as_mut_slice(bytes)?,
-        )
-        .with_context(|| {
-            format!("reading tensor {tensor_name} into reusable pinned staging for {label}")
-        })?;
-        if allocation.is_managed() {
-            allocation.copy_host_bytes_direct(staging.as_mut_slice(bytes)?, label)?;
-        } else {
-            unsafe {
-                library
-                    .copy_host_buffer_h2d_async(
-                        allocation.buffer,
-                        staging.buffer(),
-                        bytes,
-                        cuda_stream,
-                    )
-                    .with_context(|| format!("enqueueing pinned {label} H2D copy"))?;
-                library
-                    .cuda_stream_synchronize(cuda_stream)
-                    .with_context(|| format!("synchronizing pinned {label} H2D copy"))?;
-            }
-        }
-        if let Some((rows, scale_cols)) = b12x_scale_shape {
-            self.swizzle_projection_scale_in_place(
-                library,
-                &allocation,
-                rows,
-                scale_cols,
-                cuda_stream,
-            )
-            .with_context(|| format!("swizzling tensor {tensor_name} for B12X"))?;
-        }
-        Ok(allocation)
-    }
-
     fn upload_host_bytes_to_existing_device_buffer(
         &mut self,
         library: Arc<NativeLibrary>,
@@ -3324,7 +2173,6 @@ impl RouteCudaWorkspace {
         );
         let staging_slot = match slot {
             RouteCudaProjectionStageSlot::Weight => &mut self.pinned_projection_weight,
-            RouteCudaProjectionStageSlot::Scale => &mut self.pinned_projection_scale,
         };
         let staging = Self::stage_pinned_bytes(staging_slot, library.clone(), bytes, label)?;
         unsafe {
@@ -3334,116 +2182,6 @@ impl RouteCudaWorkspace {
             library
                 .cuda_stream_synchronize(cuda_stream)
                 .with_context(|| format!("synchronizing pinned {label} H2D copy"))?;
-        }
-        Ok(())
-    }
-
-    fn upload_projection_host_bytes_to_device(
-        &mut self,
-        library: Arc<NativeLibrary>,
-        bytes: &[u8],
-        label: &str,
-        slot: RouteCudaProjectionStageSlot,
-        cuda_stream: *mut c_void,
-        managed: bool,
-        b12x_scale_shape: Option<(usize, usize)>,
-    ) -> Result<OwnedDeviceAllocation> {
-        let staging_slot = match slot {
-            RouteCudaProjectionStageSlot::Weight => &mut self.pinned_projection_weight,
-            RouteCudaProjectionStageSlot::Scale => &mut self.pinned_projection_scale,
-        };
-        let allocation = OwnedDeviceAllocation::new_with_kind(
-            Arc::clone(&library),
-            bytes.len(),
-            label,
-            managed,
-        )?;
-        if allocation.is_managed() {
-            allocation.copy_host_bytes_direct(bytes, label)?;
-        } else {
-            let staging =
-                Self::stage_pinned_bytes(staging_slot, Arc::clone(&library), bytes, label)?;
-            unsafe {
-                library
-                    .copy_host_buffer_h2d_async(
-                        allocation.buffer,
-                        staging,
-                        bytes.len(),
-                        cuda_stream,
-                    )
-                    .with_context(|| format!("enqueueing pinned {label} H2D copy"))?;
-                library
-                    .cuda_stream_synchronize(cuda_stream)
-                    .with_context(|| format!("synchronizing pinned {label} H2D copy"))?;
-            }
-        }
-        if let Some((rows, scale_cols)) = b12x_scale_shape {
-            self.swizzle_projection_scale_in_place(
-                library,
-                &allocation,
-                rows,
-                scale_cols,
-                cuda_stream,
-            )
-            .with_context(|| format!("swizzling {label} for B12X"))?;
-        }
-        Ok(allocation)
-    }
-
-    fn swizzle_projection_scale_in_place(
-        &mut self,
-        library: Arc<NativeLibrary>,
-        allocation: &OwnedDeviceAllocation,
-        rows: usize,
-        scale_cols: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        self.swizzle_projection_scale_buffer_in_place(
-            library,
-            allocation.buffer(),
-            rows,
-            scale_cols,
-            cuda_stream,
-        )
-    }
-
-    fn swizzle_projection_scale_buffer_in_place(
-        &mut self,
-        library: Arc<NativeLibrary>,
-        buffer: GlmrtDeviceBuffer,
-        rows: usize,
-        scale_cols: usize,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        let bytes = rows
-            .checked_mul(scale_cols)
-            .context("B12X projection scale byte count overflow")?;
-        anyhow::ensure!(
-            buffer.bytes >= bytes,
-            "B12X projection scale allocation has {} bytes, expected at least {bytes}",
-            buffer.bytes
-        );
-        Self::ensure_buffer(
-            &mut self.b12x_projection_scale_swizzle,
-            Arc::clone(&library),
-            bytes,
-            "b12x persistent projection scale swizzle workspace",
-        )?;
-        let temporary = self
-            .b12x_projection_scale_swizzle
-            .as_ref()
-            .expect("B12X projection scale swizzle buffer ensured")
-            .buffer();
-        unsafe {
-            library
-                .cuda_b12x_swizzle_scale_async(buffer, temporary, rows, scale_cols, cuda_stream)
-                .context("enqueueing B12X projection scale swizzle")?;
-            library
-                .copy_d2d_async(buffer, temporary, bytes, cuda_stream)
-                .context("copying B12X projection scale swizzle into persistent allocation")?;
-            library
-                .cuda_stream_synchronize(cuda_stream)
-                .context("synchronizing persistent B12X projection scale swizzle")?;
         }
         Ok(())
     }
@@ -3493,14 +2231,6 @@ impl RouteCudaWorkspace {
         }
         Ok(())
     }
-}
-
-struct DeviceRoutedQuantProjection {
-    weight: SharedDeviceAllocationView,
-    weight_scale: SharedDeviceAllocationView,
-    weight_row_stride_bytes: usize,
-    weight_scale_row_stride_bytes: usize,
-    weight_scale_b12x_swizzled: bool,
 }
 
 enum RouteCudaTensorStorage {
@@ -3905,25 +2635,15 @@ impl RouteCudaBf16LayerExpertSlab {
 struct RouteCudaLayerExpertSlab {
     layer_id: usize,
     expert_count: usize,
-    w4a16_packed: bool,
-    sparkinfer_source_w4a16: bool,
     w13_weight: Arc<OwnedDeviceAllocation>,
     w13_weight_expert_stride_bytes: usize,
-    gate_weight_bytes: usize,
-    up_weight_bytes: usize,
     w13_scale: Arc<OwnedDeviceAllocation>,
     w13_scale_expert_stride_bytes: usize,
-    gate_scale_bytes: usize,
-    up_scale_bytes: usize,
     w2_weight: Arc<OwnedDeviceAllocation>,
     w2_weight_expert_stride_bytes: usize,
-    down_weight_bytes: usize,
     w2_scale: Arc<OwnedDeviceAllocation>,
     w2_scale_expert_stride_bytes: usize,
-    down_scale_bytes: usize,
     w1_alphas: Arc<OwnedDeviceAllocation>,
-    a1_gscale: Arc<OwnedDeviceAllocation>,
-    a2_gscale: Arc<OwnedDeviceAllocation>,
     w2_alphas: Arc<OwnedDeviceAllocation>,
     w4a16_w13_global_scale: Option<Arc<OwnedDeviceAllocation>>,
     w4a16_w2_global_scale: Option<Arc<OwnedDeviceAllocation>>,
@@ -3933,9 +2653,6 @@ struct RouteCudaLayerExpertSlab {
     gate_weight_row_stride_bytes: usize,
     up_weight_row_stride_bytes: usize,
     down_weight_row_stride_bytes: usize,
-    gate_scale_row_stride_bytes: usize,
-    up_scale_row_stride_bytes: usize,
-    down_scale_row_stride_bytes: usize,
 }
 
 impl RouteCudaLayerExpertSlab {
@@ -3944,15 +2661,9 @@ impl RouteCudaLayerExpertSlab {
         layer_id: usize,
         expert_count: usize,
         exemplar: &LoadedRouteCudaExpertShard,
-        w4a16_packed: bool,
-        sparkinfer_source_w4a16: bool,
         managed_weights: bool,
         geometry_only_exemplar: bool,
     ) -> Result<Self> {
-        anyhow::ensure!(
-            !(w4a16_packed && sparkinfer_source_w4a16),
-            "layer {layer_id} cannot use packed and source-layout W4A16 simultaneously"
-        );
         anyhow::ensure!(expert_count > 0, "expert slab requires at least one expert");
         let geometry = |projection| {
             loaded_route_cuda_projection_geometry_inner(projection, !geometry_only_exemplar)
@@ -4000,13 +2711,13 @@ impl RouteCudaLayerExpertSlab {
             .checked_mul(expert_count)
             .context("W2 slab scale bytes overflow")?;
         let scalar_bytes = expert_count * std::mem::size_of::<f32>();
-        let dedicated_w4a16_global_scales = !w4a16_packed || !managed_weights;
+        let dedicated_w4a16_global_scales = !managed_weights;
         let w4a16_w13_global_scale = if dedicated_w4a16_global_scales {
             Some(Arc::new(OwnedDeviceAllocation::new_with_kind(
                 Arc::clone(&library),
                 scalar_bytes,
                 &format!("layer {layer_id} W4A16 W13 global scales"),
-                !w4a16_packed,
+                false,
             )?))
         } else {
             None
@@ -4016,7 +2727,7 @@ impl RouteCudaLayerExpertSlab {
                 Arc::clone(&library),
                 scalar_bytes,
                 &format!("layer {layer_id} W4A16 W2 global scales"),
-                !w4a16_packed,
+                false,
             )?))
         } else {
             None
@@ -4024,8 +2735,6 @@ impl RouteCudaLayerExpertSlab {
         Ok(Self {
             layer_id,
             expert_count,
-            w4a16_packed,
-            sparkinfer_source_w4a16,
             w13_weight: Arc::new(OwnedDeviceAllocation::new_with_kind(
                 Arc::clone(&library),
                 w13_weight_bytes,
@@ -4033,8 +2742,6 @@ impl RouteCudaLayerExpertSlab {
                 managed_weights,
             )?),
             w13_weight_expert_stride_bytes,
-            gate_weight_bytes: gate.weight_bytes,
-            up_weight_bytes: up.weight_bytes,
             w13_scale: Arc::new(OwnedDeviceAllocation::new_with_kind(
                 Arc::clone(&library),
                 w13_scale_bytes,
@@ -4042,8 +2749,6 @@ impl RouteCudaLayerExpertSlab {
                 managed_weights,
             )?),
             w13_scale_expert_stride_bytes,
-            gate_scale_bytes: gate.scale_bytes,
-            up_scale_bytes: up.scale_bytes,
             w2_weight: Arc::new(OwnedDeviceAllocation::new_with_kind(
                 Arc::clone(&library),
                 w2_weight_bytes,
@@ -4051,7 +2756,6 @@ impl RouteCudaLayerExpertSlab {
                 managed_weights,
             )?),
             w2_weight_expert_stride_bytes: down.weight_bytes,
-            down_weight_bytes: down.weight_bytes,
             w2_scale: Arc::new(OwnedDeviceAllocation::new_with_kind(
                 Arc::clone(&library),
                 w2_scale_bytes,
@@ -4059,23 +2763,10 @@ impl RouteCudaLayerExpertSlab {
                 managed_weights,
             )?),
             w2_scale_expert_stride_bytes: down.scale_bytes,
-            down_scale_bytes: down.scale_bytes,
             w1_alphas: Arc::new(OwnedDeviceAllocation::new_with_kind(
                 Arc::clone(&library),
                 scalar_bytes,
                 &format!("layer {layer_id} TP4 W1 expert alphas"),
-                true,
-            )?),
-            a1_gscale: Arc::new(OwnedDeviceAllocation::new_with_kind(
-                Arc::clone(&library),
-                scalar_bytes,
-                &format!("layer {layer_id} TP4 FC1 activation scales"),
-                true,
-            )?),
-            a2_gscale: Arc::new(OwnedDeviceAllocation::new_with_kind(
-                Arc::clone(&library),
-                scalar_bytes,
-                &format!("layer {layer_id} TP4 FC2 activation scales"),
                 true,
             )?),
             w2_alphas: Arc::new(OwnedDeviceAllocation::new_with_kind(
@@ -4092,378 +2783,11 @@ impl RouteCudaLayerExpertSlab {
             gate_weight_row_stride_bytes: gate.weight_row_stride_bytes,
             up_weight_row_stride_bytes: up.weight_row_stride_bytes,
             down_weight_row_stride_bytes: down.weight_row_stride_bytes,
-            gate_scale_row_stride_bytes: gate.scale_row_stride_bytes,
-            up_scale_row_stride_bytes: up.scale_row_stride_bytes,
-            down_scale_row_stride_bytes: down.scale_row_stride_bytes,
         })
     }
 
     fn managed_projection_entries(&self) -> usize {
         usize::from(self.w13_weight.is_managed()) * self.expert_count * 3
-    }
-
-    fn projection(&self, key: &RoutedQuantProjectionKey) -> Result<DeviceRoutedQuantProjection> {
-        anyhow::ensure!(
-            !self.w4a16_packed && !self.sparkinfer_source_w4a16,
-            "layer {} uses a dedicated W4A16 slab and has no direct projection views",
-            self.layer_id
-        );
-        anyhow::ensure!(
-            key.layer_id == self.layer_id,
-            "expert slab layer {} cannot serve layer {}",
-            self.layer_id,
-            key.layer_id
-        );
-        anyhow::ensure!(
-            key.expert_id < self.expert_count,
-            "expert {} exceeds layer {} slab expert count {}",
-            key.expert_id,
-            self.layer_id,
-            self.expert_count
-        );
-        let (weight_owner, weight_offset, weight_bytes, weight_row_stride_bytes) =
-            match key.projection {
-                "gate_proj" => (
-                    Arc::clone(&self.w13_weight),
-                    key.expert_id
-                        .checked_mul(self.w13_weight_expert_stride_bytes)
-                        .and_then(|offset| offset.checked_add(self.up_weight_bytes))
-                        .context("gate slab expert offset overflow")?,
-                    self.gate_weight_bytes,
-                    self.gate_weight_row_stride_bytes,
-                ),
-                "up_proj" => (
-                    Arc::clone(&self.w13_weight),
-                    key.expert_id
-                        .checked_mul(self.w13_weight_expert_stride_bytes)
-                        .context("up slab expert offset overflow")?,
-                    self.up_weight_bytes,
-                    self.up_weight_row_stride_bytes,
-                ),
-                "down_proj" => (
-                    Arc::clone(&self.w2_weight),
-                    key.expert_id
-                        .checked_mul(self.w2_weight_expert_stride_bytes)
-                        .context("down slab expert offset overflow")?,
-                    self.down_weight_bytes,
-                    self.down_weight_row_stride_bytes,
-                ),
-                projection => anyhow::bail!("unsupported slab projection {projection}"),
-            };
-        let (scale_owner, scale_offset, scale_bytes, scale_row_stride_bytes, expected_rows) =
-            match key.projection {
-                "gate_proj" => (
-                    Arc::clone(&self.w13_scale),
-                    key.expert_id
-                        .checked_mul(self.w13_scale_expert_stride_bytes)
-                        .and_then(|offset| offset.checked_add(self.up_scale_bytes))
-                        .context("gate scale slab expert offset overflow")?,
-                    self.gate_scale_bytes,
-                    self.gate_scale_row_stride_bytes,
-                    self.gate_rows,
-                ),
-                "up_proj" => (
-                    Arc::clone(&self.w13_scale),
-                    key.expert_id
-                        .checked_mul(self.w13_scale_expert_stride_bytes)
-                        .context("up scale slab expert offset overflow")?,
-                    self.up_scale_bytes,
-                    self.up_scale_row_stride_bytes,
-                    self.up_rows,
-                ),
-                "down_proj" => (
-                    Arc::clone(&self.w2_scale),
-                    key.expert_id
-                        .checked_mul(self.w2_scale_expert_stride_bytes)
-                        .context("down scale slab expert offset overflow")?,
-                    self.down_scale_bytes,
-                    self.down_scale_row_stride_bytes,
-                    self.down_rows,
-                ),
-                projection => anyhow::bail!("unsupported slab projection {projection}"),
-            };
-        anyhow::ensure!(
-            key.row_count == expected_rows,
-            "layer {} expert {} {} requested {} rows, slab has {expected_rows}",
-            key.layer_id,
-            key.expert_id,
-            key.projection,
-            key.row_count
-        );
-        Ok(DeviceRoutedQuantProjection {
-            weight: SharedDeviceAllocationView::from_slice(
-                weight_owner,
-                weight_offset,
-                weight_bytes,
-            )?,
-            weight_scale: SharedDeviceAllocationView::from_slice(
-                scale_owner,
-                scale_offset,
-                scale_bytes,
-            )?,
-            weight_row_stride_bytes,
-            weight_scale_row_stride_bytes: scale_row_stride_bytes,
-            weight_scale_b12x_swizzled: true,
-        })
-    }
-
-    fn store_expert(
-        &self,
-        expert_id: usize,
-        loaded: &LoadedRouteCudaExpertShard,
-        library: Arc<NativeLibrary>,
-        workspace: &mut RouteCudaWorkspace,
-        cuda_stream: *mut c_void,
-    ) -> Result<Vec<(RoutedQuantProjectionKey, Arc<DeviceRoutedQuantProjection>)>> {
-        let mut projections = Vec::with_capacity(3);
-        for (projection_name, loaded_projection) in [
-            ("gate_proj", &loaded.gate),
-            ("up_proj", &loaded.up),
-            ("down_proj", &loaded.down),
-        ] {
-            let geometry = loaded_route_cuda_projection_geometry(loaded_projection)?;
-            let key = RoutedQuantProjectionKey {
-                layer_id: self.layer_id,
-                expert_id,
-                projection: projection_name,
-                row_count: geometry.rows,
-            };
-            let projection = self.projection(&key)?;
-            anyhow::ensure!(
-                projection.weight_row_stride_bytes == geometry.weight_row_stride_bytes
-                    && projection.weight_scale_row_stride_bytes == geometry.scale_row_stride_bytes
-                    && projection.weight.buffer().bytes == geometry.weight_bytes
-                    && projection.weight_scale.buffer().bytes == geometry.scale_bytes,
-                "layer {} expert {expert_id} {projection_name} geometry differs from slab exemplar",
-                self.layer_id
-            );
-            if projection.weight.is_managed() {
-                projection.weight.copy_host_bytes_direct(
-                    &loaded_projection.weight.bytes,
-                    "contiguous expert slab weight",
-                )?;
-            } else {
-                workspace.upload_host_bytes_to_existing_device_buffer(
-                    Arc::clone(&library),
-                    projection.weight.buffer(),
-                    &loaded_projection.weight.bytes,
-                    "contiguous expert slab weight",
-                    RouteCudaProjectionStageSlot::Weight,
-                    cuda_stream,
-                )?;
-            }
-            if projection.weight_scale.is_managed() {
-                projection.weight_scale.copy_host_bytes_direct(
-                    &loaded_projection.weight_scale.bytes,
-                    "contiguous expert slab weight scale",
-                )?;
-            } else {
-                workspace.upload_host_bytes_to_existing_device_buffer(
-                    Arc::clone(&library),
-                    projection.weight_scale.buffer(),
-                    &loaded_projection.weight_scale.bytes,
-                    "contiguous expert slab weight scale",
-                    RouteCudaProjectionStageSlot::Scale,
-                    cuda_stream,
-                )?;
-            }
-            workspace
-                .swizzle_projection_scale_buffer_in_place(
-                    Arc::clone(&library),
-                    projection.weight_scale.buffer(),
-                    geometry.rows,
-                    geometry.scale_row_stride_bytes,
-                    cuda_stream,
-                )
-                .with_context(|| {
-                    format!(
-                        "swizzling layer {} expert {expert_id} {projection_name} slab scale",
-                        self.layer_id
-                    )
-                })?;
-            projections.push((key, Arc::new(projection)));
-        }
-        Ok(projections)
-    }
-
-    fn store_expert_source_w4a16(
-        &self,
-        expert_id: usize,
-        loaded: &LoadedRouteCudaExpertShard,
-        library: Arc<NativeLibrary>,
-        workspace: &mut RouteCudaWorkspace,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            self.sparkinfer_source_w4a16 && !self.w4a16_packed && expert_id < self.expert_count,
-            "layer {} cannot store SparkInfer source W4A16 expert {expert_id}",
-            self.layer_id
-        );
-        let parts = [
-            (
-                self.w13_weight.as_ref(),
-                expert_id * self.w13_weight_expert_stride_bytes,
-                loaded.up.weight.bytes.as_slice(),
-                RouteCudaProjectionStageSlot::Weight,
-                "source W4A16 W13 up weight",
-            ),
-            (
-                self.w13_weight.as_ref(),
-                expert_id * self.w13_weight_expert_stride_bytes + self.up_weight_bytes,
-                loaded.gate.weight.bytes.as_slice(),
-                RouteCudaProjectionStageSlot::Weight,
-                "source W4A16 W13 gate weight",
-            ),
-            (
-                self.w13_scale.as_ref(),
-                expert_id * self.w13_scale_expert_stride_bytes,
-                loaded.up.weight_scale.bytes.as_slice(),
-                RouteCudaProjectionStageSlot::Scale,
-                "source W4A16 W13 up scale",
-            ),
-            (
-                self.w13_scale.as_ref(),
-                expert_id * self.w13_scale_expert_stride_bytes + self.up_scale_bytes,
-                loaded.gate.weight_scale.bytes.as_slice(),
-                RouteCudaProjectionStageSlot::Scale,
-                "source W4A16 W13 gate scale",
-            ),
-            (
-                self.w2_weight.as_ref(),
-                expert_id * self.w2_weight_expert_stride_bytes,
-                loaded.down.weight.bytes.as_slice(),
-                RouteCudaProjectionStageSlot::Weight,
-                "source W4A16 W2 weight",
-            ),
-            (
-                self.w2_scale.as_ref(),
-                expert_id * self.w2_scale_expert_stride_bytes,
-                loaded.down.weight_scale.bytes.as_slice(),
-                RouteCudaProjectionStageSlot::Scale,
-                "source W4A16 W2 scale",
-            ),
-        ];
-        for (allocation, offset, bytes, stage_slot, label) in parts {
-            let destination = route_device_buffer_slice(allocation.buffer(), offset, bytes.len())?;
-            if allocation.is_managed() {
-                allocation.copy_host_bytes_direct_at(offset, bytes, label)?;
-            } else {
-                workspace.upload_host_bytes_to_existing_device_buffer(
-                    Arc::clone(&library),
-                    destination,
-                    bytes,
-                    label,
-                    stage_slot,
-                    cuda_stream,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn store_expert_w4a16(
-        &self,
-        expert_id: usize,
-        loaded: &LoadedRouteCudaExpertShard,
-        library: Arc<NativeLibrary>,
-        workspace: &mut RouteCudaWorkspace,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            self.w4a16_packed && expert_id < self.expert_count,
-            "layer {} cannot pack W4A16 expert {expert_id}",
-            self.layer_id
-        );
-        let gate = loaded_route_cuda_projection_geometry(&loaded.gate)?;
-        let up = loaded_route_cuda_projection_geometry(&loaded.up)?;
-        let down = loaded_route_cuda_projection_geometry(&loaded.down)?;
-        anyhow::ensure!(
-            gate.rows == up.rows
-                && gate.weight_row_stride_bytes == up.weight_row_stride_bytes
-                && gate.scale_row_stride_bytes == up.scale_row_stride_bytes,
-            "layer {} expert {expert_id} W13 projection geometry differs",
-            self.layer_id
-        );
-        let w13_weight = route_device_buffer_slice(
-            self.w13_weight.buffer(),
-            expert_id * self.w13_weight_expert_stride_bytes,
-            self.w13_weight_expert_stride_bytes,
-        )?;
-        let w13_scale = route_device_buffer_slice(
-            self.w13_scale.buffer(),
-            expert_id * self.w13_scale_expert_stride_bytes,
-            self.w13_scale_expert_stride_bytes,
-        )?;
-        let w2_weight = route_device_buffer_slice(
-            self.w2_weight.buffer(),
-            expert_id * self.w2_weight_expert_stride_bytes,
-            self.w2_weight_expert_stride_bytes,
-        )?;
-        let w2_scale = route_device_buffer_slice(
-            self.w2_scale.buffer(),
-            expert_id * self.w2_scale_expert_stride_bytes,
-            self.w2_scale_expert_stride_bytes,
-        )?;
-        let w13_rows = gate
-            .rows
-            .checked_add(up.rows)
-            .context("W13 row count overflow")?;
-        let hidden_dim = gate
-            .weight_row_stride_bytes
-            .checked_mul(2)
-            .context("W13 hidden dimension overflow")?;
-        let intermediate_dim = down
-            .weight_row_stride_bytes
-            .checked_mul(2)
-            .context("W2 intermediate dimension overflow")?;
-        workspace.pack_w4a16_projection(
-            Arc::clone(&library),
-            &[&loaded.up.weight.bytes, &loaded.gate.weight.bytes],
-            w13_weight,
-            hidden_dim,
-            w13_rows,
-            up.rows,
-            None,
-            cuda_stream,
-            "packed W13 expert weight",
-        )?;
-        workspace.pack_w4a16_projection(
-            Arc::clone(&library),
-            &[
-                &loaded.up.weight_scale.bytes,
-                &loaded.gate.weight_scale.bytes,
-            ],
-            w13_scale,
-            hidden_dim,
-            w13_rows,
-            up.rows,
-            Some(1.0),
-            cuda_stream,
-            "packed W13 expert scale",
-        )?;
-        workspace.pack_w4a16_projection(
-            Arc::clone(&library),
-            &[&loaded.down.weight.bytes],
-            w2_weight,
-            intermediate_dim,
-            down.rows,
-            0,
-            None,
-            cuda_stream,
-            "packed W2 expert weight",
-        )?;
-        workspace.pack_w4a16_projection(
-            library,
-            &[&loaded.down.weight_scale.bytes],
-            w2_scale,
-            intermediate_dim,
-            down.rows,
-            0,
-            Some(1.0),
-            cuda_stream,
-            "packed W2 expert scale",
-        )?;
-        Ok(())
     }
 
     fn store_layer_experts_w4a16(
@@ -4475,7 +2799,7 @@ impl RouteCudaLayerExpertSlab {
         cuda_stream: *mut c_void,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.w4a16_packed && !expert_ids.is_empty() && expert_ids.len() == loaded_experts.len(),
+            !expert_ids.is_empty() && expert_ids.len() == loaded_experts.len(),
             "layer {} batched W4A16 preload received {} expert ids and {} payloads",
             self.layer_id,
             expert_ids.len(),
@@ -4729,15 +3053,6 @@ impl RouteCudaLayerExpertSlab {
         Ok(())
     }
 
-    fn store_expert_scalars(&self, catalog: &TensorCatalog, expert_id: usize) -> Result<()> {
-        let gate =
-            load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "gate_proj")?;
-        let up = load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "up_proj")?;
-        let down =
-            load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "down_proj")?;
-        self.store_expert_scalars_from_metadata(expert_id, &gate, &up, &down)
-    }
-
     fn store_expert_scalars_from_cache(
         &self,
         expert_id: usize,
@@ -4789,28 +3104,11 @@ impl RouteCudaLayerExpertSlab {
             "layer {} expert {expert_id} activation scales must be positive",
             self.layer_id
         );
-        let (w1_alpha, a1_gscale, a2_gscale, w2_alpha) = if self.w4a16_packed {
-            let packed_scale = 2.0_f32.powi(119);
-            (
-                gate.weight_scale_2 * packed_scale,
-                1.0,
-                1.0,
-                down.weight_scale_2 * packed_scale,
-            )
-        } else {
-            let a1_gscale = gate.input_scale.recip();
-            let a2_gscale = down.input_scale.recip();
-            (
-                gate.weight_scale_2 / a1_gscale,
-                a1_gscale,
-                a2_gscale,
-                down.weight_scale_2 / a2_gscale,
-            )
-        };
+        let packed_scale = 2.0_f32.powi(119);
+        let w1_alpha = gate.weight_scale_2 * packed_scale;
+        let w2_alpha = down.weight_scale_2 * packed_scale;
         for (allocation, value, label) in [
             (&self.w1_alphas, w1_alpha, "W1 alpha"),
-            (&self.a1_gscale, a1_gscale, "FC1 activation scale"),
-            (&self.a2_gscale, a2_gscale, "FC2 activation scale"),
             (&self.w2_alphas, w2_alpha, "W2 alpha"),
         ] {
             anyhow::ensure!(
@@ -4824,30 +3122,6 @@ impl RouteCudaLayerExpertSlab {
                 label,
             )?;
         }
-        if !self.w4a16_packed {
-            for (allocation, value, label) in [
-                (
-                    self.w4a16_w13_global_scale
-                        .as_ref()
-                        .context("source-layout W4A16 W13 global scales are missing")?,
-                    gate.weight_scale_2,
-                    "source-layout W4A16 W13 global scale",
-                ),
-                (
-                    self.w4a16_w2_global_scale
-                        .as_ref()
-                        .context("source-layout W4A16 W2 global scales are missing")?,
-                    down.weight_scale_2,
-                    "source-layout W4A16 W2 global scale",
-                ),
-            ] {
-                allocation.copy_host_bytes_direct_at(
-                    expert_id * std::mem::size_of::<f32>(),
-                    &value.to_le_bytes(),
-                    label,
-                )?;
-            }
-        }
         Ok(())
     }
 
@@ -4858,8 +3132,7 @@ impl RouteCudaLayerExpertSlab {
         w2_global_scale: f32,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.w4a16_packed
-                && expert_id < self.expert_count
+            expert_id < self.expert_count
                 && w13_global_scale.is_finite()
                 && w13_global_scale > 0.0
                 && w2_global_scale.is_finite()
@@ -4873,16 +3146,6 @@ impl RouteCudaLayerExpertSlab {
                 &self.w1_alphas,
                 w13_global_scale.recip() * packed_scale,
                 "startup-quantized W1 alpha",
-            ),
-            (
-                &self.a1_gscale,
-                1.0,
-                "startup-quantized FC1 activation scale",
-            ),
-            (
-                &self.a2_gscale,
-                1.0,
-                "startup-quantized FC2 activation scale",
             ),
             (
                 &self.w2_alphas,
@@ -4908,7 +3171,7 @@ impl RouteCudaLayerExpertSlab {
         cuda_stream: *mut c_void,
     ) -> Result<(u64, u64)> {
         anyhow::ensure!(
-            self.w4a16_packed && expert_id < self.expert_count,
+            expert_id < self.expert_count,
             "layer {} cannot startup-quantize BF16 expert {expert_id}",
             self.layer_id
         );
@@ -4984,14 +3247,6 @@ impl RouteCudaLayerExpertSlab {
         library: &NativeLibrary,
         cuda_stream: *mut c_void,
     ) -> Result<()> {
-        if !self.w4a16_packed {
-            anyhow::ensure!(
-                self.w4a16_w13_global_scale.is_some() && self.w4a16_w2_global_scale.is_some(),
-                "layer {} source-layout W4A16 global scales are incomplete",
-                self.layer_id
-            );
-            return Ok(());
-        }
         let (Some(w13_global_scale), Some(w2_global_scale)) = (
             self.w4a16_w13_global_scale.as_ref(),
             self.w4a16_w2_global_scale.as_ref(),
@@ -5028,155 +3283,20 @@ impl RouteCudaLayerExpertSlab {
         Ok(())
     }
 
-    fn finalize_sparkinfer_source_w4a16(
-        &self,
-        catalog: &TensorCatalog,
-        library: Arc<NativeLibrary>,
-        workspace: &mut RouteCudaWorkspace,
-        w13_scale_factor: f32,
-        w2_scale_factor: f32,
-        cuda_stream: *mut c_void,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            self.sparkinfer_source_w4a16
-                && !self.w4a16_packed
-                && w13_scale_factor.is_finite()
-                && w13_scale_factor > 0.0
-                && w2_scale_factor.is_finite()
-                && w2_scale_factor > 0.0,
-            "layer {} has invalid SparkInfer source W4A16 finalization factors {w13_scale_factor}/{w2_scale_factor}",
-            self.layer_id
-        );
-        for expert_id in 0..self.expert_count {
-            let w13_scale = route_device_buffer_slice(
-                self.w13_scale.buffer(),
-                expert_id * self.w13_scale_expert_stride_bytes,
-                self.w13_scale_expert_stride_bytes,
-            )?;
-            workspace.transform_w4a16_scale_in_place(
-                Arc::clone(&library),
-                w13_scale,
-                6144,
-                1024,
-                512,
-                w13_scale_factor,
-                cuda_stream,
-                "SparkInfer source W13 scale",
-            )?;
-            let w2_scale = route_device_buffer_slice(
-                self.w2_scale.buffer(),
-                expert_id * self.w2_scale_expert_stride_bytes,
-                self.w2_scale_expert_stride_bytes,
-            )?;
-            workspace.transform_w4a16_scale_in_place(
-                Arc::clone(&library),
-                w2_scale,
-                512,
-                6144,
-                0,
-                w2_scale_factor,
-                cuda_stream,
-                "SparkInfer source W2 scale",
-            )?;
-
-            let gate =
-                load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "gate_proj")?;
-            let down =
-                load_routed_quant_scalar_metadata(catalog, self.layer_id, expert_id, "down_proj")?;
-            let generic_w13 = gate.weight_scale_2 * 2.0_f32.powi(119) / w13_scale_factor;
-            let generic_w2 = down.weight_scale_2 * 2.0_f32.powi(119) / w2_scale_factor;
-            let micro_w13 = gate.weight_scale_2 / (128.0 * w13_scale_factor);
-            let micro_w2 = down.weight_scale_2 / (128.0 * w2_scale_factor);
-            for (allocation, value, label) in [
-                (
-                    self.w4a16_w13_global_scale
-                        .as_ref()
-                        .context("source W4A16 generic W13 scales are missing")?,
-                    generic_w13,
-                    "source W4A16 generic W13 global scale",
-                ),
-                (
-                    self.w4a16_w2_global_scale
-                        .as_ref()
-                        .context("source W4A16 generic W2 scales are missing")?,
-                    generic_w2,
-                    "source W4A16 generic W2 global scale",
-                ),
-                (
-                    &self.w1_alphas,
-                    micro_w13,
-                    "source W4A16 micro W13 global scale",
-                ),
-                (
-                    &self.w2_alphas,
-                    micro_w2,
-                    "source W4A16 micro W2 global scale",
-                ),
-            ] {
-                anyhow::ensure!(
-                    value.is_finite(),
-                    "layer {} expert {expert_id} {label} is not finite",
-                    self.layer_id
-                );
-                allocation.copy_host_bytes_direct_at(
-                    expert_id * std::mem::size_of::<f32>(),
-                    &value.to_le_bytes(),
-                    label,
-                )?;
-            }
-        }
-        unsafe {
-            library
-                .cuda_stream_synchronize(cuda_stream)
-                .context("synchronizing SparkInfer source W4A16 scale transforms")?;
-        }
-        Ok(())
-    }
-
-    fn grouped_moe_tp4_m1_buffers(&self) -> Result<B12xSparkMoeTp4LayerBuffers> {
-        anyhow::ensure!(
-            !self.w4a16_packed
-                && !self.sparkinfer_source_w4a16
-                && self.expert_count == 256
-                && self.gate_rows == 512
-                && self.up_rows == 512
-                && self.down_rows == 6144,
-            "layer {} grouped TP4 MoE slab has unsupported experts/rows {}/{}/{}/{}",
-            self.layer_id,
-            self.expert_count,
-            self.gate_rows,
-            self.up_rows,
-            self.down_rows
-        );
-        Ok(B12xSparkMoeTp4LayerBuffers {
-            w13_weight: self.w13_weight.buffer(),
-            w13_scale: self.w13_scale.buffer(),
-            w1_alphas: self.w1_alphas.buffer(),
-            a1_gscale: self.a1_gscale.buffer(),
-            a2_gscale: self.a2_gscale.buffer(),
-            w2_weight: self.w2_weight.buffer(),
-            w2_scale: self.w2_scale.buffer(),
-            w2_alphas: self.w2_alphas.buffer(),
-        })
-    }
-
     fn w4a16_moe_buffers(&self) -> Result<B12xSparkW4a16LayerBuffers> {
         anyhow::ensure!(
             self.expert_count == 256
                 && self.gate_rows == 512
                 && self.up_rows == 512
                 && self.down_rows == 6144,
-            "layer {} W4A16 slab has unsupported layout packed={} experts={} rows={}/{}/{}",
+            "layer {} W4A16 slab has unsupported experts={} rows={}/{}/{}",
             self.layer_id,
-            self.w4a16_packed,
             self.expert_count,
             self.gate_rows,
             self.up_rows,
             self.down_rows
         );
         Ok(B12xSparkW4a16LayerBuffers {
-            packed_layout: self.w4a16_packed,
-            source_layout: self.sparkinfer_source_w4a16,
             w13_weight: self.w13_weight.buffer(),
             w2_weight: self.w2_weight.buffer(),
             w13_scale: self.w13_scale.buffer(),
@@ -5191,61 +3311,18 @@ impl RouteCudaLayerExpertSlab {
                 .as_deref()
                 .unwrap_or(self.w2_alphas.as_ref())
                 .buffer(),
-            micro_w13_global_scale: self.w1_alphas.buffer(),
-            micro_w2_global_scale: self.w2_alphas.buffer(),
         })
     }
 }
 
 #[derive(Clone, Copy)]
-struct B12xSparkMoeTp4LayerBuffers {
-    w13_weight: GlmrtDeviceBuffer,
-    w13_scale: GlmrtDeviceBuffer,
-    w1_alphas: GlmrtDeviceBuffer,
-    a1_gscale: GlmrtDeviceBuffer,
-    a2_gscale: GlmrtDeviceBuffer,
-    w2_weight: GlmrtDeviceBuffer,
-    w2_scale: GlmrtDeviceBuffer,
-    w2_alphas: GlmrtDeviceBuffer,
-}
-
-#[derive(Clone, Copy)]
 struct B12xSparkW4a16LayerBuffers {
-    packed_layout: bool,
-    source_layout: bool,
     w13_weight: GlmrtDeviceBuffer,
     w2_weight: GlmrtDeviceBuffer,
     w13_scale: GlmrtDeviceBuffer,
     w2_scale: GlmrtDeviceBuffer,
     w13_global_scale: GlmrtDeviceBuffer,
     w2_global_scale: GlmrtDeviceBuffer,
-    micro_w13_global_scale: GlmrtDeviceBuffer,
-    micro_w2_global_scale: GlmrtDeviceBuffer,
-}
-
-fn b12x_w4a4_moe_buffers(
-    layer: B12xSparkMoeTp4LayerBuffers,
-    workspace: B12xSparkAotRouteWorkspaceBuffers,
-    input: GlmrtDeviceBuffer,
-    output: GlmrtDeviceBuffer,
-    topk_ids: GlmrtDeviceBuffer,
-    topk_weights: GlmrtDeviceBuffer,
-) -> GlmrtB12xSparkW4a4MoeBuffers {
-    GlmrtB12xSparkW4a4MoeBuffers {
-        input,
-        topk_ids,
-        topk_weights,
-        w13_weight: layer.w13_weight,
-        w13_scale: layer.w13_scale,
-        w1_alphas: layer.w1_alphas,
-        a1_gscale: layer.a1_gscale,
-        w2_weight: layer.w2_weight,
-        w2_scale: layer.w2_scale,
-        w2_alphas: layer.w2_alphas,
-        a2_gscale: layer.a2_gscale,
-        output,
-        scratch: workspace.w4a4_scratch,
-    }
 }
 
 fn b12x_w4a16_moe_buffers(
@@ -5279,10 +3356,6 @@ fn b12x_w4a16_moe_buffers(
         fc1_scratch: workspace.w4a16_fc1_scratch,
         fc2_scratch: workspace.w4a16_fc2_scratch,
         locks: workspace.w4a16_locks,
-        micro_w13_global_scale: layer.micro_w13_global_scale,
-        micro_w2_global_scale: layer.micro_w2_global_scale,
-        barrier_count: workspace.moe_barrier_count,
-        barrier_epoch: workspace.moe_barrier_epoch,
     }
 }
 
@@ -5295,37 +3368,15 @@ unsafe fn launch_b12x_w4a16_decode(
     topk_ids: GlmrtDeviceBuffer,
     cuda_stream: *mut c_void,
 ) -> Result<()> {
-    if layer.source_layout {
-        unsafe {
-            library.cuda_sparkinfer_source_w4a16_topk8_nvfp4_async(
-                buffers,
-                input_payload,
-                input_payload_stride_bytes,
-                topk_ids,
-                1,
-                cuda_stream,
-            )
-        }
-    } else if layer.packed_layout {
-        unsafe {
-            library.cuda_b12x_spark_w4a16_decode_m1_nvfp4_async(
-                buffers,
-                input_payload,
-                input_payload_stride_bytes,
-                topk_ids,
-                cuda_stream,
-            )
-        }
-    } else {
-        unsafe {
-            library.cuda_b12x_spark_w4a16_modelopt_decode_m1_nvfp4_async(
-                buffers,
-                input_payload,
-                input_payload_stride_bytes,
-                topk_ids,
-                cuda_stream,
-            )
-        }
+    let _ = layer;
+    unsafe {
+        library.cuda_b12x_spark_w4a16_decode_m1_nvfp4_async(
+            buffers,
+            input_payload,
+            input_payload_stride_bytes,
+            topk_ids,
+            cuda_stream,
+        )
     }
 }
 
@@ -5407,241 +3458,6 @@ fn loaded_route_cuda_projection_geometry_inner(
         weight_bytes,
         scale_bytes,
     })
-}
-
-struct SharedDeviceAllocationView {
-    _owner: Arc<OwnedDeviceAllocation>,
-    buffer: GlmrtDeviceBuffer,
-    offset_bytes: usize,
-}
-
-impl SharedDeviceAllocationView {
-    fn from_owned(allocation: OwnedDeviceAllocation) -> Self {
-        let owner = Arc::new(allocation);
-        let buffer = owner.buffer();
-        Self {
-            _owner: owner,
-            buffer,
-            offset_bytes: 0,
-        }
-    }
-
-    fn from_slice(
-        owner: Arc<OwnedDeviceAllocation>,
-        offset_bytes: usize,
-        bytes: usize,
-    ) -> Result<Self> {
-        let buffer = route_device_buffer_slice(owner.buffer(), offset_bytes, bytes)?;
-        Ok(Self {
-            _owner: owner,
-            buffer,
-            offset_bytes,
-        })
-    }
-
-    fn buffer(&self) -> GlmrtDeviceBuffer {
-        self.buffer
-    }
-
-    fn is_managed(&self) -> bool {
-        (self.buffer.flags & GLMRT_DEVICE_BUFFER_FLAG_MANAGED) != 0
-    }
-
-    fn copy_host_bytes_direct(&self, bytes: &[u8], label: &str) -> Result<()> {
-        self._owner
-            .copy_host_bytes_direct_at(self.offset_bytes, bytes, label)
-    }
-}
-
-// The pointer is an opaque CUDA handle and remains valid through `_owner`.
-// Rust never dereferences it outside native CUDA calls.
-unsafe impl Send for SharedDeviceAllocationView {}
-unsafe impl Sync for SharedDeviceAllocationView {}
-
-impl DeviceRoutedQuantProjection {
-    fn from_host(
-        library: Arc<NativeLibrary>,
-        projection: &RoutedQuantProjection,
-        cuda_stream: *mut c_void,
-        workspace: &mut RouteCudaWorkspace,
-        managed: bool,
-        b12x_aot_enabled: bool,
-    ) -> Result<Self> {
-        let weight_row_stride_bytes = projection
-            .weight
-            .row_width
-            .checked_mul(projection.weight.bytes_per_scalar)
-            .context("NVFP4 route projection weight row stride overflow")?;
-        let weight_scale_row_stride_bytes = projection
-            .weight_scale
-            .row_width
-            .checked_mul(projection.weight_scale.bytes_per_scalar)
-            .context("NVFP4 route projection weight-scale row stride overflow")?;
-        let weight_scale_b12x_swizzled = b12x_aot_enabled
-            && b12x_projection_scale_shape_supported(
-                projection.weight_scale.row_count,
-                weight_scale_row_stride_bytes,
-            );
-        Ok(Self {
-            weight: SharedDeviceAllocationView::from_owned(
-                workspace.upload_projection_host_bytes_to_device(
-                    Arc::clone(&library),
-                    &projection.weight.bytes,
-                    "NVFP4 route projection weight",
-                    RouteCudaProjectionStageSlot::Weight,
-                    cuda_stream,
-                    managed,
-                    None,
-                )?,
-            ),
-            weight_scale: SharedDeviceAllocationView::from_owned(
-                workspace.upload_projection_host_bytes_to_device(
-                    library,
-                    &projection.weight_scale.bytes,
-                    "NVFP4 route projection weight scale",
-                    RouteCudaProjectionStageSlot::Scale,
-                    cuda_stream,
-                    managed,
-                    weight_scale_b12x_swizzled.then_some((
-                        projection.weight_scale.row_count,
-                        weight_scale_row_stride_bytes,
-                    )),
-                )?,
-            ),
-            weight_row_stride_bytes,
-            weight_scale_row_stride_bytes,
-            weight_scale_b12x_swizzled,
-        })
-    }
-
-    fn from_catalog_rows(
-        library: Arc<NativeLibrary>,
-        catalog: &TensorCatalog,
-        key: &RoutedQuantProjectionKey,
-        cuda_stream: *mut c_void,
-        workspace: &mut RouteCudaWorkspace,
-        managed: bool,
-        b12x_aot_enabled: bool,
-    ) -> Result<Self> {
-        let base_name =
-            routed_quant_projection_base_name(key.layer_id, key.expert_id, key.projection);
-        let weight_name = format!("{base_name}.weight");
-        let weight_scale_name = format!("{base_name}.weight_scale");
-        if let Some(shard) = spark_expert_intermediate_shard_from_env()? {
-            let weight = load_routed_projection_rows_for_shard(
-                catalog,
-                &weight_name,
-                key.projection,
-                key.row_count,
-                shard,
-            )?;
-            // ModelOpt HF checkpoints store weight_scale logically as [out, in / 16].
-            // Shard that tensor in logical coordinates; the upload path performs the
-            // single kernel-specific scale transform when b12x AOT is selected.
-            let weight_scale = load_routed_projection_rows_for_shard(
-                catalog,
-                &weight_scale_name,
-                key.projection,
-                key.row_count,
-                shard,
-            )?;
-            let weight_row_stride_bytes = weight
-                .row_width
-                .checked_mul(weight.bytes_per_scalar)
-                .context("sharded NVFP4 route weight row stride overflow")?;
-            let weight_scale_row_stride_bytes = weight_scale
-                .row_width
-                .checked_mul(weight_scale.bytes_per_scalar)
-                .context("sharded NVFP4 route weight-scale row stride overflow")?;
-            let weight_scale_b12x_swizzled = b12x_aot_enabled
-                && b12x_projection_scale_shape_supported(
-                    weight_scale.row_count,
-                    weight_scale_row_stride_bytes,
-                );
-            return Ok(Self {
-                weight: SharedDeviceAllocationView::from_owned(
-                    workspace.upload_projection_host_bytes_to_device(
-                        Arc::clone(&library),
-                        &weight.bytes,
-                        "sharded NVFP4 route projection weight",
-                        RouteCudaProjectionStageSlot::Weight,
-                        cuda_stream,
-                        managed,
-                        None,
-                    )?,
-                ),
-                weight_scale: SharedDeviceAllocationView::from_owned(
-                    workspace.upload_projection_host_bytes_to_device(
-                        library,
-                        &weight_scale.bytes,
-                        "sharded NVFP4 route projection weight scale",
-                        RouteCudaProjectionStageSlot::Scale,
-                        cuda_stream,
-                        managed,
-                        weight_scale_b12x_swizzled
-                            .then_some((weight_scale.row_count, weight_scale_row_stride_bytes)),
-                    )?,
-                ),
-                weight_row_stride_bytes,
-                weight_scale_row_stride_bytes,
-                weight_scale_b12x_swizzled,
-            });
-        }
-        let (weight_row_width, weight_bytes_per_scalar, _) = tensor_rows_read_plan(
-            catalog_tensor(catalog, &weight_name)?,
-            &weight_name,
-            key.row_count,
-        )?;
-        let (weight_scale_row_width, weight_scale_bytes_per_scalar, _) = tensor_rows_read_plan(
-            catalog_tensor(catalog, &weight_scale_name)?,
-            &weight_scale_name,
-            key.row_count,
-        )?;
-        let weight_row_stride_bytes = weight_row_width
-            .checked_mul(weight_bytes_per_scalar)
-            .context("NVFP4 route catalog weight row stride overflow")?;
-        let weight_scale_row_stride_bytes = weight_scale_row_width
-            .checked_mul(weight_scale_bytes_per_scalar)
-            .context("NVFP4 route catalog weight-scale row stride overflow")?;
-        let weight_scale_b12x_swizzled = b12x_aot_enabled
-            && b12x_projection_scale_shape_supported(key.row_count, weight_scale_row_stride_bytes);
-        Ok(Self {
-            weight: SharedDeviceAllocationView::from_owned(
-                workspace.upload_projection_rows_to_device(
-                    Arc::clone(&library),
-                    catalog,
-                    &weight_name,
-                    key.row_count,
-                    "NVFP4 route projection weight",
-                    RouteCudaProjectionStageSlot::Weight,
-                    cuda_stream,
-                    managed,
-                    None,
-                )?,
-            ),
-            weight_scale: SharedDeviceAllocationView::from_owned(
-                workspace.upload_projection_rows_to_device(
-                    library,
-                    catalog,
-                    &weight_scale_name,
-                    key.row_count,
-                    "NVFP4 route projection weight scale",
-                    RouteCudaProjectionStageSlot::Scale,
-                    cuda_stream,
-                    managed,
-                    weight_scale_b12x_swizzled
-                        .then_some((key.row_count, weight_scale_row_stride_bytes)),
-                )?,
-            ),
-            weight_row_stride_bytes,
-            weight_scale_row_stride_bytes,
-            weight_scale_b12x_swizzled,
-        })
-    }
-
-    fn uses_managed_storage(&self) -> bool {
-        self.weight.is_managed() && self.weight_scale.is_managed()
-    }
 }
 
 pub(in crate::commands::real_full) struct RouteExecution {
@@ -5863,20 +3679,14 @@ pub(in crate::commands::real_full) struct PackedW4a16Topk8Route {
     pub(in crate::commands::real_full) weight: f32,
 }
 
-fn packed_w4a16_topk8_prefill_eligible(
-    packed_w4a16: bool,
-    row_count: usize,
-    route_count: usize,
-) -> bool {
-    packed_w4a16
-        && row_count > 0
+fn packed_w4a16_topk8_prefill_eligible(row_count: usize, route_count: usize) -> bool {
+    row_count > 0
         && row_count <= B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS
         && route_count == row_count * B12X_W4A16_PREFILL_TOPK8_ROUTES
 }
 
 fn plan_packed_w4a16_topk8_prefill(
     row_routes: &[Vec<(ScoredRoute, usize)>],
-    source_layout: bool,
 ) -> Result<PackedW4a16Topk8PrefillPlan> {
     anyhow::ensure!(
         !row_routes.is_empty()
@@ -5911,13 +3721,12 @@ fn plan_packed_w4a16_topk8_prefill(
         }
     }
 
-    plan_packed_w4a16_topk8_prefill_flat(row_routes.len(), &flat_routes, source_layout)
+    plan_packed_w4a16_topk8_prefill_flat(row_routes.len(), &flat_routes)
 }
 
 fn plan_packed_w4a16_topk8_prefill_flat(
     row_count: usize,
     routes: &[PackedW4a16Topk8Route],
-    source_layout: bool,
 ) -> Result<PackedW4a16Topk8PrefillPlan> {
     anyhow::ensure!(
         row_count > 0 && row_count <= B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS,
@@ -5948,11 +3757,7 @@ fn plan_packed_w4a16_topk8_prefill_flat(
     // M=1 consumes the direct top-k expert IDs. Exact M=2..8 execution is
     // expert-packed in block-8 groups so each route retains the M=1 arithmetic
     // shape while repeated experts reuse their resident weights.
-    let direct_topk = if source_layout {
-        row_count <= sparkinfer_source_w4a16_direct_max_rows()
-    } else {
-        row_count == 1
-    };
+    let direct_topk = row_count == 1;
     let topk_weights = routes.iter().map(|route| route.weight).collect::<Vec<_>>();
     if direct_topk {
         return Ok(PackedW4a16Topk8PrefillPlan {
@@ -5964,7 +3769,7 @@ fn plan_packed_w4a16_topk8_prefill_flat(
         });
     }
 
-    let route_block_rows = b12x_w4a16_prefill_route_block_rows(row_count, source_layout);
+    let route_block_rows = b12x_w4a16_prefill_route_block_rows(row_count);
     let mut expert_counts = [0_usize; B12X_W4A16_EXPERTS];
     for route in routes {
         let expert_id = route.expert_id as usize;
@@ -6037,17 +3842,13 @@ pub(in crate::commands::real_full) struct RouteNvfp4IngressStream {
     max_intermediate_rows: usize,
     max_group_rows: usize,
     lane_count: usize,
-    packed_w4a16: bool,
-    source_w4a16: bool,
     packed_w4a16_topk8_prefill: bool,
     m1_parity_grouped_small_m_w4a16: bool,
     split_m1_m2_w4a16: bool,
     w4a16_small_m_mode: W4a16SmallMMode,
-    w4a4_topk8_prefill: bool,
     topk8_combined_output_in_group_buffer: bool,
     packed_w4a16_direct_fp8_output: bool,
     grouped_decode: bool,
-    w4a16_decode: bool,
     collective_request_id: Option<u64>,
     collective_launch_ticket: Option<SparkCollectiveLaunchTicket>,
     lane_used_since_emit: Vec<bool>,
@@ -6154,26 +3955,9 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
     let slab = cuda_cache.expert_slabs.get(&layer_id);
     let packed_w4a16 = cuda_cache.b12x_w4a16_packed
         && slab
-            .map(|slab| {
-                slab.w4a16_moe_buffers()
-                    .map(|layer| layer.packed_layout)
-                    .unwrap_or(false)
-            })
+            .map(|slab| slab.w4a16_moe_buffers().is_ok())
             .unwrap_or(false);
-    let source_w4a16 = cuda_cache.sparkinfer_source_w4a16
-        && slab
-            .map(|slab| {
-                slab.w4a16_moe_buffers()
-                    .map(|layer| layer.source_layout)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-    let native_w4a16 = packed_w4a16 || source_w4a16;
-    let w4a4_topk8_prefill = !native_w4a16
-        && slab
-            .map(|slab| slab.grouped_moe_tp4_m1_buffers().is_ok())
-            .unwrap_or(false);
-    if !native_w4a16 && !w4a4_topk8_prefill {
+    if !packed_w4a16 {
         return Ok(None);
     }
     anyhow::ensure!(
@@ -6196,7 +3980,7 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         );
     }
 
-    let packed_plan = plan_packed_w4a16_topk8_prefill_flat(row_count, routes, source_w4a16)?;
+    let packed_plan = plan_packed_w4a16_topk8_prefill_flat(row_count, routes)?;
     let m1_parity_grouped_small_m_w4a16 = packed_w4a16 && (2..=8).contains(&row_count);
     let w4a16_small_m_mode = b12x_spark_w4a16_small_m_mode();
     let split_m1_m2_w4a16 = m1_parity_grouped_small_m_w4a16
@@ -6208,24 +3992,17 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         "split-M1 physical M=2 requires two B12X route lanes, configured {}",
         cuda_cache.b12x_lane_count()
     );
-    let topk8_combined_output_in_group_buffer = w4a4_topk8_prefill;
+    let topk8_combined_output_in_group_buffer = false;
     let packed_w4a16_row_sharded_fp8_direct = spark_row_sharded_reduction
         && output_dtype == RouteStreamingOutputDtype::Fp8E4m3RowScaled
         && fused_fp8_reduction_enabled()
         && cuda_cache.spark_reduction_dtype() == Some(ExpertIntermediateReductionDtype::Fp8);
-    let packed_w4a16_direct_fp8_output = native_w4a16
-        && output_dtype == RouteStreamingOutputDtype::Fp8E4m3RowScaled
+    let packed_w4a16_direct_fp8_output = output_dtype
+        == RouteStreamingOutputDtype::Fp8E4m3RowScaled
         && (packed_w4a16_row_sharded_fp8_direct || !spark_reduction);
     if route_stage_timing_enabled() {
-        let layout = if w4a4_topk8_prefill {
-            "w4a4-modelopt"
-        } else if source_w4a16 {
-            "w4a16-sparkinfer-source"
-        } else {
-            "w4a16-packed"
-        };
         eprintln!(
-            "real_nvfp4_route_topk8_prefill_fast_selected layer_id={layer_id} rows={row_count} routes={route_count} layout={layout}"
+            "real_nvfp4_route_topk8_prefill_fast_selected layer_id={layer_id} rows={row_count} routes={route_count} layout=w4a16-packed"
         );
     }
 
@@ -6254,52 +4031,32 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
     let workspace = cuda_cache.workspace.ensure_accumulation_buffers(
         Arc::clone(&library),
         hidden_bytes,
-        1,
         accumulator_bytes,
         1,
         index_bytes,
         weight_bytes,
         index_bytes,
     )?;
-    let b12x_workspace_rows = if split_m1_m2_w4a16 {
-        1
-    } else if source_w4a16 {
-        sparkinfer_source_w4a16_workspace_rows(
-            row_count,
-            sparkinfer_source_w4a16_direct_max_rows(),
-        )?
-    } else {
-        row_count
-    };
+    let b12x_workspace_rows = if split_m1_m2_w4a16 { 1 } else { row_count };
     let b12x_workspaces = cuda_cache.ensure_b12x_route_workspaces(
         lane_count,
         b12x_workspace_rows,
         hidden_dim,
         512,
         output_rows,
-        w4a4_topk8_prefill,
     )?;
     let scatter_indices = (0..row_count)
         .map(|row| u32::try_from(row).context("packed prefill row index exceeds u32"))
         .collect::<Result<Vec<_>>>()?;
-    let mut packed_metadata = if w4a4_topk8_prefill {
-        routes
-            .iter()
-            .map(|route| route.expert_id)
-            .collect::<Vec<_>>()
-    } else if split_m1_m2_w4a16 {
+    let mut packed_metadata = if split_m1_m2_w4a16 {
         packed_plan.direct_topk_ids.clone()
     } else {
         packed_plan.packed_route_indices.clone()
     };
     let block_expert_offset = packed_metadata.len() * std::mem::size_of::<u32>();
-    if !w4a4_topk8_prefill {
-        packed_metadata.extend_from_slice(&packed_plan.block_expert_ids);
-    }
+    packed_metadata.extend_from_slice(&packed_plan.block_expert_ids);
     let route_count_offset = packed_metadata.len() * std::mem::size_of::<u32>();
-    if !w4a4_topk8_prefill {
-        packed_metadata.push(packed_plan.packed_route_count);
-    }
+    packed_metadata.push(packed_plan.packed_route_count);
     let metadata_payloads = cuda_cache.workspace.stage_accumulation_metadata_payloads(
         Arc::clone(&library),
         u32_bytes(&scatter_indices),
@@ -6376,21 +4133,19 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
                 )
                 .context("copying packed W4A16 prefill block expert IDs")?;
         }
-        if !w4a4_topk8_prefill {
-            library
-                .copy_host_buffer_h2d_async(
-                    b12x_workspace.w4a16_packed_route_count,
-                    host_buffer_byte_view(
-                        input_index_payload,
-                        route_count_offset,
-                        std::mem::size_of::<u32>(),
-                        "packed W4A16 prefill route count",
-                    )?,
+        library
+            .copy_host_buffer_h2d_async(
+                b12x_workspace.w4a16_packed_route_count,
+                host_buffer_byte_view(
+                    input_index_payload,
+                    route_count_offset,
                     std::mem::size_of::<u32>(),
-                    completion_stream,
-                )
-                .context("copying packed W4A16 prefill route count")?;
-        }
+                    "packed W4A16 prefill route count",
+                )?,
+                std::mem::size_of::<u32>(),
+                completion_stream,
+            )
+            .context("copying packed W4A16 prefill route count")?;
         if !split_m1_m2_w4a16 {
             library
                 .copy_host_buffer_h2d_async(
@@ -6438,17 +4193,13 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         max_intermediate_rows: 512,
         max_group_rows: b12x_workspace_rows,
         lane_count,
-        packed_w4a16,
-        source_w4a16,
         packed_w4a16_topk8_prefill: true,
         m1_parity_grouped_small_m_w4a16,
         split_m1_m2_w4a16,
         w4a16_small_m_mode,
-        w4a4_topk8_prefill,
         topk8_combined_output_in_group_buffer,
         packed_w4a16_direct_fp8_output,
         grouped_decode: false,
-        w4a16_decode: false,
         collective_request_id: None,
         collective_launch_ticket: None,
         lane_used_since_emit: vec![false; lane_count],
@@ -6630,26 +4381,15 @@ pub(in crate::commands::real_full) fn begin_nvfp4_route_ingress_stream_cached(
         && cuda_cache
             .expert_slabs
             .get(&layer_id)
-            .map(|slab| {
-                slab.w4a16_moe_buffers()
-                    .map(|layer| layer.packed_layout)
-                    .unwrap_or(false)
-            })
+            .map(|slab| slab.w4a16_moe_buffers().is_ok())
             .unwrap_or(false);
-    let source_w4a16 = cuda_cache.sparkinfer_source_w4a16
-        && cuda_cache
-            .expert_slabs
-            .get(&layer_id)
-            .map(|slab| {
-                slab.w4a16_moe_buffers()
-                    .map(|layer| layer.source_layout)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-    let native_w4a16 = packed_w4a16 || source_w4a16;
+    anyhow::ensure!(
+        packed_w4a16,
+        "streamed NVFP4 route ingress requires a packed W4A16 expert slab"
+    );
     let packed_w4a16_topk8_prefill_plan =
-        (packed_w4a16_topk8_prefill_eligible(native_w4a16, row_count, route_count))
-            .then(|| plan_packed_w4a16_topk8_prefill(row_routes, source_w4a16))
+        (packed_w4a16_topk8_prefill_eligible(row_count, route_count))
+            .then(|| plan_packed_w4a16_topk8_prefill(row_routes))
             .transpose()?;
     let packed_w4a16_topk8_prefill = packed_w4a16_topk8_prefill_plan.is_some();
     let m1_parity_grouped_small_m_w4a16 =
@@ -6685,20 +4425,13 @@ pub(in crate::commands::real_full) fn begin_nvfp4_route_ingress_stream_cached(
             .get(&layer_id)
             .map(|slab| slab.w4a16_moe_buffers().is_ok())
             .unwrap_or(false);
-    let grouped_decode = grouped_decode_shape
-        && (w4a16_decode
-            || cuda_cache
-                .expert_slabs
-                .get(&layer_id)
-                .map(|slab| slab.grouped_moe_tp4_m1_buffers().is_ok())
-                .unwrap_or(false));
+    let grouped_decode = grouped_decode_shape && w4a16_decode;
     let library = Arc::clone(&cuda_cache.library);
     let cuda_stream = cuda_cache.stream.as_ptr();
     let completion_stream = cuda_cache.completion_stream.as_ptr();
     let workspace = cuda_cache.workspace.ensure_accumulation_buffers(
         Arc::clone(&library),
         hidden_bytes,
-        1,
         accumulator_bytes,
         1,
         index_bytes,
@@ -6720,11 +4453,6 @@ pub(in crate::commands::real_full) fn begin_nvfp4_route_ingress_stream_cached(
     let workspace_rows = if packed_w4a16_topk8_prefill {
         if split_m1_m2_w4a16 {
             1
-        } else if source_w4a16 {
-            sparkinfer_source_w4a16_workspace_rows(
-                row_count,
-                sparkinfer_source_w4a16_direct_max_rows(),
-            )?
         } else {
             row_count
         }
@@ -6737,50 +4465,15 @@ pub(in crate::commands::real_full) fn begin_nvfp4_route_ingress_stream_cached(
         hidden_dim,
         max_intermediate_rows,
         output_rows,
-        false,
     )?;
     for (group_index, group) in route_groups.iter().enumerate() {
-        if packed_w4a16 || w4a16_decode {
-            anyhow::ensure!(
-                hidden_dim == 6144
-                    && group.intermediate_rows == 512
-                    && output_rows == 6144
-                    && group.count <= B12X_SPARK_AOT_MAX_ROWS,
-                "streamed NVFP4 route group {group_index} is not supported by packed W4A16"
-            );
-        } else {
-            let gate = cuda_cache.device_projection_view_for_source(
-                catalog,
-                &group.projections.gate,
-                cuda_stream,
-            )?;
-            let up = cuda_cache.device_projection_view_for_source(
-                catalog,
-                &group.projections.up,
-                cuda_stream,
-            )?;
-            let down = cuda_cache.device_projection_view_for_source(
-                catalog,
-                &group.projections.down,
-                cuda_stream,
-            )?;
-            anyhow::ensure!(
-                b12x_spark_direct_route_shape_supported(
-                    group.count,
-                    hidden_dim,
-                    hidden_dim,
-                    group.intermediate_rows,
-                    output_rows,
-                ) && b12x_spark_direct_projection_layout_supported(
-                    hidden_dim,
-                    group.intermediate_rows,
-                    &gate,
-                    &up,
-                    &down,
-                ),
-                "streamed NVFP4 route group {group_index} is not supported by B12X AOT"
-            );
-        }
+        anyhow::ensure!(
+            hidden_dim == 6144
+                && group.intermediate_rows == 512
+                && output_rows == 6144
+                && group.count <= B12X_SPARK_AOT_MAX_ROWS,
+            "streamed NVFP4 route group {group_index} is not supported by packed W4A16"
+        );
     }
     let packed_scatter_indices = packed_w4a16_topk8_prefill
         .then(|| {
@@ -6994,17 +4687,13 @@ pub(in crate::commands::real_full) fn begin_nvfp4_route_ingress_stream_cached(
         max_intermediate_rows,
         max_group_rows: workspace_rows,
         lane_count,
-        packed_w4a16,
-        source_w4a16,
         packed_w4a16_topk8_prefill,
         m1_parity_grouped_small_m_w4a16,
         split_m1_m2_w4a16,
         w4a16_small_m_mode,
-        w4a4_topk8_prefill: false,
         topk8_combined_output_in_group_buffer,
         packed_w4a16_direct_fp8_output,
         grouped_decode,
-        w4a16_decode,
         collective_request_id: None,
         collective_launch_ticket: None,
         lane_used_since_emit: vec![false; lane_count],
@@ -7545,7 +5234,7 @@ fn route_device_buffer_slice(
 }
 
 pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_cached(
-    catalog: &TensorCatalog,
+    _catalog: &TensorCatalog,
     state: &mut RouteNvfp4IngressStream,
     hidden_chunk: &[u8],
     hidden_chunk_device: Option<GlmrtDeviceBuffer>,
@@ -7623,7 +5312,6 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
     let workspace = cuda_cache.workspace.ensure_accumulation_buffers(
         Arc::clone(&library),
         hidden_bytes,
-        1,
         accumulator_bytes,
         1,
         index_bytes,
@@ -7636,16 +5324,13 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
         state.hidden_dim,
         state.max_intermediate_rows,
         state.output_rows,
-        state.w4a4_topk8_prefill,
     )?;
     let packed_prefill_rdma_bf16_direct = state.packed_w4a16_topk8_prefill
         && state.spark_row_sharded_reduction
         && cuda_cache.spark_rdma_reduction_enabled()
         && cuda_cache.spark_reduction_dtype() == Some(ExpertIntermediateReductionDtype::Fp8);
     let packed_prefill_timeline = (packed_prefill_rdma_bf16_direct
-        && (RouteCudaEventTimeline::enabled()
-            || (state.w4a4_topk8_prefill
-                && source_prefill_frontier_timing_sample(state.layer_id, state.row_count))))
+        && RouteCudaEventTimeline::enabled())
     .then(|| RouteCudaEventTimeline::new(Arc::clone(&library)))
     .transpose()?;
     let direct_packed_input =
@@ -7695,13 +5380,7 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
                 .expert_slabs
                 .get(&state.layer_id)
                 .context("top-k=8 prefill lost its expert slab")?;
-            let w4a16_layer_buffers = (!state.w4a4_topk8_prefill)
-                .then(|| slab.w4a16_moe_buffers())
-                .transpose()?;
-            let w4a4_layer_buffers = state
-                .w4a4_topk8_prefill
-                .then(|| slab.grouped_moe_tp4_m1_buffers())
-                .transpose()?;
+            let w4a16_layer_buffers = slab.w4a16_moe_buffers()?;
             let group_stream = cuda_cache.b12x_lane_stream(0);
             let b12x_workspace = b12x_workspaces[0];
             let input_payload = direct_packed_input.unwrap_or(device_buffer_byte_view(
@@ -7734,293 +5413,186 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
                         "packed compute start",
                     )?;
                 }
-                if let Some(layer_buffers) = w4a4_layer_buffers {
-                    let input_row_bytes = state
-                        .hidden_dim
-                        .checked_mul(std::mem::size_of::<u16>())
-                        .context("W4A4 prefill BF16 input row byte count overflow")?;
-                    let output_row_bytes = state
-                        .output_rows
-                        .checked_mul(std::mem::size_of::<u16>())
-                        .context("W4A4 prefill BF16 output row byte count overflow")?;
-                    let topk_ids_row_bytes = B12X_W4A16_PREFILL_TOPK8_ROUTES
-                        .checked_mul(std::mem::size_of::<u32>())
-                        .context("W4A4 prefill top-k ID row byte count overflow")?;
-                    let topk_weights_row_bytes = B12X_W4A16_PREFILL_TOPK8_ROUTES
-                        .checked_mul(std::mem::size_of::<f32>())
-                        .context("W4A4 prefill top-k weight row byte count overflow")?;
-                    let mut chunk_row_offset = 0;
-                    while chunk_row_offset < state.row_count {
-                        let chunk_rows =
-                            (state.row_count - chunk_row_offset).min(B12X_SPARK_AOT_MAX_ROWS);
-                        let input = route_device_buffer_slice(
-                            b12x_workspace.compact_hidden,
-                            chunk_row_offset * input_row_bytes,
-                            chunk_rows * input_row_bytes,
-                        )?;
-                        let output = route_device_buffer_slice(
-                            b12x_workspace.group_output,
-                            chunk_row_offset * output_row_bytes,
-                            chunk_rows * output_row_bytes,
-                        )?;
-                        let topk_ids = route_device_buffer_slice(
-                            b12x_workspace.w4a16_packed_route_indices,
-                            chunk_row_offset * topk_ids_row_bytes,
-                            chunk_rows * topk_ids_row_bytes,
-                        )?;
-                        let topk_weights = route_device_buffer_slice(
-                            b12x_workspace.w4a16_topk_weights,
-                            chunk_row_offset * topk_weights_row_bytes,
-                            chunk_rows * topk_weights_row_bytes,
-                        )?;
-                        let chunk_input_payload = route_device_buffer_slice(
-                            input_payload,
-                            chunk_row_offset * state.hidden_row_stride_bytes,
-                            chunk_rows * state.hidden_row_stride_bytes,
-                        )?;
-                        let buffers = b12x_w4a4_moe_buffers(
-                            layer_buffers,
-                            b12x_workspace,
-                            input,
-                            output,
-                            topk_ids,
-                            topk_weights,
-                        );
-                        library
-                            .cuda_b12x_spark_w4a4_prefill_topk8_nvfp4_async(
-                                &buffers,
-                                chunk_input_payload,
-                                state.hidden_row_stride_bytes,
-                                chunk_rows,
-                                group_stream,
-                            )
-                            .context("launching source-layout B12X W4A4 top-k=8 prefill MoE")?;
-                        chunk_row_offset += chunk_rows;
-                    }
-                } else {
-                    let buffers = b12x_w4a16_moe_buffers(
-                        w4a16_layer_buffers
-                            .expect("top-k=8 prefill selected one native weight layout"),
-                        b12x_workspace,
-                        b12x_workspace.compact_hidden,
-                        b12x_workspace.group_output,
-                        b12x_workspace.w4a16_topk_weights,
-                    );
-                    let direct_fp8_target = (!state.spark_reduction
-                        && state.packed_w4a16_direct_fp8_output)
-                        .then_some(response_device_target)
-                        .flatten()
-                        .map(|target| {
-                            let output_bytes = state
-                                .row_count
-                                .checked_mul(
-                                    state.output_dtype.row_stride_bytes(state.output_rows)?,
-                                )
-                                .context("direct packed FP8 response byte count overflow")?;
-                            route_device_buffer_slice(target, 0, output_bytes)
-                        })
-                        .transpose()?;
-                    if state.m1_parity_grouped_small_m_w4a16 {
-                        anyhow::ensure!(
+                let buffers = b12x_w4a16_moe_buffers(
+                    w4a16_layer_buffers,
+                    b12x_workspace,
+                    b12x_workspace.compact_hidden,
+                    b12x_workspace.group_output,
+                    b12x_workspace.w4a16_topk_weights,
+                );
+                let direct_fp8_target = (!state.spark_reduction
+                    && state.packed_w4a16_direct_fp8_output)
+                    .then_some(response_device_target)
+                    .flatten()
+                    .map(|target| {
+                        let output_bytes = state
+                            .row_count
+                            .checked_mul(state.output_dtype.row_stride_bytes(state.output_rows)?)
+                            .context("direct packed FP8 response byte count overflow")?;
+                        route_device_buffer_slice(target, 0, output_bytes)
+                    })
+                    .transpose()?;
+                if state.m1_parity_grouped_small_m_w4a16 {
+                    anyhow::ensure!(
                             state.hidden_dim == state.output_rows,
                             "grouped W4A16 M2..8 row parity requires hidden/output equality, got hidden={} output={}",
                             state.hidden_dim,
                             state.output_rows
                         );
-                        match state.w4a16_small_m_mode {
-                            W4a16SmallMMode::Ordered => library
-                                .cuda_b12x_spark_w4a16_m1_parity_grouped_m2_8_nvfp4_async(
-                                    &buffers,
+                    match state.w4a16_small_m_mode {
+                        W4a16SmallMMode::Ordered => library
+                            .cuda_b12x_spark_w4a16_m1_parity_grouped_m2_8_nvfp4_async(
+                                &buffers,
+                                input_payload,
+                                state.hidden_row_stride_bytes,
+                                state.row_count,
+                                group_stream,
+                            )
+                            .context(
+                                "launching expert-grouped block-8 W4A16 M2..8 row-parity MoE",
+                            )?,
+                        W4a16SmallMMode::WideOrdered => library
+                            .cuda_b12x_spark_w4a16_m1_parity_grouped_wide_m2_8_nvfp4_async(
+                                &buffers,
+                                input_payload,
+                                state.hidden_row_stride_bytes,
+                                state.row_count,
+                                group_stream,
+                            )
+                            .context(
+                                "launching expert-grouped wide-FC2 W4A16 M2..8 row-parity MoE",
+                            )?,
+                        W4a16SmallMMode::SplitM1 if state.split_m1_m2_w4a16 => {
+                            anyhow::ensure!(
+                                state.split_m1_m2_w4a16
+                                    && state.row_count == 2
+                                    && state.lane_count == 2
+                                    && b12x_workspaces.len() == 2,
+                                "split-M1 W4A16 requires physical M=2 and two route workspaces"
+                            );
+                            let input_row_bytes = state.hidden_row_stride_bytes;
+                            let output_row_bytes = state
+                                .output_rows
+                                .checked_mul(std::mem::size_of::<u16>())
+                                .context("split-M1 W4A16 output row byte count overflow")?;
+                            let topk_id_row_bytes = B12X_W4A16_PREFILL_TOPK8_ROUTES
+                                .checked_mul(std::mem::size_of::<u32>())
+                                .context("split-M1 W4A16 expert-ID byte count overflow")?;
+                            let topk_weight_row_bytes = B12X_W4A16_PREFILL_TOPK8_ROUTES
+                                .checked_mul(std::mem::size_of::<f32>())
+                                .context("split-M1 W4A16 route-weight byte count overflow")?;
+                            for (lane, lane_workspace) in
+                                b12x_workspaces.iter().copied().enumerate()
+                            {
+                                let lane_stream = cuda_cache.b12x_lane_stream(lane);
+                                let lane_input_payload = route_device_buffer_slice(
                                     input_payload,
-                                    state.hidden_row_stride_bytes,
-                                    state.row_count,
-                                    group_stream,
-                                )
-                                .context(
-                                    "launching expert-grouped block-8 W4A16 M2..8 row-parity MoE",
-                                )?,
-                            W4a16SmallMMode::WideOrdered => library
-                                .cuda_b12x_spark_w4a16_m1_parity_grouped_wide_m2_8_nvfp4_async(
-                                    &buffers,
-                                    input_payload,
-                                    state.hidden_row_stride_bytes,
-                                    state.row_count,
-                                    group_stream,
-                                )
-                                .context(
-                                    "launching expert-grouped wide-FC2 W4A16 M2..8 row-parity MoE",
-                                )?,
-                            W4a16SmallMMode::SplitM1 if state.split_m1_m2_w4a16 => {
-                                anyhow::ensure!(
-                                    state.split_m1_m2_w4a16
-                                        && state.row_count == 2
-                                        && state.lane_count == 2
-                                        && b12x_workspaces.len() == 2,
-                                    "split-M1 W4A16 requires physical M=2 and two route workspaces"
+                                    lane * input_row_bytes,
+                                    input_row_bytes,
+                                )?;
+                                let lane_topk_ids = route_device_buffer_slice(
+                                    lane_workspace.w4a16_packed_route_indices,
+                                    0,
+                                    topk_id_row_bytes,
+                                )?;
+                                let lane_topk_weights = route_device_buffer_slice(
+                                    lane_workspace.w4a16_topk_weights,
+                                    0,
+                                    topk_weight_row_bytes,
+                                )?;
+                                let lane_buffers = b12x_w4a16_moe_buffers(
+                                    w4a16_layer_buffers,
+                                    lane_workspace,
+                                    lane_workspace.compact_hidden,
+                                    lane_workspace.group_output,
+                                    lane_topk_weights,
                                 );
-                                let input_row_bytes = state.hidden_row_stride_bytes;
-                                let output_row_bytes = state
-                                    .output_rows
-                                    .checked_mul(std::mem::size_of::<u16>())
-                                    .context("split-M1 W4A16 output row byte count overflow")?;
-                                let topk_id_row_bytes = B12X_W4A16_PREFILL_TOPK8_ROUTES
-                                    .checked_mul(std::mem::size_of::<u32>())
-                                    .context("split-M1 W4A16 expert-ID byte count overflow")?;
-                                let topk_weight_row_bytes = B12X_W4A16_PREFILL_TOPK8_ROUTES
-                                    .checked_mul(std::mem::size_of::<f32>())
-                                    .context("split-M1 W4A16 route-weight byte count overflow")?;
-                                for (lane, lane_workspace) in
-                                    b12x_workspaces.iter().copied().enumerate()
-                                {
-                                    let lane_stream = cuda_cache.b12x_lane_stream(lane);
-                                    let lane_input_payload = route_device_buffer_slice(
-                                        input_payload,
-                                        lane * input_row_bytes,
-                                        input_row_bytes,
-                                    )?;
-                                    let lane_topk_ids = route_device_buffer_slice(
-                                        lane_workspace.w4a16_packed_route_indices,
-                                        0,
-                                        topk_id_row_bytes,
-                                    )?;
-                                    let lane_topk_weights = route_device_buffer_slice(
-                                        lane_workspace.w4a16_topk_weights,
-                                        0,
-                                        topk_weight_row_bytes,
-                                    )?;
-                                    let lane_buffers = b12x_w4a16_moe_buffers(
-                                        w4a16_layer_buffers.expect(
-                                            "split-M1 W4A16 selected the packed weight layout",
-                                        ),
-                                        lane_workspace,
-                                        lane_workspace.compact_hidden,
-                                        lane_workspace.group_output,
-                                        lane_topk_weights,
-                                    );
-                                    library
-                                        .cuda_b12x_spark_w4a16_decode_m1_fused_sum_nvfp4_async(
-                                            &lane_buffers,
-                                            lane_input_payload,
-                                            input_row_bytes,
-                                            lane_topk_ids,
-                                            lane_stream,
-                                        )
-                                        .context("launching split-M1 W4A16 row")?;
-                                    library
-                                        .copy_d2d_async(
-                                            route_device_buffer_slice(
-                                                combined_output,
-                                                lane * output_row_bytes,
-                                                output_row_bytes,
-                                            )?,
-                                            route_device_buffer_slice(
-                                                lane_workspace.group_output,
-                                                0,
-                                                output_row_bytes,
-                                            )?,
-                                            output_row_bytes,
-                                            lane_stream,
-                                        )
-                                        .context("joining split-M1 W4A16 row output")?;
-                                    library
-                                        .cuda_event_record(
-                                            cuda_cache.b12x_lane_event(lane),
-                                            lane_stream,
-                                        )
-                                        .context("recording split-M1 W4A16 row completion")?;
-                                }
-                            }
-                            W4a16SmallMMode::SplitM1 => library
-                                .cuda_b12x_spark_w4a16_m1_parity_grouped_wide_m2_8_nvfp4_async(
-                                    &buffers,
-                                    input_payload,
-                                    state.hidden_row_stride_bytes,
-                                    state.row_count,
-                                    group_stream,
-                                )
-                                .context(
-                                    "launching split-M1 fallback wide-FC2 W4A16 M3..8 row-parity MoE",
-                                )?,
-                        }
-                        if let Some(target) = direct_fp8_target {
-                            if state.split_m1_m2_w4a16 {
                                 library
-                                    .cuda_stream_wait_event(
-                                        group_stream,
-                                        cuda_cache.b12x_lane_event(1),
+                                    .cuda_b12x_spark_w4a16_decode_m1_fused_sum_nvfp4_async(
+                                        &lane_buffers,
+                                        lane_input_payload,
+                                        input_row_bytes,
+                                        lane_topk_ids,
+                                        lane_stream,
                                     )
-                                    .context(
-                                        "joining split-M1 W4A16 rows before direct FP8 pack",
-                                    )?;
+                                    .context("launching split-M1 W4A16 row")?;
+                                library
+                                    .copy_d2d_async(
+                                        route_device_buffer_slice(
+                                            combined_output,
+                                            lane * output_row_bytes,
+                                            output_row_bytes,
+                                        )?,
+                                        route_device_buffer_slice(
+                                            lane_workspace.group_output,
+                                            0,
+                                            output_row_bytes,
+                                        )?,
+                                        output_row_bytes,
+                                        lane_stream,
+                                    )
+                                    .context("joining split-M1 W4A16 row output")?;
+                                library
+                                    .cuda_event_record(
+                                        cuda_cache.b12x_lane_event(lane),
+                                        lane_stream,
+                                    )
+                                    .context("recording split-M1 W4A16 row completion")?;
                             }
-                            library
-                                .cuda_bf16_rows_to_fp8_e4m3_row_scaled_async(
-                                    combined_output,
-                                    target,
-                                    state.row_count,
-                                    state.output_rows,
-                                    state.output_dtype.row_stride_bytes(state.output_rows)?,
-                                    group_stream,
-                                )
-                                .context("packing grouped W4A16 M2..8 row-parity FP8 response")?;
-                            packed_prefill_fp8_output = Some(target);
                         }
-                    } else if let Some(target) = direct_fp8_target {
-                        if state.source_w4a16 {
-                            library
-                                .cuda_sparkinfer_source_w4a16_topk8_nvfp4_fp8_async(
-                                    &buffers,
-                                    input_payload,
-                                    state.hidden_row_stride_bytes,
-                                    b12x_workspace.w4a16_packed_route_indices,
-                                    state.row_count,
-                                    target,
-                                    state.output_dtype.row_stride_bytes(state.output_rows)?,
-                                    group_stream,
-                                )
-                                .context(
-                                    "launching SparkInfer source W4A16 top-k=8 direct FP8 response",
-                                )?;
-                        } else {
-                            library
-                                .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_fp8_async(
-                                    &buffers,
-                                    input_payload,
-                                    state.hidden_row_stride_bytes,
-                                    state.row_count,
-                                    target,
-                                    state.output_dtype.row_stride_bytes(state.output_rows)?,
-                                    group_stream,
-                                )
-                                .context(
-                                    "launching packed B12X W4A16 top-k=8 direct FP8 response",
-                                )?;
-                        }
-                        packed_prefill_fp8_output = Some(target);
-                    } else {
-                        if state.source_w4a16 {
-                            library
-                                .cuda_sparkinfer_source_w4a16_topk8_nvfp4_async(
-                                    &buffers,
-                                    input_payload,
-                                    state.hidden_row_stride_bytes,
-                                    b12x_workspace.w4a16_packed_route_indices,
-                                    state.row_count,
-                                    group_stream,
-                                )
-                                .context("launching SparkInfer source W4A16 top-k=8 MoE")?;
-                        } else {
-                            library
-                                .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_async(
-                                    &buffers,
-                                    input_payload,
-                                    state.hidden_row_stride_bytes,
-                                    state.row_count,
-                                    group_stream,
-                                )
-                                .context("launching packed B12X W4A16 top-k=8 prefill MoE")?;
-                        }
+                        W4a16SmallMMode::SplitM1 => library
+                            .cuda_b12x_spark_w4a16_m1_parity_grouped_wide_m2_8_nvfp4_async(
+                                &buffers,
+                                input_payload,
+                                state.hidden_row_stride_bytes,
+                                state.row_count,
+                                group_stream,
+                            )
+                            .context(
+                                "launching split-M1 fallback wide-FC2 W4A16 M3..8 row-parity MoE",
+                            )?,
                     }
+                    if let Some(target) = direct_fp8_target {
+                        if state.split_m1_m2_w4a16 {
+                            library
+                                .cuda_stream_wait_event(group_stream, cuda_cache.b12x_lane_event(1))
+                                .context("joining split-M1 W4A16 rows before direct FP8 pack")?;
+                        }
+                        library
+                            .cuda_bf16_rows_to_fp8_e4m3_row_scaled_async(
+                                combined_output,
+                                target,
+                                state.row_count,
+                                state.output_rows,
+                                state.output_dtype.row_stride_bytes(state.output_rows)?,
+                                group_stream,
+                            )
+                            .context("packing grouped W4A16 M2..8 row-parity FP8 response")?;
+                        packed_prefill_fp8_output = Some(target);
+                    }
+                } else if let Some(target) = direct_fp8_target {
+                    library
+                        .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_fp8_async(
+                            &buffers,
+                            input_payload,
+                            state.hidden_row_stride_bytes,
+                            state.row_count,
+                            target,
+                            state.output_dtype.row_stride_bytes(state.output_rows)?,
+                            group_stream,
+                        )
+                        .context("launching packed B12X W4A16 top-k=8 direct FP8 response")?;
+                    packed_prefill_fp8_output = Some(target);
+                } else {
+                    library
+                        .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_async(
+                            &buffers,
+                            input_payload,
+                            state.hidden_row_stride_bytes,
+                            state.row_count,
+                            group_stream,
+                        )
+                        .context("launching packed B12X W4A16 top-k=8 prefill MoE")?;
                 }
                 if let Some(timeline) = packed_prefill_timeline.as_ref() {
                     timeline.record(
@@ -8064,28 +5636,11 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
             state.next_group = state.scheduled_group_count;
         }
     } else if state.grouped_decode && state.next_group == 0 && row_end == 1 {
-        let w4a16_layer_buffers = if state.w4a16_decode {
-            Some(
-                cuda_cache
-                    .expert_slabs
-                    .get(&state.layer_id)
-                    .context("W4A16 decode lost its expert slab")?
-                    .w4a16_moe_buffers()?,
-            )
-        } else {
-            None
-        };
-        let legacy_layer_buffers = if state.w4a16_decode {
-            None
-        } else {
-            Some(
-                cuda_cache
-                    .expert_slabs
-                    .get(&state.layer_id)
-                    .context("grouped decode lost its contiguous TP4 expert slab")?
-                    .grouped_moe_tp4_m1_buffers()?,
-            )
-        };
+        let w4a16_layer_buffers = cuda_cache
+            .expert_slabs
+            .get(&state.layer_id)
+            .context("W4A16 decode lost its expert slab")?
+            .w4a16_moe_buffers()?;
         let group_stream = cuda_cache.b12x_lane_stream(0);
         let b12x_workspace = b12x_workspaces[0];
         let input_payload = device_buffer_byte_view(
@@ -8120,66 +5675,36 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
         )?;
         unsafe {
             let mut output_scattered = false;
-            if let Some(layer_buffers) = w4a16_layer_buffers {
-                if route_cuda_graphs_enabled() {
-                    cuda_cache.launch_or_capture_packed_w4a16_stream_decode_graph(
-                        state.layer_id,
-                        workspace,
-                        layer_buffers,
-                        b12x_workspace,
-                        state.hidden_row_stride_bytes,
-                        state.row_count,
-                        state.output_rows,
-                        group_stream,
-                    )?;
-                    output_scattered = true;
-                } else {
-                    let buffers = b12x_w4a16_moe_buffers(
-                        layer_buffers,
-                        b12x_workspace,
-                        b12x_workspace.compact_hidden,
-                        output,
-                        topk_weights,
-                    );
-                    launch_b12x_w4a16_decode(
-                        &library,
-                        layer_buffers,
-                        &buffers,
-                        input_payload,
-                        state.hidden_row_stride_bytes,
-                        topk_ids,
-                        group_stream,
-                    )
-                    .context("launching B12X W4A16 decode MoE")?;
-                }
+            if route_cuda_graphs_enabled() {
+                cuda_cache.launch_or_capture_packed_w4a16_stream_decode_graph(
+                    state.layer_id,
+                    workspace,
+                    w4a16_layer_buffers,
+                    b12x_workspace,
+                    state.hidden_row_stride_bytes,
+                    state.row_count,
+                    state.output_rows,
+                    group_stream,
+                )?;
+                output_scattered = true;
             } else {
-                let layer_buffers =
-                    legacy_layer_buffers.expect("legacy grouped decode layer buffers loaded above");
-                let buffers = GlmrtB12xSparkMoeTp4M1Buffers {
-                    input_payload,
-                    input_bf16: b12x_workspace.compact_hidden,
-                    w13_weight: layer_buffers.w13_weight,
-                    w13_scale: layer_buffers.w13_scale,
-                    w1_alphas: layer_buffers.w1_alphas,
-                    a1_gscale: layer_buffers.a1_gscale,
-                    a2_gscale: layer_buffers.a2_gscale,
-                    intermediate: b12x_workspace.moe_intermediate,
-                    w2_weight: layer_buffers.w2_weight,
-                    w2_scale: layer_buffers.w2_scale,
-                    w2_alphas: layer_buffers.w2_alphas,
-                    topk_ids,
-                    topk_weights,
+                let buffers = b12x_w4a16_moe_buffers(
+                    w4a16_layer_buffers,
+                    b12x_workspace,
+                    b12x_workspace.compact_hidden,
                     output,
-                    barrier_count: b12x_workspace.moe_barrier_count,
-                    barrier_epoch: b12x_workspace.moe_barrier_epoch,
-                };
-                library
-                    .cuda_b12x_spark_moe_tp4_m1_nvfp4_async(
-                        &buffers,
-                        state.hidden_row_stride_bytes,
-                        group_stream,
-                    )
-                    .context("launching grouped B12X TP4 decode MoE")?;
+                    topk_weights,
+                );
+                launch_b12x_w4a16_decode(
+                    &library,
+                    w4a16_layer_buffers,
+                    &buffers,
+                    input_payload,
+                    state.hidden_row_stride_bytes,
+                    topk_ids,
+                    group_stream,
+                )
+                .context("launching B12X W4A16 decode MoE")?;
             }
             if !output_scattered {
                 library
@@ -8210,38 +5735,11 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
             let lane = group_index % state.lane_count;
             let group_stream = cuda_cache.b12x_lane_stream(lane);
             let b12x_workspace = b12x_workspaces[lane];
-            let packed_layer = if state.packed_w4a16 {
-                Some(
-                    cuda_cache
-                        .expert_slabs
-                        .get(&state.layer_id)
-                        .context("packed W4A16 route lost its expert slab")?
-                        .w4a16_moe_buffers()?,
-                )
-            } else {
-                None
-            };
-            let direct_projections = if packed_layer.is_none() {
-                Some((
-                    cuda_cache.device_projection_view_for_source(
-                        catalog,
-                        &group.projections.gate,
-                        group_stream,
-                    )?,
-                    cuda_cache.device_projection_view_for_source(
-                        catalog,
-                        &group.projections.up,
-                        group_stream,
-                    )?,
-                    cuda_cache.device_projection_view_for_source(
-                        catalog,
-                        &group.projections.down,
-                        group_stream,
-                    )?,
-                ))
-            } else {
-                None
-            };
+            let packed_layer = cuda_cache
+                .expert_slabs
+                .get(&state.layer_id)
+                .context("packed W4A16 route lost its expert slab")?
+                .w4a16_moe_buffers()?;
             let index_offset = group
                 .start
                 .checked_mul(std::mem::size_of::<u32>())
@@ -8288,87 +5786,35 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
                 "streamed NVFP4 route group output",
             )?;
             unsafe {
-                if let Some(layer_buffers) = packed_layer {
-                    library
-                        .cuda_b12x_gather_nvfp4_rows_bf16_async(
-                            workspace.hidden,
-                            state.row_count,
-                            state.hidden_row_stride_bytes,
-                            input_indices,
-                            b12x_workspace.compact_hidden,
-                            group.count,
-                            state.hidden_dim,
-                            group_stream,
-                        )
-                        .context("gathering packed W4A16 NVFP4 route input rows")?;
-                    let buffers = b12x_w4a16_moe_buffers(
-                        layer_buffers,
-                        b12x_workspace,
+                library
+                    .cuda_b12x_gather_nvfp4_rows_bf16_async(
+                        workspace.hidden,
+                        state.row_count,
+                        state.hidden_row_stride_bytes,
+                        input_indices,
                         b12x_workspace.compact_hidden,
-                        group_output,
-                        b12x_workspace.w4a16_topk_weights,
-                    );
-                    library
-                        .cuda_b12x_spark_w4a16_top1_async(
-                            &buffers,
-                            group.count,
-                            b12x_w4a16_capacity_rows(group.count)?,
-                            u32::try_from(group.projections.gate.key.expert_id)
-                                .context("packed W4A16 expert ID exceeds u32")?,
-                            group_stream,
-                        )
-                        .context("launching streamed packed B12X W4A16 expert")?;
-                } else {
-                    let (gate, up, down) = direct_projections
-                        .as_ref()
-                        .expect("direct B12X projections loaded above");
-                    let b12x_buffers = GlmrtB12xSparkMlpBuffers {
-                        input: b12x_workspace.compact_hidden,
-                        gate_weight: gate.weight,
-                        gate_scale: gate.weight_scale,
-                        up_weight: up.weight,
-                        up_scale: up.weight_scale,
-                        down_weight: down.weight,
-                        down_scale: down.weight_scale,
-                        output: group_output,
-                        input_packed: b12x_workspace.input_packed,
-                        input_scale: b12x_workspace.input_scale,
-                        gate_output: b12x_workspace.gate_output,
-                        up_output: b12x_workspace.up_output,
-                        activation_packed: b12x_workspace.activation_packed,
-                        activation_scale: b12x_workspace.activation_scale,
-                        gate_scale_swizzled: gate.weight_scale,
-                        up_scale_swizzled: up.weight_scale,
-                        down_scale_swizzled: down.weight_scale,
-                        alphas: b12x_workspace.alphas,
-                    };
-                    library
-                        .cuda_b12x_prepare_nvfp4_row_payload_async(
-                            workspace.hidden,
-                            state.row_count,
-                            state.hidden_row_stride_bytes,
-                            input_indices,
-                            b12x_workspace.input_packed,
-                            b12x_workspace.input_scale,
-                            group.count,
-                            state.hidden_dim,
-                            group_stream,
-                        )
-                        .context("gathering streamed NVFP4 route input rows")?;
-                    library
-                        .cuda_b12x_spark_mlp_prequantized_async(
-                            &b12x_buffers,
-                            group.count,
-                            state.hidden_dim,
-                            group.intermediate_rows,
-                            state.output_rows,
-                            group.projections.gate_scale_2,
-                            group.projections.up_scale_2,
-                            group.projections.down_scale_2,
-                            group_stream,
-                        )
-                        .context("launching streamed B12X NVFP4 routed expert")?;
-                }
+                        group.count,
+                        state.hidden_dim,
+                        group_stream,
+                    )
+                    .context("gathering packed W4A16 NVFP4 route input rows")?;
+                let buffers = b12x_w4a16_moe_buffers(
+                    packed_layer,
+                    b12x_workspace,
+                    b12x_workspace.compact_hidden,
+                    group_output,
+                    b12x_workspace.w4a16_topk_weights,
+                );
+                library
+                    .cuda_b12x_spark_w4a16_top1_async(
+                        &buffers,
+                        group.count,
+                        b12x_w4a16_capacity_rows(group.count)?,
+                        u32::try_from(group.projections.gate.key.expert_id)
+                            .context("packed W4A16 expert ID exceeds u32")?,
+                        group_stream,
+                    )
+                    .context("launching streamed packed B12X W4A16 expert")?;
                 library
                     .cuda_scatter_add_rows_bf16_weighted_to_f32_async(
                         group_output,
@@ -9611,21 +7057,17 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
             completion_indices.len()
         );
     }
+    let max_intermediate_rows = loaded_routes
+        .iter()
+        .map(|route| route.intermediate_rows)
+        .max()
+        .unwrap_or(0);
     let output_values = row_count
         .checked_mul(output_rows)
         .context("CUDA NVFP4 accumulated output value count overflow")?;
     let accumulator_bytes = output_values
         .checked_mul(std::mem::size_of::<f32>())
         .context("CUDA NVFP4 accumulated F32 route output byte count overflow")?;
-    let max_intermediate_rows = loaded_routes
-        .iter()
-        .map(|route| route.intermediate_rows)
-        .max()
-        .unwrap_or(0);
-    let activation_workspace_bytes = route_count
-        .checked_mul(max_intermediate_rows)
-        .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
-        .context("CUDA NVFP4 staged route activation workspace byte count overflow")?;
     let scatter_index_bytes = scatter_indices
         .len()
         .checked_mul(std::mem::size_of::<u32>())
@@ -9707,26 +7149,17 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
         } else {
             None
         };
-        let packed_w4a16_layer_buffers = w4a16_layer_buffers.filter(|layer| layer.packed_layout);
+        let packed_w4a16_layer_buffers = w4a16_layer_buffers;
         let grouped_decode_w4a16_buffers = if grouped_decode_shape {
             w4a16_layer_buffers
         } else {
             None
         };
-        let grouped_decode_layer_buffers = if grouped_decode_shape
-            && cuda_cache.b12x_aot_enabled
-            && grouped_decode_w4a16_buffers.is_none()
-        {
-            cuda_cache
-                .expert_slabs
-                .get(&layer_id)
-                .map(|slab| slab.grouped_moe_tp4_m1_buffers())
-                .transpose()?
-        } else {
-            None
-        };
-        let grouped_decode_available =
-            grouped_decode_w4a16_buffers.is_some() || grouped_decode_layer_buffers.is_some();
+        let grouped_decode_available = grouped_decode_w4a16_buffers.is_some();
+        anyhow::ensure!(
+            retained_bf16_layer.is_some() || packed_w4a16_layer_buffers.is_some(),
+            "layer {layer_id} has neither retained BF16 nor packed W4A16 expert weights"
+        );
         if timing_enabled {
             eprintln!(
                 "real_nvfp4_route_stage stage=cuda_cache_ready layer_id={} rows={} routes={} hidden_dim={} output_rows={} elapsed_ms={:.3}",
@@ -9746,7 +7179,6 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
         let workspace = cuda_cache.workspace.ensure_accumulation_buffers(
             Arc::clone(&library),
             hidden_workspace_bytes,
-            activation_workspace_bytes,
             accumulator_bytes,
             final_output_workspace_bytes,
             scatter_index_workspace_bytes,
@@ -9810,66 +7242,24 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
 
         let device_projection_started = Instant::now();
         let mut route_metadata = Vec::with_capacity(route_count);
-        let mut route_group_device_projections = Vec::with_capacity(route_groups.len());
         for group in &route_groups {
-            if retained_bf16_layer.is_some()
-                || packed_w4a16_layer_buffers.is_some()
-                || grouped_decode_w4a16_buffers.is_some()
-            {
-                route_metadata.extend(std::iter::repeat_n(
-                    GlmrtNvfp4RouteBatchedMetadata::default(),
-                    group.count,
-                ));
-                route_group_device_projections.push(None);
-            } else {
-                let gate_device = cuda_cache.device_projection_view_for_source(
-                    catalog,
-                    &group.projections.gate,
-                    cuda_stream,
-                )?;
-                let up_device = cuda_cache.device_projection_view_for_source(
-                    catalog,
-                    &group.projections.up,
-                    cuda_stream,
-                )?;
-                let down_device = cuda_cache.device_projection_view_for_source(
-                    catalog,
-                    &group.projections.down,
-                    cuda_stream,
-                )?;
-                for _ in 0..group.count {
-                    route_metadata.push(GlmrtNvfp4RouteBatchedMetadata {
-                        gate_weight: gate_device.weight.ptr as usize,
-                        gate_scale: gate_device.weight_scale.ptr as usize,
-                        up_weight: up_device.weight.ptr as usize,
-                        up_scale: up_device.weight_scale.ptr as usize,
-                        down_weight: down_device.weight.ptr as usize,
-                        down_scale: down_device.weight_scale.ptr as usize,
-                        intermediate: group.intermediate_rows,
-                        down_weight_row_stride_bytes: down_device.weight_row_stride_bytes,
-                        down_scale_row_stride_bytes: down_device.weight_scale_row_stride_bytes,
-                        gate_scale_2: group.projections.gate_scale_2,
-                        up_scale_2: group.projections.up_scale_2,
-                        down_scale_2: group.projections.down_scale_2,
-                    });
-                }
-                route_group_device_projections.push(Some((gate_device, up_device, down_device)));
-            }
+            route_metadata.extend(std::iter::repeat_n(
+                GlmrtNvfp4RouteBatchedMetadata::default(),
+                group.count,
+            ));
         }
         device_projection_ms = elapsed_ms(device_projection_started);
         cuda_projection_entries = if let Some(layer) = retained_bf16_layer.as_ref() {
             layer.expert_count * 3
-        } else if cuda_cache.b12x_w4a16_packed {
+        } else {
             cuda_cache
                 .expert_slabs
                 .values()
                 .map(|slab| slab.expert_count * 3)
                 .sum()
-        } else {
-            cuda_cache.projections.len()
         };
         cuda_projection_uploads = cuda_cache.projection_uploads;
-        cuda_cache_hits = cuda_cache.cache_hits;
+        cuda_cache_hits = 0;
         if timing_enabled {
             eprintln!(
                 "real_nvfp4_route_stage stage=device_projections_ready layer_id={} rows={} routes={} metadata={} projection_entries={} projection_uploads={} cache_hits={} elapsed_ms={:.3}",
@@ -9972,62 +7362,11 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
             !nvfp4_hidden_payload || b12x_direct_route_candidate,
             "prequantized NVFP4 hidden exchange requires the direct B12X route backend"
         );
-        // The host-input CUDA graph uses the generic batched route kernel. For
-        // grouped or direct-b12x work, keep the specialized path even when that
-        // generic graph is enabled.
-        let graphable_host_input = route_cuda_graphs_enabled()
-            && !streaming_completion_enabled
-            && !route_cuda_event_timing
-            && !b12x_direct_route_candidate
-            && !(use_grouped_route_launches && row_count > 1)
-            && hidden_device_buffer.is_none()
-            && retained_route_device_output.is_none();
-        if graphable_host_input {
-            used_graph_path = true;
-            let pinned_payloads =
-                host_pinned_payloads.expect("host pinned payloads exist for graphable host input");
-            let pinned_output = cuda_cache
-                .workspace
-                .ensure_output_payload(Arc::clone(&library), output_bytes)?;
-            unsafe {
-                let graph_started = Instant::now();
-                cuda_cache.launch_or_capture_host_accumulation_graph(
-                    workspace,
-                    pinned_payloads,
-                    route_metadata_payload,
-                    pinned_output,
-                    row_count,
-                    route_count,
-                    hidden_dim,
-                    hidden_row_stride_elems,
-                    max_intermediate_rows,
-                    output_rows,
-                    hidden_bytes,
-                    scatter_index_bytes,
-                    route_weight_bytes,
-                    route_metadata_bytes_count,
-                    output_values,
-                    output_bytes,
-                    cuda_stream,
-                )?;
-                graph_or_launch_ms = elapsed_ms(graph_started);
-                let sync_started = Instant::now();
-                library
-                    .cuda_stream_synchronize(cuda_stream)
-                    .context("synchronizing captured NVFP4 route CUDA stream")?;
-                sync_ms = elapsed_ms(sync_started);
-            }
-            if let Some(out_bytes) = out_bytes.as_mut() {
-                let host_copy_started = Instant::now();
-                out_bytes.copy_from_slice(
-                    cuda_cache
-                        .workspace
-                        .output_payload_slice(output_bytes)
-                        .context("reading captured NVFP4 route pinned output")?,
-                );
-                host_output_copy_ms = elapsed_ms(host_copy_started);
-            }
-        } else {
+        anyhow::ensure!(
+            b12x_direct_route_candidate,
+            "CUDA expert routing requires the packed W4A16 or retained-BF16 B12X backend"
+        );
+        {
             let direct_output_payload = if needs_host_output {
                 Some(
                     cuda_cache
@@ -10059,7 +7398,6 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                     hidden_dim,
                     max_intermediate_rows,
                     output_rows,
-                    false,
                 )?
             } else {
                 Vec::new()
@@ -10067,17 +7405,6 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
             let b12x_multistream = b12x_direct_workspaces.len() > 1;
             used_b12x_route_lanes = b12x_direct_workspaces.len().max(1);
             let mut used_b12x_direct_route = false;
-            let mut used_native_route_kernel = false;
-            let grouped_decode_graph = route_cuda_graphs_enabled()
-                && grouped_decode_layer_buffers.is_some()
-                && grouped_decode_w4a16_buffers.is_none()
-                && b12x_direct_workspaces.len() == 1
-                && host_pinned_payloads.is_some()
-                && hidden_device_buffer.is_none()
-                && !streaming_completion_enabled
-                && direct_output_payload.is_none()
-                && retained_route_device_output.is_some()
-                && cuda_event_timeline.is_none();
             let packed_w4a16_decode_graph = route_cuda_graphs_enabled()
                 && grouped_decode_w4a16_buffers.is_some()
                 && b12x_direct_workspaces.len() == 1
@@ -10139,64 +7466,6 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                     library
                         .cuda_stream_synchronize(cuda_stream)
                         .context("synchronizing packed W4A16 decode graph")?;
-                }
-                sync_ms = elapsed_ms(sync_started);
-                used_graph_path = true;
-                kernel_backend = B12X_SPARK_DIRECT_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND;
-            } else if grouped_decode_graph {
-                let enqueue_started = Instant::now();
-                let layer_buffers = grouped_decode_layer_buffers
-                    .expect("grouped decode graph requires layer buffers");
-                let b12x_workspace = b12x_direct_workspaces[0];
-                let pinned_payloads =
-                    host_pinned_payloads.expect("grouped decode graph requires pinned payloads");
-                if !cuda_cache.grouped_decode_observed {
-                    eprintln!(
-                        "real_nvfp4_route_grouped_decode_graph_selected layer_id={layer_id} rows={row_count} routes={route_count}"
-                    );
-                    cuda_cache.grouped_decode_observed = true;
-                }
-                let graph_started = Instant::now();
-                unsafe {
-                    cuda_cache.launch_or_capture_grouped_decode_graph(
-                        layer_id,
-                        workspace,
-                        pinned_payloads,
-                        route_metadata_payload,
-                        layer_buffers,
-                        b12x_workspace,
-                        hidden_row_stride_bytes,
-                        hidden_bytes,
-                        scatter_index_bytes,
-                        route_weight_bytes,
-                        route_metadata_copy_bytes,
-                        output_values,
-                        output_rows,
-                        cuda_stream,
-                    )?;
-                }
-                graph_or_launch_ms = elapsed_ms(graph_started);
-                let retained_copy_started = Instant::now();
-                unsafe {
-                    library
-                        .copy_d2d_async(
-                            retained_route_device_output
-                                .as_ref()
-                                .expect("grouped decode graph retains device output")
-                                .buffer(),
-                            b12x_workspace.group_output,
-                            output_bytes,
-                            cuda_stream,
-                        )
-                        .context("retaining grouped B12X decode output")?;
-                }
-                retained_copy_enqueue_ms = elapsed_ms(retained_copy_started);
-                enqueue_ms = elapsed_ms(enqueue_started);
-                let sync_started = Instant::now();
-                unsafe {
-                    library
-                        .cuda_stream_synchronize(cuda_stream)
-                        .context("synchronizing grouped B12X decode graph")?;
                 }
                 sync_ms = elapsed_ms(sync_started);
                 used_graph_path = true;
@@ -10312,15 +7581,14 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                         }
                     }
                     let op_started = Instant::now();
+                    anyhow::ensure!(
+                        use_grouped_route_launches,
+                        "packed W4A16 requires grouped route launches"
+                    );
                     if use_grouped_route_launches {
                         let mut completion_slice_index = 0_usize;
                         let mut b12x_lane_used = vec![false; b12x_route_lane_count];
-                        for (group_index, (group, device_projections)) in route_groups
-                            .iter()
-                            .zip(&route_group_device_projections)
-                            .enumerate()
-                        {
-                            let direct_projections = device_projections.as_ref();
+                        for (group_index, group) in route_groups.iter().enumerate() {
                             let b12x_lane = if b12x_multistream {
                                 group_index % b12x_route_lane_count
                             } else {
@@ -10347,16 +7615,6 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                                 .count
                                 .checked_mul(std::mem::size_of::<f32>())
                                 .context("grouped route route-weight bytes overflow")?;
-                            let activation_offset = group
-                                .start
-                                .checked_mul(max_intermediate_rows)
-                                .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
-                                .context("grouped route activation offset overflow")?;
-                            let activation_bytes = group
-                                .count
-                                .checked_mul(group.intermediate_rows)
-                                .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
-                                .context("grouped route activation bytes overflow")?;
                             let scatter_view = device_buffer_byte_view(
                                 workspace.scatter_index,
                                 scatter_offset,
@@ -10378,21 +7636,9 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                                     group.intermediate_rows,
                                     output_rows,
                                 )
-                                && if packed_w4a16_layer_buffers.is_some() {
-                                    group.intermediate_rows == 512
-                                } else {
-                                    direct_projections
-                                        .map(|(gate, up, down)| {
-                                            b12x_spark_direct_projection_layout_supported(
-                                                hidden_dim,
-                                                group.intermediate_rows,
-                                                gate,
-                                                up,
-                                                down,
-                                            )
-                                        })
-                                        .unwrap_or(false)
-                                };
+                                && (retained_bf16_layer.is_some()
+                                    || (packed_w4a16_layer_buffers.is_some()
+                                        && group.intermediate_rows == 512));
                             let mut launched_b12x = false;
                             if let (Some(layer_buffers), Some(b12x_workspace)) =
                                 (retained_bf16_layer.as_ref(), b12x_workspace)
@@ -10528,8 +7774,7 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                                 if group_index == 0 {
                                     if !cuda_cache.grouped_decode_observed {
                                         eprintln!(
-                                            "real_nvfp4_route_w4a16_decode_selected layer_id={layer_id} rows={row_count} routes={route_count} packed_layout={}"
-                                            , layer_buffers.packed_layout
+                                            "real_nvfp4_route_w4a16_decode_selected layer_id={layer_id} rows={row_count} routes={route_count}"
                                         );
                                         cuda_cache.grouped_decode_observed = true;
                                     }
@@ -10586,79 +7831,6 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                                         )
                                         .context("accumulating packed B12X W4A16 decode output")?;
                                 }
-                            } else if let (Some(layer_buffers), Some(b12x_workspace)) =
-                                (grouped_decode_layer_buffers, b12x_workspace)
-                            {
-                                launched_b12x = true;
-                                used_b12x_direct_route = true;
-                                if group_index == 0 {
-                                    if !cuda_cache.grouped_decode_observed {
-                                        eprintln!(
-                                        "real_nvfp4_route_grouped_decode_selected layer_id={layer_id} rows={row_count} routes={route_count}"
-                                    );
-                                        cuda_cache.grouped_decode_observed = true;
-                                    }
-                                    let input_payload = device_buffer_byte_view(
-                                        workspace.hidden,
-                                        0,
-                                        hidden_row_stride_bytes,
-                                        "grouped decode NVFP4 input payload",
-                                    )?;
-                                    let group_output = device_buffer_byte_view(
-                                        b12x_workspace.group_output,
-                                        0,
-                                        output_rows * std::mem::size_of::<u16>(),
-                                        "grouped decode BF16 output",
-                                    )?;
-                                    let topk_ids = device_buffer_byte_view(
-                                        workspace.route_metadata,
-                                        0,
-                                        8 * std::mem::size_of::<i32>(),
-                                        "grouped decode expert IDs",
-                                    )?;
-                                    let topk_weights = device_buffer_byte_view(
-                                        workspace.route_weights,
-                                        0,
-                                        8 * std::mem::size_of::<f32>(),
-                                        "grouped decode route weights",
-                                    )?;
-                                    let buffers = GlmrtB12xSparkMoeTp4M1Buffers {
-                                        input_payload,
-                                        input_bf16: b12x_workspace.compact_hidden,
-                                        w13_weight: layer_buffers.w13_weight,
-                                        w13_scale: layer_buffers.w13_scale,
-                                        w1_alphas: layer_buffers.w1_alphas,
-                                        a1_gscale: layer_buffers.a1_gscale,
-                                        a2_gscale: layer_buffers.a2_gscale,
-                                        intermediate: b12x_workspace.moe_intermediate,
-                                        w2_weight: layer_buffers.w2_weight,
-                                        w2_scale: layer_buffers.w2_scale,
-                                        w2_alphas: layer_buffers.w2_alphas,
-                                        topk_ids,
-                                        topk_weights,
-                                        output: group_output,
-                                        barrier_count: b12x_workspace.moe_barrier_count,
-                                        barrier_epoch: b12x_workspace.moe_barrier_epoch,
-                                    };
-                                    library
-                                        .cuda_b12x_spark_moe_tp4_m1_nvfp4_async(
-                                            &buffers,
-                                            hidden_row_stride_bytes,
-                                            group_stream,
-                                        )
-                                        .context("launching grouped B12X TP4 decode MoE")?;
-                                    library
-                                        .cuda_scatter_add_rows_bf16_to_f32_async(
-                                            group_output,
-                                            scatter_view,
-                                            workspace.accumulator,
-                                            row_count,
-                                            1,
-                                            output_rows,
-                                            group_stream,
-                                        )
-                                        .context("accumulating grouped B12X TP4 decode output")?;
-                                }
                             } else if let (true, Some(b12x_workspace)) =
                                 (b12x_supported, b12x_workspace)
                             {
@@ -10688,7 +7860,9 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                                     group_output_bytes,
                                     "b12x Spark direct route compact output",
                                 )?;
-                                if let Some(layer_buffers) = packed_w4a16_layer_buffers {
+                                let layer_buffers = packed_w4a16_layer_buffers
+                                    .context("packed W4A16 route lost its expert slab")?;
+                                {
                                     if nvfp4_hidden_payload {
                                         library
                                             .cuda_b12x_gather_nvfp4_rows_bf16_async(
@@ -10746,176 +7920,12 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                                         .context("accumulating packed B12X W4A16 route output")?;
                                     used_b12x_direct_route = true;
                                     launched_b12x = true;
-                                } else {
-                                    let (gate_device, up_device, down_device) = direct_projections
-                                        .context("direct B12X route projections are missing")?;
-                                    let b12x_buffers = GlmrtB12xSparkMlpBuffers {
-                                        input: compact_hidden,
-                                        gate_weight: gate_device.weight,
-                                        gate_scale: gate_device.weight_scale,
-                                        up_weight: up_device.weight,
-                                        up_scale: up_device.weight_scale,
-                                        down_weight: down_device.weight,
-                                        down_scale: down_device.weight_scale,
-                                        output: group_output,
-                                        input_packed: b12x_workspace.input_packed,
-                                        input_scale: b12x_workspace.input_scale,
-                                        gate_output: b12x_workspace.gate_output,
-                                        up_output: b12x_workspace.up_output,
-                                        activation_packed: b12x_workspace.activation_packed,
-                                        activation_scale: b12x_workspace.activation_scale,
-                                        gate_scale_swizzled: gate_device.weight_scale,
-                                        up_scale_swizzled: up_device.weight_scale,
-                                        down_scale_swizzled: down_device.weight_scale,
-                                        alphas: b12x_workspace.alphas,
-                                    };
-                                    if nvfp4_hidden_payload {
-                                        library
-                                            .cuda_b12x_prepare_nvfp4_row_payload_async(
-                                            workspace.hidden,
-                                            row_count,
-                                            hidden_row_stride_bytes,
-                                            scatter_view,
-                                            b12x_workspace.input_packed,
-                                            b12x_workspace.input_scale,
-                                            group.count,
-                                            hidden_dim,
-                                            group_stream,
-                                        )
-                                        .context(
-                                            "enqueueing b12x Spark direct NVFP4 row payload gather",
-                                            )?;
-                                    } else {
-                                        library
-                                        .cuda_gather_rows_bf16_async(
-                                            workspace.hidden,
-                                            row_count,
-                                            scatter_view,
-                                            compact_hidden,
-                                            group.count,
-                                            hidden_dim,
-                                            group_stream,
-                                        )
-                                        .context(
-                                            "enqueueing b12x Spark direct route compact BF16 row gather",
-                                        )?;
-                                    }
-                                    let launch = if nvfp4_hidden_payload {
-                                        library.cuda_b12x_spark_mlp_prequantized_async(
-                                            &b12x_buffers,
-                                            group.count,
-                                            hidden_dim,
-                                            group.intermediate_rows,
-                                            output_rows,
-                                            group.projections.gate_scale_2,
-                                            group.projections.up_scale_2,
-                                            group.projections.down_scale_2,
-                                            group_stream,
-                                        )
-                                    } else {
-                                        library.cuda_b12x_spark_mlp_async(
-                                            &b12x_buffers,
-                                            group.count,
-                                            hidden_dim,
-                                            group.intermediate_rows,
-                                            output_rows,
-                                            group.projections.gate_scale_2,
-                                            group.projections.up_scale_2,
-                                            group.projections.down_scale_2,
-                                            group_stream,
-                                        )
-                                    };
-                                    match launch {
-                                        Ok(()) => {
-                                            library
-                                            .cuda_scatter_add_rows_bf16_weighted_to_f32_async(
-                                                group_output,
-                                                scatter_view,
-                                                route_weight_view,
-                                                workspace.accumulator,
-                                                row_count,
-                                                group.count,
-                                                output_rows,
-                                                group_stream,
-                                            )
-                                            .context(
-                                                "enqueueing b12x Spark direct route weighted BF16 scatter-add",
-                                            )?;
-                                            used_b12x_direct_route = true;
-                                            launched_b12x = true;
-                                        }
-                                        Err(error) => {
-                                            if nvfp4_hidden_payload
-                                                || b12x_spark_direct_route_required()
-                                            {
-                                                return Err(error).context(
-                                                    "b12x Spark direct route required but failed",
-                                                );
-                                            }
-                                            if timing_enabled {
-                                                eprintln!(
-                                            "real_nvfp4_route_stage stage=b12x_direct_fallback layer_id={} rows={} group_rows={} intermediate={} error={:#}",
-                                            layer_id,
-                                            row_count,
-                                            group.count,
-                                            group.intermediate_rows,
-                                            error
-                                        );
-                                            }
-                                        }
-                                    }
                                 }
                             }
-                            if !launched_b12x {
-                                let (gate_device, up_device, down_device) = direct_projections
-                                    .context("native route fallback projections are missing")?;
-                                anyhow::ensure!(
-                                !nvfp4_hidden_payload,
-                                "prequantized NVFP4 hidden exchange cannot use the BF16 route fallback"
+                            anyhow::ensure!(
+                                launched_b12x,
+                                "packed W4A16 route was not launched for layer {layer_id}"
                             );
-                                anyhow::ensure!(
-                                !gate_device.weight_scale_b12x_swizzled
-                                    && !up_device.weight_scale_b12x_swizzled
-                                    && !down_device.weight_scale_b12x_swizzled,
-                                "B12X-swizzled projection scales cannot use the row-major NVFP4 fallback"
-                            );
-                                let activation_view = device_buffer_byte_view(
-                                    workspace.activation_workspace,
-                                    activation_offset,
-                                    activation_bytes,
-                                    "grouped route activation workspace",
-                                )?;
-                                library
-                                .cuda_nvfp4_silu_gated_mlp_route_bf16_grouped_staged_accumulate_f32_async(
-                                    workspace.hidden,
-                                    scatter_view,
-                                    route_weight_view,
-                                    gate_device.weight,
-                                    gate_device.weight_scale,
-                                    up_device.weight,
-                                    up_device.weight_scale,
-                                    down_device.weight,
-                                    down_device.weight_scale,
-                                    activation_view,
-                                    workspace.accumulator,
-                                    row_count,
-                                    group.count,
-                                    hidden_dim,
-                                    hidden_row_stride_elems,
-                                    group.intermediate_rows,
-                                    output_rows,
-                                    down_device.weight_row_stride_bytes,
-                                    down_device.weight_scale_row_stride_bytes,
-                                    group.projections.gate_scale_2,
-                                    group.projections.up_scale_2,
-                                    group.projections.down_scale_2,
-                                    group_stream,
-                                )
-                                .context(
-                                    "enqueueing grouped staged accumulated CUDA NVFP4 routed expert BF16 MLP",
-                                )?;
-                                used_native_route_kernel = true;
-                            }
                             if b12x_multistream {
                                 let lane_event = cuda_cache.b12x_lane_event(b12x_lane);
                                 library
@@ -11100,35 +8110,10 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
                                 response_completion_slices.len()
                             );
                         }
-                    } else {
-                        library
-                        .cuda_nvfp4_silu_gated_mlp_route_bf16_batched_staged_accumulate_f32_async(
-                            workspace.hidden,
-                            workspace.scatter_index,
-                            workspace.route_weights,
-                            workspace.route_metadata,
-                            workspace.activation_workspace,
-                            workspace.accumulator,
-                            row_count,
-                            route_count,
-                            hidden_dim,
-                            hidden_row_stride_elems,
-                            max_intermediate_rows,
-                            output_rows,
-                            cuda_stream,
-                        )
-                        .context(
-                            "enqueueing batched staged accumulated CUDA NVFP4 routed expert BF16 MLP",
-                        )?;
-                        used_native_route_kernel = true;
                     }
                     route_kernel_enqueue_ms = elapsed_ms(op_started);
                     if used_b12x_direct_route {
-                        kernel_backend = if used_native_route_kernel {
-                            MIXED_B12X_SPARK_DIRECT_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND
-                        } else {
-                            B12X_SPARK_DIRECT_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND
-                        };
+                        kernel_backend = B12X_SPARK_DIRECT_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND;
                     }
                     if let Some(timeline) = cuda_event_timeline.as_ref() {
                         timeline.record(
@@ -11760,22 +8745,6 @@ pub(in crate::commands::real_full) fn cuda_route_validation_enabled() -> bool {
     })
 }
 
-fn managed_route_projections_enabled() -> bool {
-    #[cfg(test)]
-    if let Some(enabled) = MANAGED_PROJECTIONS_TEST_OVERRIDE.with(|value| value.get()) {
-        return enabled;
-    }
-
-    env::var(REAL_FULL_NVFP4_ROUTE_MANAGED_PROJECTIONS_ENV)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "managed" | "uma"
-            )
-        })
-        .unwrap_or(false)
-}
-
 fn b12x_spark_w4a16_device_weights_enabled() -> bool {
     env::var(REAL_FULL_B12X_SPARK_W4A16_DEVICE_WEIGHTS_ENV)
         .map(|value| {
@@ -11853,12 +8822,6 @@ fn b12x_spark_direct_route_requested() -> bool {
         .unwrap_or(true)
 }
 
-fn b12x_spark_direct_route_required() -> bool {
-    env::var(REAL_FULL_B12X_SPARK_DIRECT_ROUTE_ENV)
-        .map(|value| value.trim().eq_ignore_ascii_case("required"))
-        .unwrap_or(false)
-}
-
 fn b12x_spark_grouped_decode_enabled() -> bool {
     env::var(REAL_FULL_B12X_SPARK_GROUPED_DECODE_ENV)
         .map(|value| {
@@ -11885,36 +8848,6 @@ fn b12x_spark_w4a16_small_m_mode() -> W4a16SmallMMode {
             _ => W4a16SmallMMode::WideOrdered,
         }
     })
-}
-
-fn b12x_spark_w4a16_packed_enabled() -> bool {
-    env::var(REAL_FULL_B12X_SPARK_W4A16_PACKED_ENV)
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off" | "disabled"
-            )
-        })
-        .unwrap_or(true)
-}
-
-fn sparkinfer_source_w4a16_enabled() -> bool {
-    env::var(REAL_FULL_SPARKINFER_SOURCE_W4A16_ENV)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "enabled"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn sparkinfer_source_w4a16_direct_max_rows() -> usize {
-    env::var(REAL_FULL_SPARKINFER_SOURCE_W4A16_DIRECT_MAX_ROWS_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&rows| rows <= 8)
-        .unwrap_or(2)
 }
 
 fn fused_fp8_reduction_enabled() -> bool {
@@ -11950,37 +8883,8 @@ fn b12x_w4a16_capacity_rows(rows: usize) -> Result<usize> {
     Ok(rows.next_power_of_two().max(2))
 }
 
-fn sparkinfer_source_w4a16_workspace_rows(rows: usize, direct_max_rows: usize) -> Result<usize> {
-    anyhow::ensure!(
-        rows > 0 && rows <= B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS,
-        "SparkInfer source W4A16 rows {rows} are outside 1..={B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS}"
-    );
-    anyhow::ensure!(
-        direct_max_rows <= 8,
-        "SparkInfer source W4A16 direct cutoff {direct_max_rows} exceeds 8"
-    );
-    Ok(if rows <= direct_max_rows {
-        rows
-    } else {
-        rows.next_power_of_two().max(16)
-    })
-}
-
-fn b12x_w4a16_prefill_route_block_rows(rows: usize, source_layout: bool) -> usize {
-    if source_layout {
-        let capacity = rows.next_power_of_two().max(16);
-        if capacity <= 128 {
-            8
-        } else if capacity <= 256 {
-            16
-        } else if capacity <= 512 {
-            32
-        } else if capacity <= 1024 {
-            48
-        } else {
-            64
-        }
-    } else if (2..=8).contains(&rows) {
+fn b12x_w4a16_prefill_route_block_rows(rows: usize) -> usize {
+    if (2..=8).contains(&rows) {
         8
     } else if rows <= 2048 {
         32
@@ -12073,49 +8977,11 @@ fn checked_matrix_bytes(
         .with_context(|| format!("{label} byte count overflow"))
 }
 
-fn b12x_scale_storage_bytes(rows: usize, cols: usize) -> Result<usize> {
-    anyhow::ensure!(cols % 16 == 0, "B12X scale columns must be divisible by 16");
-    let padded_rows = (rows
-        .checked_add(127)
-        .context("B12X scale padded row count overflow")?
-        / 128)
-        .checked_mul(128)
-        .context("B12X scale padded row byte count overflow")?;
-    let scale_cols = cols / 16;
-    let padded_scale_cols = (scale_cols
-        .checked_add(3)
-        .context("B12X scale padded column count overflow")?
-        / 4)
-    .checked_mul(4)
-    .context("B12X scale padded column byte count overflow")?;
-    padded_rows
-        .checked_mul(padded_scale_cols)
-        .context("B12X scale storage byte count overflow")
-}
-
 fn b12x_projection_scale_shape_supported(rows: usize, scale_cols: usize) -> bool {
     matches!(
         (rows, scale_cols),
         (512, 384) | (2048, 384) | (6144, 32) | (6144, 128)
     )
-}
-
-fn b12x_spark_direct_projection_layout_supported(
-    hidden_dim: usize,
-    intermediate_rows: usize,
-    gate: &DeviceRoutedQuantProjectionView,
-    up: &DeviceRoutedQuantProjectionView,
-    down: &DeviceRoutedQuantProjectionView,
-) -> bool {
-    gate.weight_row_stride_bytes == hidden_dim / 2
-        && up.weight_row_stride_bytes == hidden_dim / 2
-        && gate.weight_scale_row_stride_bytes == hidden_dim / 16
-        && up.weight_scale_row_stride_bytes == hidden_dim / 16
-        && down.weight_row_stride_bytes == intermediate_rows / 2
-        && down.weight_scale_row_stride_bytes == intermediate_rows / 16
-        && gate.weight_scale_b12x_swizzled
-        && up.weight_scale_b12x_swizzled
-        && down.weight_scale_b12x_swizzled
 }
 
 fn route_stage_timing_enabled() -> bool {
@@ -12174,31 +9040,6 @@ fn cuda_route_validation_test_override(enabled: bool) -> CudaRouteValidationTest
     }
 }
 
-#[cfg(test)]
-struct ManagedProjectionsTestOverride {
-    previous: Option<bool>,
-}
-
-#[cfg(test)]
-impl Drop for ManagedProjectionsTestOverride {
-    fn drop(&mut self) {
-        MANAGED_PROJECTIONS_TEST_OVERRIDE.with(|value| {
-            value.set(self.previous);
-        });
-    }
-}
-
-#[cfg(test)]
-fn managed_projections_test_override(enabled: bool) -> ManagedProjectionsTestOverride {
-    ManagedProjectionsTestOverride {
-        previous: MANAGED_PROJECTIONS_TEST_OVERRIDE.with(|value| {
-            let previous = value.get();
-            value.set(Some(enabled));
-            previous
-        }),
-    }
-}
-
 fn f32_values_to_bf16_bytes(values: &[f32], out: &mut [u8]) {
     for (value, dst) in values.iter().zip(out.chunks_exact_mut(2)) {
         let bf16 = (value.to_bits() >> 16) as u16;
@@ -12247,10 +9088,6 @@ impl OwnedDeviceAllocation {
 
     fn is_managed(&self) -> bool {
         (self.buffer.flags & GLMRT_DEVICE_BUFFER_FLAG_MANAGED) != 0
-    }
-
-    fn copy_host_bytes_direct(&self, bytes: &[u8], label: &str) -> Result<()> {
-        self.copy_host_bytes_direct_at(0, bytes, label)
     }
 
     fn copy_host_bytes_direct_at(
@@ -12532,29 +9369,6 @@ pub(in crate::commands::real_full) fn preload_routed_quant_projection_host_cache
         quant_metadata_bytes: loaded.weight_scale.bytes.len() as u64
             + loaded.input_scale.bytes.len() as u64
             + loaded.weight_scale_2.bytes.len() as u64,
-    })
-}
-
-pub(in crate::commands::real_full) fn preload_routed_quant_projection_scalar_cache(
-    catalog: &TensorCatalog,
-    layer_id: usize,
-    expert_id: usize,
-    projection: &'static str,
-    cache: &mut RouteTensorCache,
-) -> Result<RouteHostProjectionPreload> {
-    cache.prepare_layer(layer_id);
-    let base_name = routed_quant_projection_base_name(layer_id, expert_id, projection);
-    let input_scale_name = format!("{base_name}.input_scale");
-    let weight_scale_2_name = format!("{base_name}.weight_scale_2");
-    let quant_metadata_bytes = catalog_tensor(catalog, &input_scale_name)?.byte_length
-        + catalog_tensor(catalog, &weight_scale_2_name)?.byte_length;
-    let metadata =
-        load_routed_quant_scalar_metadata_cached(catalog, layer_id, expert_id, projection, cache)?;
-    validate_finite_route_scalar(&metadata.input_scale_name, metadata.input_scale)?;
-    validate_finite_route_scalar(&metadata.weight_scale_2_name, metadata.weight_scale_2)?;
-    Ok(RouteHostProjectionPreload {
-        weight_bytes: 0,
-        quant_metadata_bytes,
     })
 }
 
@@ -12975,8 +9789,6 @@ pub(in crate::commands::real_full) fn preload_startup_quantized_bf16_projection_
             layer_id,
             expert_ids.len(),
             &geometry,
-            true,
-            false,
             managed_weights,
             true,
         )?);
@@ -13011,22 +9823,6 @@ pub(in crate::commands::real_full) fn preload_startup_quantized_bf16_projection_
         );
     }
     Ok(preload)
-}
-
-fn update_nvfp4_scale_maximum(maximum: &mut f32, bytes: &[u8]) {
-    for &byte in bytes {
-        *maximum = maximum.max(f8e4m3_byte_to_f32(byte).abs());
-    }
-}
-
-fn sparkinfer_nvfp4_scale_factor(maximum: f32) -> f32 {
-    let max_scalar = maximum * 128.0;
-    let limit = 448.0 * 128.0;
-    if max_scalar > 0.0 && max_scalar < limit {
-        2.0_f32.powi((limit / max_scalar).log2().floor() as i32)
-    } else {
-        1.0
-    }
 }
 
 fn route_preload_io_workers() -> usize {
@@ -13075,6 +9871,7 @@ fn clear_route_cuda_aligned_read_pool() {
 
 struct RouteCudaAlignedReadBuffer {
     allocation: Option<RouteCudaAlignedAllocation>,
+    aligned_bytes: usize,
     requested_offset: usize,
     requested_bytes: usize,
 }
@@ -13143,6 +9940,7 @@ impl RouteCudaAlignedReadBuffer {
         Ok(Some((
             Self {
                 allocation,
+                aligned_bytes,
                 requested_offset,
                 requested_bytes: source_bytes,
             },
@@ -13177,7 +9975,7 @@ impl RouteCudaAlignedReadBuffer {
             .allocation
             .as_mut()
             .expect("direct route read allocation is present until drop");
-        unsafe { slice::from_raw_parts_mut(allocation.ptr.as_ptr(), allocation.layout.size()) }
+        unsafe { slice::from_raw_parts_mut(allocation.ptr.as_ptr(), self.aligned_bytes) }
     }
 
     fn full_ptr(&mut self) -> *mut u8 {
@@ -13189,11 +9987,7 @@ impl RouteCudaAlignedReadBuffer {
     }
 
     fn full_bytes(&self) -> usize {
-        self.allocation
-            .as_ref()
-            .expect("direct route read allocation is present until drop")
-            .layout
-            .size()
+        self.aligned_bytes
     }
 
     fn requested_slice(&self) -> &[u8] {
@@ -14194,8 +10988,6 @@ fn store_loaded_route_cuda_layer_cooperative(
                 plan.layer_id,
                 plan.expert_ids.len(),
                 exemplar,
-                true,
-                false,
                 false,
                 false,
             )?));
@@ -14208,8 +11000,6 @@ fn store_loaded_route_cuda_layer_cooperative(
                 plan.layer_id,
                 plan.expert_ids.len(),
                 exemplar,
-                true,
-                false,
                 false,
                 false,
             )?));
@@ -14431,13 +11221,10 @@ fn store_loaded_route_cuda_layer_cooperative(
 
 #[allow(clippy::too_many_arguments)]
 fn store_loaded_route_cuda_layer(
-    catalog: &TensorCatalog,
     plan: &RouteCudaQuantLayerPreloadPlan,
     loaded_experts: &[LoadedRouteCudaExpertShard],
     cuda_cache: &mut RouteCudaCache,
     scalar_metadata: &HashMap<RoutedQuantScalarMetadataKey, RoutedQuantScalarMetadata>,
-    packed_w4a16: bool,
-    sparkinfer_source_w4a16: bool,
     managed_weights: bool,
     cuda_stream: *mut c_void,
     request_count: usize,
@@ -14457,82 +11244,34 @@ fn store_loaded_route_cuda_layer(
         plan.layer_id,
         plan.expert_ids.len(),
         first,
-        packed_w4a16,
-        sparkinfer_source_w4a16,
         managed_weights,
         false,
     )?);
     let allocation_ms = elapsed_ms(allocation_started);
-    let mut w13_scale_maximum = 0.0_f32;
-    let mut w2_scale_maximum = 0.0_f32;
     let pack_started = Instant::now();
-    if packed_w4a16 {
-        slab.store_layer_experts_w4a16(
-            &plan.expert_ids,
-            loaded_experts,
-            Arc::clone(&cuda_cache.library),
-            &mut cuda_cache.workspace,
-            cuda_stream,
-        )?;
-    }
+    slab.store_layer_experts_w4a16(
+        &plan.expert_ids,
+        loaded_experts,
+        Arc::clone(&cuda_cache.library),
+        &mut cuda_cache.workspace,
+        cuda_stream,
+    )?;
     for (expert_id, loaded) in plan.expert_ids.iter().copied().zip(loaded_experts) {
-        if sparkinfer_source_w4a16 {
-            update_nvfp4_scale_maximum(&mut w13_scale_maximum, &loaded.up.weight_scale.bytes);
-            update_nvfp4_scale_maximum(&mut w13_scale_maximum, &loaded.gate.weight_scale.bytes);
-            update_nvfp4_scale_maximum(&mut w2_scale_maximum, &loaded.down.weight_scale.bytes);
-        }
         slab.store_expert_scalars_from_cache(expert_id, scalar_metadata)?;
-        if packed_w4a16 {
-            preload.projection_groups += 3;
-            preload.weight_bytes += (loaded.gate.weight.bytes.len()
-                + loaded.up.weight.bytes.len()
-                + loaded.down.weight.bytes.len()) as u64;
-            preload.weight_scale_bytes += (loaded.gate.weight_scale.bytes.len()
-                + loaded.up.weight_scale.bytes.len()
-                + loaded.down.weight_scale.bytes.len())
-                as u64;
-            cuda_cache.projection_uploads += 3;
-        } else if sparkinfer_source_w4a16 {
-            slab.store_expert_source_w4a16(
-                expert_id,
-                loaded,
-                Arc::clone(&cuda_cache.library),
-                &mut cuda_cache.workspace,
-                cuda_stream,
-            )?;
-            preload.projection_groups += 3;
-            preload.weight_bytes += (loaded.gate.weight.bytes.len()
-                + loaded.up.weight.bytes.len()
-                + loaded.down.weight.bytes.len()) as u64;
-            preload.weight_scale_bytes += (loaded.gate.weight_scale.bytes.len()
-                + loaded.up.weight_scale.bytes.len()
-                + loaded.down.weight_scale.bytes.len())
-                as u64;
-            cuda_cache.projection_uploads += 3;
-        } else {
-            for (key, projection) in slab.store_expert(
-                expert_id,
-                loaded,
-                Arc::clone(&cuda_cache.library),
-                &mut cuda_cache.workspace,
-                cuda_stream,
-            )? {
-                preload.projection_groups += 1;
-                preload.weight_bytes += projection.weight.buffer().bytes as u64;
-                preload.weight_scale_bytes += projection.weight_scale.buffer().bytes as u64;
-                cuda_cache.projection_uploads += 1;
-                anyhow::ensure!(
-                    cuda_cache.projections.insert(key, projection).is_none(),
-                    "contiguous TP4 preload inserted a duplicate projection"
-                );
-            }
-        }
+        preload.projection_groups += 3;
+        preload.weight_bytes += (loaded.gate.weight.bytes.len()
+            + loaded.up.weight.bytes.len()
+            + loaded.down.weight.bytes.len()) as u64;
+        preload.weight_scale_bytes += (loaded.gate.weight_scale.bytes.len()
+            + loaded.up.weight_scale.bytes.len()
+            + loaded.down.weight_scale.bytes.len()) as u64;
+        cuda_cache.projection_uploads += 3;
         if progress_interval > 0
             && (preload.projection_groups % progress_interval == 0
                 || preload.projection_groups == request_count)
         {
             eprintln!(
-                "real_nvfp4_cuda_projection_preload_progress groups={}/{} managed_projection_allocations={managed_weights} contiguous_tp4=true packed_w4a16={packed_w4a16} sparkinfer_source_w4a16={sparkinfer_source_w4a16}",
+                "real_nvfp4_cuda_projection_preload_progress groups={}/{} managed_projection_allocations={managed_weights} contiguous_tp4=true packed_w4a16=true",
                 preload.projection_groups,
                 request_count
             );
@@ -14553,18 +11292,7 @@ fn store_loaded_route_cuda_layer(
         route_preload_io_workers(),
         route_preload_direct_io()
     );
-    if sparkinfer_source_w4a16 {
-        slab.finalize_sparkinfer_source_w4a16(
-            catalog,
-            Arc::clone(&cuda_cache.library),
-            &mut cuda_cache.workspace,
-            sparkinfer_nvfp4_scale_factor(w13_scale_maximum),
-            sparkinfer_nvfp4_scale_factor(w2_scale_maximum),
-            cuda_stream,
-        )?;
-    } else {
-        slab.finalize_w4a16_global_scales(cuda_cache.library.as_ref(), cuda_stream)?;
-    }
+    slab.finalize_w4a16_global_scales(cuda_cache.library.as_ref(), cuda_stream)?;
     anyhow::ensure!(
         cuda_cache
             .expert_slabs
@@ -14701,51 +11429,11 @@ fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
     shard: ExpertIntermediateShard,
     cuda_stream: *mut c_void,
 ) -> Result<RouteCudaProjectionPreload> {
-    let packed_w4a16 = cuda_cache.b12x_w4a16_packed;
-    let sparkinfer_source_w4a16 = cuda_cache.sparkinfer_source_w4a16;
-    let dedicated_w4a16 = packed_w4a16 || sparkinfer_source_w4a16;
     anyhow::ensure!(
-        shard.count == 4
-            && (cuda_cache.managed_projection_allocations || dedicated_w4a16),
-        "contiguous TP4 expert slabs require four intermediate shards and either managed projections or a dedicated W4A16 layout"
+        shard.count == 4 && cuda_cache.b12x_w4a16_packed,
+        "contiguous TP4 expert slabs require four intermediate shards and packed W4A16"
     );
     let managed_weights = !b12x_spark_w4a16_device_weights_enabled();
-    let existing = requests
-        .iter()
-        .filter(|request| {
-            cuda_cache
-                .projections
-                .contains_key(&RoutedQuantProjectionKey {
-                    layer_id: request.layer_id,
-                    expert_id: request.expert_id,
-                    projection: request.projection,
-                    row_count: request.row_count,
-                })
-        })
-        .count();
-    anyhow::ensure!(
-        dedicated_w4a16 || existing == 0 || existing == requests.len(),
-        "contiguous TP4 preload found a partial projection cache: {existing}/{}",
-        requests.len()
-    );
-    if !dedicated_w4a16 && existing == requests.len() {
-        let mut preload = RouteCudaProjectionPreload::default();
-        for request in requests {
-            let projection = cuda_cache
-                .projections
-                .get(&RoutedQuantProjectionKey {
-                    layer_id: request.layer_id,
-                    expert_id: request.expert_id,
-                    projection: request.projection,
-                    row_count: request.row_count,
-                })
-                .expect("all requested projections exist above");
-            preload.projection_groups += 1;
-            preload.weight_bytes += projection.weight.buffer().bytes as u64;
-            preload.weight_scale_bytes += projection.weight_scale.buffer().bytes as u64;
-        }
-        return Ok(preload);
-    }
 
     let mut layers = requests
         .iter()
@@ -14783,7 +11471,7 @@ fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
             expert_ids,
         });
     }
-    if packed_w4a16 && cuda_cache.weight_preload_communicator.is_some() {
+    if cuda_cache.weight_preload_communicator.is_some() {
         return preload_routed_quant_projection_cuda_cache_cooperative_tp4(
             catalog,
             &layer_plans,
@@ -14801,7 +11489,7 @@ fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
             .context("contiguous TP4 preload has no layer plans")?;
         let mut pending = Some(scope.spawn(move || {
             let started = Instant::now();
-            let loaded = load_route_cuda_layer_plan(catalog, first_plan, shard, packed_w4a16)?;
+            let loaded = load_route_cuda_layer_plan(catalog, first_plan, shard, true)?;
             Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
         }));
         for (index, plan) in layer_plans.iter().enumerate() {
@@ -14813,19 +11501,15 @@ fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
             pending = layer_plans.get(index + 1).map(|next_plan| {
                 scope.spawn(move || {
                     let started = Instant::now();
-                    let loaded =
-                        load_route_cuda_layer_plan(catalog, next_plan, shard, packed_w4a16)?;
+                    let loaded = load_route_cuda_layer_plan(catalog, next_plan, shard, true)?;
                     Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
                 })
             });
             store_loaded_route_cuda_layer(
-                catalog,
                 plan,
                 &loaded_layer.experts,
                 cuda_cache,
                 scalar_metadata,
-                packed_w4a16,
-                sparkinfer_source_w4a16,
                 managed_weights,
                 cuda_stream,
                 requests.len(),
@@ -14861,50 +11545,20 @@ pub(in crate::commands::real_full) fn preload_routed_quant_projection_cuda_cache
     let cuda_cache = cache.cuda_cache()?;
     let stream = RouteCudaStream::new(Arc::clone(&cuda_cache.library))?;
     let cuda_stream = stream.as_ptr();
-    let mut preload = RouteCudaProjectionPreload::default();
-    let progress_interval = cuda_projection_preload_progress_interval();
-    let managed = cuda_cache.managed_projection_allocations;
-    if let Some(shard) = spark_expert_intermediate_shard_from_env()? {
-        let dedicated_w4a16 = cuda_cache.b12x_w4a16_packed || cuda_cache.sparkinfer_source_w4a16;
-        if cuda_cache.b12x_aot_enabled && (managed || dedicated_w4a16) {
-            return preload_routed_quant_projection_cuda_cache_contiguous_tp4(
-                catalog,
-                requests,
-                cuda_cache,
-                &scalar_metadata,
-                shard,
-                cuda_stream,
-            );
-        }
-    }
-    for request in requests {
-        cuda_cache.prepare_layer(request.layer_id);
-        let projection = cuda_cache.device_projection_from_catalog(
-            catalog,
-            RoutedQuantProjectionKey {
-                layer_id: request.layer_id,
-                expert_id: request.expert_id,
-                projection: request.projection,
-                row_count: request.row_count,
-            },
-            cuda_stream,
-        )?;
-        preload.weight_bytes += projection.weight.buffer().bytes as u64;
-        preload.weight_scale_bytes += projection.weight_scale.buffer().bytes as u64;
-        preload.projection_groups += 1;
-        if progress_interval > 0
-            && (preload.projection_groups % progress_interval == 0
-                || preload.projection_groups == requests.len())
-        {
-            eprintln!(
-                "real_nvfp4_cuda_projection_preload_progress groups={}/{} managed_projection_allocations={}",
-                preload.projection_groups,
-                requests.len(),
-                managed
-            );
-        }
-    }
-    Ok(preload)
+    let shard = spark_expert_intermediate_shard_from_env()?
+        .context("packed W4A16 expert preload requires four intermediate shards")?;
+    anyhow::ensure!(
+        cuda_cache.b12x_aot_enabled && cuda_cache.b12x_w4a16_packed,
+        "CUDA expert preload requires the packed W4A16 SparkInfer backend"
+    );
+    preload_routed_quant_projection_cuda_cache_contiguous_tp4(
+        catalog,
+        requests,
+        cuda_cache,
+        &scalar_metadata,
+        shard,
+        cuda_stream,
+    )
 }
 
 fn load_routed_quant_projection(
@@ -15177,16 +11831,6 @@ fn catalog_tensor<'a>(catalog: &'a TensorCatalog, tensor_name: &str) -> Result<&
         .with_context(|| format!("tensor {tensor_name} not found in catalog"))
 }
 
-fn tensor_rows_byte_count(
-    catalog: &TensorCatalog,
-    tensor_name: &str,
-    row_count: usize,
-) -> Result<usize> {
-    let info = catalog_tensor(catalog, tensor_name)?;
-    let (_, _, bytes_to_read) = tensor_rows_read_plan(info, tensor_name, row_count)?;
-    Ok(bytes_to_read)
-}
-
 fn tensor_rows_read_plan(
     info: &TensorInfo,
     tensor_name: &str,
@@ -15272,16 +11916,14 @@ mod tests {
         execute_nvfp4_route_rows_bf16_accumulated_cached_device_output, f32_values_to_bf16_bytes,
         fused_fp8_reduction_eligible, load_bf16_route_projection_source,
         load_bf16_route_projections_for_group_cached, load_routed_projection_rows_for_shard,
-        managed_projections_test_override, managed_route_projections_enabled, native_library_path,
-        native_library_path_candidates, packed_w4a16_topk8_prefill_eligible,
+        native_library_path, native_library_path_candidates, packed_w4a16_topk8_prefill_eligible,
         plan_packed_w4a16_topk8_prefill, plan_packed_w4a16_topk8_prefill_flat,
         route_cuda_graphs_test_override, routed_quant_scalar_metadata_from_loaded,
-        should_use_grouped_route_launches, sparkinfer_source_w4a16_workspace_rows,
-        Bf16RouteProjectionGroupKey, Bf16RouteProjections, LoadedRouteCudaTensorRows, LoadedTensor,
-        LoadedTensorRows, OwnedDeviceAllocation, PackedW4a16Topk8Route, RouteCudaCache,
-        RouteCudaEvent, RouteCudaStream, RouteCudaTensorBytes, RouteCudaWorkspace,
-        RouteStreamingOutputDtype, RouteTensorCache, RoutedQuantProjection,
-        RoutedQuantProjectionKey, ScoredRoute, SparkCollectiveLaunchOrder,
+        should_use_grouped_route_launches, Bf16RouteProjectionGroupKey, Bf16RouteProjections,
+        LoadedRouteCudaTensorRows, LoadedTensor, LoadedTensorRows, OwnedDeviceAllocation,
+        PackedW4a16Topk8Route, RouteCudaCache, RouteCudaEvent, RouteCudaStream,
+        RouteCudaTensorBytes, RouteCudaWorkspace, RouteStreamingOutputDtype, RouteTensorCache,
+        RoutedQuantProjection, RoutedQuantProjectionKey, ScoredRoute, SparkCollectiveLaunchOrder,
         CPU_REFERENCE_NVFP4_ROUTE_BACKEND, CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND,
         CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_DEVICE_INPUT_BACKEND,
         CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_DEVICE_OUTPUT_BACKEND,
@@ -15469,7 +12111,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let plan = plan_packed_w4a16_topk8_prefill(&row_routes, false)?;
+        let plan = plan_packed_w4a16_topk8_prefill(&row_routes)?;
 
         assert_eq!(plan.packed_route_count, 8);
         assert!(plan.block_expert_ids.is_empty());
@@ -15494,7 +12136,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let plan = plan_packed_w4a16_topk8_prefill_flat(8, &routes, false)?;
+        let plan = plan_packed_w4a16_topk8_prefill_flat(8, &routes)?;
 
         assert_eq!(plan.packed_route_count, 64);
         assert_eq!(
@@ -15510,57 +12152,6 @@ mod tests {
             &plan.packed_route_indices[32..],
             &(1..64).step_by(2).collect::<Vec<_>>()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn source_w4a16_topk8_plan_uses_direct_ids_through_default_m2_cutoff() -> Result<()> {
-        let routes = (0..16)
-            .map(|route| PackedW4a16Topk8Route {
-                expert_id: (route % 3) as u32,
-                weight: route as f32 + 1.0,
-            })
-            .collect::<Vec<_>>();
-
-        let plan = plan_packed_w4a16_topk8_prefill_flat(2, &routes, true)?;
-
-        assert_eq!(plan.packed_route_count, 16);
-        assert!(plan.block_expert_ids.is_empty());
-        assert_eq!(plan.packed_route_indices, plan.direct_topk_ids);
-        assert_eq!(
-            plan.packed_route_indices,
-            (0..16).map(|route| (route % 3) as u32).collect::<Vec<_>>()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn source_w4a16_topk8_plan_switches_to_block8_above_default_m2_cutoff() -> Result<()> {
-        let routes = (0..24)
-            .map(|route| PackedW4a16Topk8Route {
-                expert_id: (route % 2) as u32,
-                weight: route as f32 + 1.0,
-            })
-            .collect::<Vec<_>>();
-
-        let plan = plan_packed_w4a16_topk8_prefill_flat(3, &routes, true)?;
-
-        assert_eq!(plan.packed_route_count, 32);
-        assert_eq!(plan.block_expert_ids, vec![0, 0, 1, 1]);
-        assert_eq!(
-            &plan.packed_route_indices[..12],
-            &(0..24).step_by(2).collect::<Vec<_>>()
-        );
-        assert!(plan.packed_route_indices[12..16]
-            .iter()
-            .all(|route| *route == 24));
-        assert_eq!(
-            &plan.packed_route_indices[16..28],
-            &(1..24).step_by(2).collect::<Vec<_>>()
-        );
-        assert!(plan.packed_route_indices[28..]
-            .iter()
-            .all(|route| *route == 24));
         Ok(())
     }
 
@@ -15586,7 +12177,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let plan = plan_packed_w4a16_topk8_prefill(&row_routes, false)?;
+        let plan = plan_packed_w4a16_topk8_prefill(&row_routes)?;
 
         assert_eq!(plan.packed_route_count, 128);
         assert_eq!(plan.block_expert_ids, vec![0, 0, 1, 1]);
@@ -15607,13 +12198,12 @@ mod tests {
 
     #[test]
     fn packed_w4a16_topk8_prefill_accepts_small_complete_batches() {
-        assert!(packed_w4a16_topk8_prefill_eligible(true, 2, 16));
-        assert!(packed_w4a16_topk8_prefill_eligible(true, 7, 56));
-        assert!(!packed_w4a16_topk8_prefill_eligible(false, 7, 56));
-        assert!(packed_w4a16_topk8_prefill_eligible(true, 1, 8));
-        assert!(!packed_w4a16_topk8_prefill_eligible(true, 7, 55));
-        assert!(packed_w4a16_topk8_prefill_eligible(true, 1025, 8200));
-        assert!(!packed_w4a16_topk8_prefill_eligible(true, 2049, 16392));
+        assert!(packed_w4a16_topk8_prefill_eligible(2, 16));
+        assert!(packed_w4a16_topk8_prefill_eligible(7, 56));
+        assert!(packed_w4a16_topk8_prefill_eligible(1, 8));
+        assert!(!packed_w4a16_topk8_prefill_eligible(7, 55));
+        assert!(packed_w4a16_topk8_prefill_eligible(1025, 8200));
+        assert!(!packed_w4a16_topk8_prefill_eligible(2049, 16392));
     }
 
     #[test]
@@ -15630,38 +12220,14 @@ mod tests {
     }
 
     #[test]
-    fn source_w4a16_workspace_capacity_matches_direct_and_generic_buckets() -> Result<()> {
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(1, 2)?, 1);
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(2, 2)?, 2);
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(3, 2)?, 16);
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(8, 8)?, 8);
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(9, 8)?, 16);
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(16, 2)?, 16);
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(17, 2)?, 32);
-        assert_eq!(sparkinfer_source_w4a16_workspace_rows(1025, 2)?, 2048);
-        Ok(())
-    }
-
-    #[test]
     fn packed_w4a16_prefill_uses_exported_route_block_regimes() {
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(2, false), 8);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(8, false), 8);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(9, false), 32);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(512, false), 32);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(513, false), 32);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(1024, false), 32);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(2048, false), 32);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(2049, false), 48);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(9, true), 8);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(128, true), 8);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(129, true), 16);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(256, true), 16);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(257, true), 32);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(512, true), 32);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(513, true), 48);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(1024, true), 48);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(1025, true), 64);
-        assert_eq!(b12x_w4a16_prefill_route_block_rows(2048, true), 64);
+        assert_eq!(b12x_w4a16_prefill_route_block_rows(2), 8);
+        assert_eq!(b12x_w4a16_prefill_route_block_rows(8), 8);
+        assert_eq!(b12x_w4a16_prefill_route_block_rows(9), 32);
+        assert_eq!(b12x_w4a16_prefill_route_block_rows(512), 32);
+        assert_eq!(b12x_w4a16_prefill_route_block_rows(1024), 32);
+        assert_eq!(b12x_w4a16_prefill_route_block_rows(2048), 32);
+        assert_eq!(b12x_w4a16_prefill_route_block_rows(2049), 48);
     }
 
     #[test]
@@ -15926,49 +12492,6 @@ mod tests {
         assert!(!b12x_spark_direct_route_shape_supported(
             16, 6144, 6144, 2047, 6144
         ));
-    }
-
-    fn route_cuda_cache_for_test(
-        managed_projection_allocations: bool,
-    ) -> Result<Option<RouteCudaCache>> {
-        let Some(path) = native_library_path() else {
-            return Ok(None);
-        };
-        let library = Arc::new(unsafe { NativeLibrary::load(path)? });
-        let stream = RouteCudaStream::new(Arc::clone(&library))?;
-        let completion_stream = RouteCudaStream::new(Arc::clone(&library))?;
-        let metadata_ready_event = RouteCudaEvent::new(Arc::clone(&library))?;
-        Ok(Some(RouteCudaCache {
-            library,
-            spark_reduction: None,
-            spark_rdma_reduction: None,
-            weight_preload_communicator: None,
-            stream,
-            b12x_aux_streams: Vec::new(),
-            b12x_lane_events: Vec::new(),
-            completion_stream,
-            metadata_ready_event,
-            projections: Default::default(),
-            expert_slabs: Default::default(),
-            bf16_expert_slabs: Default::default(),
-            projection_uploads: 0,
-            cache_hits: 0,
-            projection_evictions: 0,
-            active_layer: None,
-            workspace: Default::default(),
-            b12x_aux_workspaces: Vec::new(),
-            managed_projection_allocations,
-            graphs: Default::default(),
-            grouped_decode_graphs: Default::default(),
-            packed_w4a16_decode_graphs: Default::default(),
-            packed_w4a16_stream_decode_graphs: Default::default(),
-            graph_captures: 0,
-            graph_launches: 0,
-            b12x_aot_enabled: false,
-            b12x_w4a16_packed: false,
-            sparkinfer_source_w4a16: false,
-            grouped_decode_observed: false,
-        }))
     }
 
     #[test]
@@ -16520,222 +13043,6 @@ mod tests {
     }
 
     #[test]
-    fn cuda_projection_cache_keeps_layers_resident_when_native_available() -> Result<()> {
-        let Some(mut cache) = route_cuda_cache_for_test(false)? else {
-            return Ok(());
-        };
-        let stream_ptr = cache.stream.as_ptr();
-        let projection = fake_routed_projection();
-        let layer3_key = RoutedQuantProjectionKey {
-            layer_id: 3,
-            expert_id: 0,
-            projection: "gate_proj",
-            row_count: 1,
-        };
-        let layer4_key = RoutedQuantProjectionKey {
-            layer_id: 4,
-            expert_id: 0,
-            projection: "gate_proj",
-            row_count: 1,
-        };
-
-        cache.prepare_layer(3);
-        cache.device_projection(layer3_key, &projection, std::ptr::null_mut())?;
-        let first_weight_staging_ptr = cache
-            .workspace
-            .pinned_projection_weight
-            .as_ref()
-            .expect("host projection weight staging allocated")
-            .buffer()
-            .ptr;
-        let first_scale_staging_ptr = cache
-            .workspace
-            .pinned_projection_scale
-            .as_ref()
-            .expect("host projection scale staging allocated")
-            .buffer()
-            .ptr;
-        assert_eq!(cache.projections.len(), 1);
-        assert_eq!(cache.projection_uploads, 1);
-        assert_eq!(cache.projection_evictions, 0);
-
-        cache.prepare_layer(4);
-        assert_eq!(cache.projections.len(), 1);
-        assert_eq!(cache.projection_evictions, 0);
-        assert_eq!(cache.active_layer, Some(4));
-
-        cache.device_projection(layer4_key.clone(), &projection, std::ptr::null_mut())?;
-        let second_weight_staging_ptr = cache
-            .workspace
-            .pinned_projection_weight
-            .as_ref()
-            .expect("host projection weight staging reused")
-            .buffer()
-            .ptr;
-        let second_scale_staging_ptr = cache
-            .workspace
-            .pinned_projection_scale
-            .as_ref()
-            .expect("host projection scale staging reused")
-            .buffer()
-            .ptr;
-        assert_eq!(second_weight_staging_ptr, first_weight_staging_ptr);
-        assert_eq!(second_scale_staging_ptr, first_scale_staging_ptr);
-        cache.device_projection(layer4_key, &projection, std::ptr::null_mut())?;
-        assert_eq!(cache.projections.len(), 2);
-        assert_eq!(cache.projection_uploads, 2);
-        assert_eq!(cache.cache_hits, 1);
-        assert_eq!(cache.stream.as_ptr(), stream_ptr);
-        cache.prepare_layer(4);
-        assert_eq!(cache.projection_evictions, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn cuda_projection_cache_uploads_catalog_rows_directly_when_native_available() -> Result<()> {
-        let Some(mut cache) = route_cuda_cache_for_test(false)? else {
-            return Ok(());
-        };
-        let tempdir = tempfile::tempdir()?;
-        let catalog = tiny_route_catalog(tempdir.path(), &[3]);
-        let key = RoutedQuantProjectionKey {
-            layer_id: 3,
-            expert_id: 0,
-            projection: "gate_proj",
-            row_count: 1,
-        };
-
-        cache.prepare_layer(3);
-        let projection =
-            cache.device_projection_from_catalog(&catalog, key.clone(), std::ptr::null_mut())?;
-        let cached = cache.device_projection_from_catalog(&catalog, key, std::ptr::null_mut())?;
-
-        let mut weight = vec![0_u8; 1];
-        let mut weight_scale = vec![0_u8; 1];
-        cache
-            .library
-            .copy_d2h(&mut weight, projection.weight.buffer())?;
-        cache
-            .library
-            .copy_d2h(&mut weight_scale, projection.weight_scale.buffer())?;
-        assert_eq!(weight, vec![0xaa]);
-        assert_eq!(weight_scale, vec![0x38]);
-        assert!(Arc::ptr_eq(&projection, &cached));
-        assert_eq!(cache.projections.len(), 1);
-        assert_eq!(cache.projection_uploads, 1);
-        assert_eq!(cache.cache_hits, 1);
-        assert_eq!(cache.projection_evictions, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn cuda_projection_cache_can_use_managed_projection_allocations_when_native_available(
-    ) -> Result<()> {
-        let _managed_override = managed_projections_test_override(true);
-        let Some(mut cache) = route_cuda_cache_for_test(managed_route_projections_enabled())?
-        else {
-            return Ok(());
-        };
-        let tempdir = tempfile::tempdir()?;
-        let catalog = tiny_route_catalog(tempdir.path(), &[3]);
-        assert!(cache.managed_projection_allocations);
-        let host_key = RoutedQuantProjectionKey {
-            layer_id: 3,
-            expert_id: 0,
-            projection: "gate_proj",
-            row_count: 1,
-        };
-        let catalog_key = RoutedQuantProjectionKey {
-            layer_id: 3,
-            expert_id: 0,
-            projection: "up_proj",
-            row_count: 1,
-        };
-
-        let host_projection =
-            cache.device_projection(host_key, &fake_routed_projection(), std::ptr::null_mut())?;
-        let catalog_projection =
-            cache.device_projection_from_catalog(&catalog, catalog_key, std::ptr::null_mut())?;
-
-        assert!(host_projection.uses_managed_storage());
-        assert!(catalog_projection.uses_managed_storage());
-        let mut route_cache = RouteTensorCache::default();
-        route_cache.cuda = Some(cache);
-        let stats = route_cache.stats();
-        assert!(stats.cuda_managed_projection_allocations_enabled);
-        assert_eq!(stats.cuda_projection_entries, 2);
-        assert_eq!(stats.cuda_managed_projection_entries, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn cuda_projection_cache_reuses_catalog_row_staging_when_native_available() -> Result<()> {
-        let Some(mut cache) = route_cuda_cache_for_test(false)? else {
-            return Ok(());
-        };
-        let tempdir = tempfile::tempdir()?;
-        let catalog = tiny_route_catalog(tempdir.path(), &[3]);
-        let gate_key = RoutedQuantProjectionKey {
-            layer_id: 3,
-            expert_id: 0,
-            projection: "gate_proj",
-            row_count: 1,
-        };
-        let up_key = RoutedQuantProjectionKey {
-            layer_id: 3,
-            expert_id: 0,
-            projection: "up_proj",
-            row_count: 1,
-        };
-
-        let gate =
-            cache.device_projection_from_catalog(&catalog, gate_key, std::ptr::null_mut())?;
-        let first_weight_ptr = cache
-            .workspace
-            .pinned_projection_weight
-            .as_ref()
-            .expect("weight staging allocated")
-            .buffer()
-            .ptr;
-        let first_scale_ptr = cache
-            .workspace
-            .pinned_projection_scale
-            .as_ref()
-            .expect("scale staging allocated")
-            .buffer()
-            .ptr;
-        let up = cache.device_projection_from_catalog(&catalog, up_key, std::ptr::null_mut())?;
-        let second_weight_ptr = cache
-            .workspace
-            .pinned_projection_weight
-            .as_ref()
-            .expect("weight staging allocated")
-            .buffer()
-            .ptr;
-        let second_scale_ptr = cache
-            .workspace
-            .pinned_projection_scale
-            .as_ref()
-            .expect("scale staging allocated")
-            .buffer()
-            .ptr;
-
-        assert_eq!(first_weight_ptr, second_weight_ptr);
-        assert_eq!(first_scale_ptr, second_scale_ptr);
-        assert_eq!(cache.projection_uploads, 2);
-        assert_eq!(cache.projections.len(), 2);
-        let mut gate_weight = vec![0_u8; 1];
-        let mut up_weight = vec![0_u8; 1];
-        cache
-            .library
-            .copy_d2h(&mut gate_weight, gate.weight.buffer())?;
-        cache.library.copy_d2h(&mut up_weight, up.weight.buffer())?;
-        assert_eq!(gate_weight, vec![0xaa]);
-        assert_eq!(up_weight, vec![0xaa]);
-        Ok(())
-    }
-
-    #[test]
     fn route_workspace_reuses_pinned_payload_buffers_when_native_available() -> Result<()> {
         let Some(path) = native_library_path() else {
             return Ok(());
@@ -16778,29 +13085,6 @@ mod tests {
 
         assert_eq!(out, second_payload);
         Ok(())
-    }
-
-    fn fake_routed_projection() -> RoutedQuantProjection {
-        RoutedQuantProjection {
-            weight: fake_loaded_rows("weight", DType::U8, vec![0x88]),
-            weight_scale: fake_loaded_rows("weight_scale", DType::F8E4M3, vec![0x38]),
-            input_scale: fake_loaded_tensor("input_scale", DType::F32, 1.0_f32.to_le_bytes()),
-            weight_scale_2: fake_loaded_tensor("weight_scale_2", DType::F32, 1.0_f32.to_le_bytes()),
-        }
-    }
-
-    fn fake_loaded_rows(suffix: &str, dtype: DType, bytes: Vec<u8>) -> LoadedTensorRows {
-        LoadedTensorRows {
-            info: fake_tensor_info(suffix, dtype, vec![1, 1], bytes.len()),
-            source_path: PathBuf::from("fake-route.bin"),
-            start_row: 0,
-            row_count: 1,
-            row_width: bytes.len(),
-            bytes_per_scalar: 1,
-            bytes,
-            elapsed_micros: 0,
-            sha256: String::new(),
-        }
     }
 
     fn fake_loaded_tensor<const N: usize>(

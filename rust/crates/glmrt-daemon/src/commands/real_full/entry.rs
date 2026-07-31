@@ -23,6 +23,7 @@ use crate::python_graph_capture::coordinator_python_capture_enabled;
 
 use super::constants::REAL_GLM_FULL_BLOCKER;
 use super::coordinator_kernels::{
+    audit_glm_dsa_nvfp4_short_k_prefill_graph_retention,
     clear_transient_coordinator_owned_device_buffers,
     prewarm_flashinfer_cudnn_mla_suffix_graphs_for_worker,
     reset_glm_dsa_sparse_mla_transient_state, seal_coordinator_owned_device_buffer_pool,
@@ -138,6 +139,8 @@ const REAL_FULL_STARTUP_PREWARM_PAIRED_LM_HEAD_PREFIX: &str =
     "real-full-startup-prewarm-paired-lm-head-";
 const REAL_FULL_STARTUP_PREWARM_BATCHED_DSPARK_PREFIX: &str =
     "real-full-startup-prewarm-batched-dspark-";
+const REAL_FULL_STARTUP_AUDIT_NVFP4_SHORT_K_PREFIX: &str =
+    "real-full-startup-audit-nvfp4-short-k-q";
 const REAL_FULL_STARTUP_BATCHED_DSPARK_BANK_MARKER: &str = "-batched-bank-";
 const REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_ENV: &str = "GLMRT_REAL_FULL_SERVE_PREFIX_PREFILL_PROBE";
 const REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_REPEATS_ENV: &str =
@@ -151,6 +154,80 @@ const REAL_FULL_SERVE_PREWARM_PROMPT_TOKEN: &str = "alpha ";
 const REAL_FULL_SERVE_PREWARM_PREFILL_ROWS: &[usize] =
     &[4_096, 2_048, 1_008, 512, 144, 72, 36, 18, 9, 8];
 const REAL_FULL_SERVE_DSA_SELECTOR_PREWARM_QUERY_ROWS: &[usize] = &[8, 16, 32, 64, 128, 256, 512];
+// Native NVFP4 chooses K=128/512/1024/2048 from the live context only for
+// query buckets through 64. The dSpark sweep covers q1/q2/q4/q8, while the
+// long-context selector sweep covers q16/q32/q64 only with the selector
+// enabled. These exact cached-prefix widths fill the remaining no-selector
+// Cartesian product after shared attention scratch reaches its final size.
+const REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS: &[usize] = &[16, 32, 64];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RealFullNvfp4ShortKPrefillCaptureAnchor {
+    prompt_tokens: usize,
+    sparse_topk: usize,
+}
+
+const REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_CAPTURE_ANCHORS:
+    &[RealFullNvfp4ShortKPrefillCaptureAnchor] = &[
+    RealFullNvfp4ShortKPrefillCaptureAnchor {
+        prompt_tokens: 9,
+        sparse_topk: 128,
+    },
+    RealFullNvfp4ShortKPrefillCaptureAnchor {
+        prompt_tokens: 145,
+        sparse_topk: 512,
+    },
+    RealFullNvfp4ShortKPrefillCaptureAnchor {
+        prompt_tokens: 513,
+        sparse_topk: 1_024,
+    },
+    RealFullNvfp4ShortKPrefillCaptureAnchor {
+        prompt_tokens: 1_025,
+        sparse_topk: 2_048,
+    },
+];
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RealFullNvfp4ShortKPrefillCaptureCase {
+    anchor_prompt_tokens: usize,
+    query_rows: usize,
+    total_rows: usize,
+    sparse_topk: usize,
+}
+
+#[cfg(test)]
+fn real_full_nvfp4_short_k_prefill_capture_plan() -> Vec<RealFullNvfp4ShortKPrefillCaptureCase> {
+    let mut cases = Vec::with_capacity(
+        REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_CAPTURE_ANCHORS.len()
+            * REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS.len(),
+    );
+    for anchor in REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_CAPTURE_ANCHORS {
+        let mut prompt_tokens = anchor.prompt_tokens;
+        for query_rows in REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS {
+            prompt_tokens += query_rows + 1;
+            cases.push(RealFullNvfp4ShortKPrefillCaptureCase {
+                anchor_prompt_tokens: anchor.prompt_tokens,
+                query_rows: *query_rows,
+                total_rows: prompt_tokens - 1,
+                sparse_topk: anchor.sparse_topk,
+            });
+        }
+    }
+    cases
+}
+
+fn real_full_nvfp4_short_k_prefill_decode_budget() -> Result<usize> {
+    REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS
+        .iter()
+        .try_fold(1_usize, |budget, query_rows| {
+            query_rows
+                .checked_add(1)
+                .and_then(|rows| budget.checked_add(rows))
+                .context("NVFP4 short-K prefill capture decode budget overflow")
+        })
+}
+
 // Native MTP currently replays the target prompt hidden rows through layer 78.
 // The bounded >=8,193-row target prefill wavefront releases completed hidden
 // chunks, so keep the MTP-specific DSA graph seed on the largest qualified
@@ -3662,6 +3739,20 @@ fn real_full_prewarm_batched_dspark_sequence(sequence_id: &str) -> bool {
     sequence_id.starts_with(REAL_FULL_STARTUP_PREWARM_BATCHED_DSPARK_PREFIX)
 }
 
+fn real_full_nvfp4_short_k_graph_audit(sequence_id: &str) -> Option<(usize, usize)> {
+    let suffix = sequence_id.strip_prefix(REAL_FULL_STARTUP_AUDIT_NVFP4_SHORT_K_PREFIX)?;
+    let (query_rows, sparse_topk_suffix) = suffix.split_once("-k")?;
+    let query_rows = query_rows.parse::<usize>().ok()?;
+    let (sparse_topk, worker_index) = sparse_topk_suffix.split_once("-worker-")?;
+    let sparse_topk = sparse_topk.parse::<usize>().ok()?;
+    worker_index.parse::<usize>().ok()?;
+    (REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS.contains(&query_rows)
+        && REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_CAPTURE_ANCHORS
+            .iter()
+            .any(|anchor| anchor.sparse_topk == sparse_topk))
+    .then_some((query_rows, sparse_topk))
+}
+
 fn real_full_paired_lm_head_prewarm_range(fixed_drafts: Option<usize>) -> Option<(usize, usize)> {
     let max_single_rows = match fixed_drafts {
         Some(0) => return None,
@@ -3996,11 +4087,10 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
             }
             None => checkpoint_max_drafts,
         };
-        // The serial width sweep may leave its final internal request live
-        // when acceptance emitted fewer than the synthetic decode budget.
-        // Drain those scheduler states before materializing the production
-        // lanes; otherwise their target-radix reservation silently reduces
-        // the four-request serving admission pool to three.
+        // Serial width capture explicitly finishes each sequence. Defensively
+        // drain any other internal prewarm states before materializing the
+        // production lanes; a retained target-radix reservation would
+        // silently reduce the serving admission pool.
         let stale_internal_sequences = self
             .scheduler_states
             .lock()
@@ -4222,6 +4312,10 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
     }
 
     fn finish_real_full_sequence(&self, sequence_id: &str) -> std::result::Result<(), String> {
+        if let Some((query_rows, sparse_topk)) = real_full_nvfp4_short_k_graph_audit(sequence_id) {
+            return audit_glm_dsa_nvfp4_short_k_prefill_graph_retention(query_rows, sparse_topk)
+                .map_err(format_error_chain);
+        }
         if real_full_prewarm_batched_dspark_sequence(sequence_id) {
             return self.prewarm_batched_dspark_graphs();
         }
@@ -5846,6 +5940,12 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                         |request| {
                             executor.execute_real_full_decode_cycle_on_worker(worker_index, request)
                         },
+                        |sequence_id| {
+                            executor.finish_real_full_sequence_on_worker(
+                                worker_index,
+                                sequence_id.to_owned(),
+                            )
+                        },
                         prompts,
                         prefix_prefill_probe.as_ref(),
                         worker_index,
@@ -5895,6 +5995,17 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                                 )
                             })?;
                     }
+                    if serving_kv_dtype == KvCacheDType::Nvfp4 {
+                        audit_real_full_nvfp4_short_k_prefill_graphs(
+                            |sequence_id| {
+                                executor.finish_real_full_sequence_on_worker(
+                                    worker_index,
+                                    sequence_id.to_owned(),
+                                )
+                            },
+                            worker_index,
+                        )?;
+                    }
                     executor
                         .finish_real_full_sequence_on_worker(
                             worker_index,
@@ -5928,6 +6039,12 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                             request,
                         )
                     },
+                    |sequence_id| {
+                        glmrt_api::RealFullRequestExecutor::finish_real_full_sequence(
+                            &scheduler_executor,
+                            sequence_id,
+                        )
+                    },
                     prompts,
                     prefix_prefill_probe.as_ref(),
                     0,
@@ -5954,6 +6071,17 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                     )
                     .map_err(anyhow::Error::msg)
                     .context("recapturing final batched dSpark graphs")?;
+                }
+                if serving_kv_dtype == KvCacheDType::Nvfp4 {
+                    audit_real_full_nvfp4_short_k_prefill_graphs(
+                        |sequence_id| {
+                            glmrt_api::RealFullRequestExecutor::finish_real_full_sequence(
+                                &scheduler_executor,
+                                sequence_id,
+                            )
+                        },
+                        0,
+                    )?;
                 }
                 seal_coordinator_owned_device_buffer_pool()
                     .context("sealing coordinator owned device-buffer pool")?;
@@ -6090,6 +6218,7 @@ fn prewarm_real_full_serving_requests(
     mut execute: impl FnMut(
         glmrt_api::RealFullRequest,
     ) -> std::result::Result<glmrt_api::RealFullDecodeCycle, String>,
+    mut finish_sequence: impl FnMut(&str) -> std::result::Result<(), String>,
     prompts: &[(String, usize)],
     prefix_prefill_probe: Option<&RealFullPrefixPrefillProbe>,
     worker_index: usize,
@@ -6627,7 +6756,14 @@ fn prewarm_real_full_serving_requests(
     // identities. The dSpark M=2..8 sweep can enlarge bucket-8 scratch; if it
     // runs afterward, the pointer change correctly clears the earlier DSA
     // graphs and leaves the first >2K serving request unable to recapture.
-    prewarm_real_full_dspark_widths(&mut execute, prompts, worker_index, start, None)?;
+    prewarm_real_full_dspark_widths(
+        &mut execute,
+        &mut finish_sequence,
+        prompts,
+        worker_index,
+        start,
+        None,
+    )?;
     let dsa_selector_seed = if dsa_selector_query_rows.is_empty() {
         None
     } else {
@@ -6800,12 +6936,26 @@ fn prewarm_real_full_serving_requests(
         for attention_prompt in &attention_prompts {
             prewarm_real_full_dspark_widths(
                 &mut execute,
+                &mut finish_sequence,
                 std::slice::from_ref(attention_prompt),
                 worker_index,
                 start,
                 Some(&attention_query_bucket_drafts),
             )?;
         }
+    }
+    if kv_dtype == KvCacheDType::Nvfp4 {
+        // Keep this last within the request sweep so every graph captured
+        // here sees the maximum shared-workspace capacities. The outer
+        // same-width replays must then preserve these identities; a
+        // post-outer registry audit below enforces that invariant.
+        prewarm_real_full_nvfp4_short_k_prefill_graphs(
+            &mut execute,
+            &mut finish_sequence,
+            prompts,
+            worker_index,
+            start,
+        )?;
     }
     eprintln!(
         "real_full_startup_prewarm_done worker={} elapsed_ms={:.3} initial_sampled_token_id={:?} recurrent_sampled_token_id={:?}",
@@ -6816,10 +6966,204 @@ fn prewarm_real_full_serving_requests(
     Ok(())
 }
 
+fn prewarm_real_full_nvfp4_short_k_prefill_graphs(
+    execute: &mut impl FnMut(
+        glmrt_api::RealFullRequest,
+    ) -> std::result::Result<glmrt_api::RealFullDecodeCycle, String>,
+    finish_sequence: &mut impl FnMut(&str) -> std::result::Result<(), String>,
+    prompts: &[(String, usize)],
+    worker_index: usize,
+    prewarm_start: Instant,
+) -> Result<()> {
+    // The seed owns one persistent scheduler state while every bucket appends
+    // its query rows plus the next sampled row to the prompt. Reserve the full
+    // cumulative sweep here; the ordinary small-prompt extension headroom is
+    // intentionally too small for the 9-token K=128 anchor.
+    let decode_budget = real_full_nvfp4_short_k_prefill_decode_budget()?;
+    for (anchor_index, anchor) in REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_CAPTURE_ANCHORS
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let (seed_prompt, seed_prompt_tokens) = prompts
+            .iter()
+            .find(|(_, prompt_tokens)| *prompt_tokens == anchor.prompt_tokens)
+            .with_context(|| {
+                format!(
+                    "NVFP4 short-K prefill capture has no canonical {}-token prompt",
+                    anchor.prompt_tokens
+                )
+            })?;
+        let sequence_id = format!(
+            "real-full-startup-dsa-selector-seed-short-k-{}-{}-sequence-{worker_index}",
+            anchor.sparse_topk, anchor.prompt_tokens,
+        );
+        let anchor_request_base = 50_000_u64
+            .checked_add(
+                u64::try_from(anchor_index)
+                    .context("NVFP4 short-K capture anchor index exceeds u64")?
+                    .saturating_mul(100),
+            )
+            .context("NVFP4 short-K capture request base overflow")?;
+        let seed_start = Instant::now();
+        eprintln!(
+            "real_full_startup_prewarm_start worker={} stage=nvfp4-short-k-seed sparse_topk={} prompt_tokens={} decode_budget={}",
+            worker_index, anchor.sparse_topk, seed_prompt_tokens, decode_budget,
+        );
+        let seed_info = execute(glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+            anchor_request_base,
+            &sequence_id,
+            seed_prompt,
+            *seed_prompt_tokens,
+            1,
+            Vec::new(),
+            0,
+            decode_budget,
+        ))
+        .map_err(anyhow::Error::msg)
+        .with_context(|| {
+            format!(
+                "seeding NVFP4 sparse-K={} prefill graph capture",
+                anchor.sparse_topk
+            )
+        })?
+        .info;
+        anyhow::ensure!(
+            seed_info.status == "ready",
+            "NVFP4 sparse-K={} prefill capture seed was not ready: status={} blocker={} failed={:?}",
+            anchor.sparse_topk,
+            seed_info.status,
+            seed_info.blocker,
+            seed_info.failed_requirements,
+        );
+        eprintln!(
+            "real_full_startup_prewarm_step_done worker={} stage=nvfp4-short-k-seed sparse_topk={} prompt_tokens={} elapsed_ms={:.3} total_ms={:.3}",
+            worker_index,
+            anchor.sparse_topk,
+            seed_prompt_tokens,
+            elapsed_ms(seed_start),
+            elapsed_ms(prewarm_start),
+        );
+
+        let mut prompt = seed_prompt.clone();
+        let mut prompt_tokens = *seed_prompt_tokens;
+        for (step_index, query_rows) in REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let cached_prompt_tokens = prompt_tokens;
+            let uncached_prompt_rows = query_rows + 1;
+            prompt.push_str(&REAL_FULL_SERVE_PREWARM_PROMPT_TOKEN.repeat(uncached_prompt_rows));
+            prompt_tokens = prompt_tokens
+                .checked_add(uncached_prompt_rows)
+                .context("NVFP4 short-K capture prompt token count overflow")?;
+            let sweep_start = Instant::now();
+            eprintln!(
+                "real_full_startup_prewarm_start worker={} stage=nvfp4-short-k-bucket sparse_topk={} query_rows={} prefix_tokens={} prompt_tokens={} decode_budget={}",
+                worker_index,
+                anchor.sparse_topk,
+                query_rows,
+                cached_prompt_tokens,
+                prompt_tokens,
+                decode_budget,
+            );
+            let sweep_info = execute(
+                glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+                    anchor_request_base
+                        .checked_add(
+                            u64::try_from(step_index)
+                                .context("NVFP4 short-K capture step index exceeds u64")?
+                                + 1,
+                        )
+                        .context("NVFP4 short-K capture request index overflow")?,
+                    &sequence_id,
+                    &prompt,
+                    prompt_tokens,
+                    1,
+                    Vec::new(),
+                    step_index + 1,
+                    decode_budget,
+                )
+                .with_cached_prompt_tokens(cached_prompt_tokens),
+            )
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!(
+                    "capturing NVFP4 sparse-K={} query bucket {query_rows}",
+                    anchor.sparse_topk
+                )
+            })?
+            .info;
+            anyhow::ensure!(
+                sweep_info.status == "ready"
+                    && sweep_info.request_prefill_tokens == query_rows,
+                "NVFP4 sparse-K={} query bucket {query_rows} was not ready: status={} prefill_rows={} blocker={} failed={:?}",
+                anchor.sparse_topk,
+                sweep_info.status,
+                sweep_info.request_prefill_tokens,
+                sweep_info.blocker,
+                sweep_info.failed_requirements,
+            );
+            eprintln!(
+                "real_full_startup_prewarm_step_done worker={} stage=nvfp4-short-k-bucket sparse_topk={} query_rows={} elapsed_ms={:.3} total_ms={:.3}",
+                worker_index,
+                anchor.sparse_topk,
+                query_rows,
+                elapsed_ms(sweep_start),
+                elapsed_ms(prewarm_start),
+            );
+        }
+        finish_sequence(&sequence_id)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!(
+                    "finishing NVFP4 sparse-K={} startup capture sequence",
+                    anchor.sparse_topk
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn audit_real_full_nvfp4_short_k_prefill_graphs(
+    mut finish_sequence: impl FnMut(&str) -> std::result::Result<(), String>,
+    worker_index: usize,
+) -> Result<()> {
+    for anchor in REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_CAPTURE_ANCHORS {
+        for query_rows in REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS {
+            let sequence_id = format!(
+                "{REAL_FULL_STARTUP_AUDIT_NVFP4_SHORT_K_PREFIX}{query_rows}-k{}-worker-{worker_index}",
+                anchor.sparse_topk,
+            );
+            finish_sequence(&sequence_id)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| {
+                    format!(
+                        "auditing retained NVFP4 sparse-K={} query bucket {query_rows} after outer startup recaptures",
+                        anchor.sparse_topk,
+                    )
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn finish_real_full_dspark_width_prewarm_sequence(
+    finish_sequence: &mut impl FnMut(&str) -> std::result::Result<(), String>,
+    sequence_id: &str,
+    physical_m: usize,
+) -> Result<()> {
+    finish_sequence(sequence_id)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("finishing dSpark M={physical_m} startup capture sequence"))
+}
+
 fn prewarm_real_full_dspark_widths(
     execute: &mut impl FnMut(
         glmrt_api::RealFullRequest,
     ) -> std::result::Result<glmrt_api::RealFullDecodeCycle, String>,
+    finish_sequence: &mut impl FnMut(&str) -> std::result::Result<(), String>,
     prompts: &[(String, usize)],
     worker_index: usize,
     prewarm_start: Instant,
@@ -6977,6 +7321,16 @@ fn prewarm_real_full_dspark_widths(
             settled_verify_cycle.info.blocker,
             settled_verify_cycle.info.failed_requirements,
         );
+        // Speculative acceptance recomputes final_decode_step from the tokens
+        // actually emitted, so the synthetic terminal decode_step_index above
+        // does not guarantee that this state was recycled. End every width
+        // explicitly before the next width reserves target KV: at C=1 there
+        // is no spare reservation slot for arena rebind to drop the old one.
+        finish_real_full_dspark_width_prewarm_sequence(
+            finish_sequence,
+            &sequence_id,
+            draft_tokens + 1,
+        )?;
         eprintln!(
             "real_full_startup_prewarm_step_done worker={} stage=dspark-width prompt_tokens={} drafts={} physical_m={} settled_verify_rows={} elapsed_ms={:.3} total_ms={:.3}",
             worker_index,
@@ -7978,7 +8332,8 @@ fn load_catalog(path: &Path) -> Result<TensorCatalog> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_real_full_dspark_confidence_policy, real_full_batched_dspark_prewarm_buffer_bank,
+        finish_real_full_dspark_width_prewarm_sequence, parse_real_full_dspark_confidence_policy,
+        real_full_batched_dspark_prewarm_buffer_bank,
         real_full_batched_dspark_prewarm_requested_draft_tokens,
         real_full_batched_dspark_prewarm_sequence, real_full_capture_arena_sequence,
         real_full_dspark_prefix_fingerprint, real_full_dspark_startup_draft_tokens,
@@ -7986,18 +8341,24 @@ mod tests {
         real_full_mtp_draft_tokens_after_cycle_with_limit,
         real_full_mtp_draft_tokens_for_cycle_with_policy, real_full_mtp_physical_padding_rows,
         real_full_mtp_startup_forced_draft_tokens, real_full_native_mtp_sequence_enabled,
-        real_full_paired_lm_head_prewarm_range, real_full_prefill_chunk_tokens_for_direct_dsa,
-        real_full_request_mtp_rows_for_policy,
+        real_full_nvfp4_short_k_graph_audit, real_full_nvfp4_short_k_prefill_capture_plan,
+        real_full_nvfp4_short_k_prefill_decode_budget, real_full_paired_lm_head_prewarm_range,
+        real_full_prefill_chunk_tokens_for_direct_dsa, real_full_request_mtp_rows_for_policy,
         real_full_request_prefill_chunk_tokens_for_shape_with, real_full_request_token_rows,
         real_full_sequence_capacity_tokens, real_full_sparse_tcp_targets_from_args,
         request_prompt_token_ids, retain_graph_bound_scheduler_arena, DsparkConfidenceCalibrator,
         DsparkConfidenceResidual, DsparkRequestCacheSnapshot, RealFullContextTokenBudget,
         RealFullContextTokenExtent, RealFullDsparkConfidencePolicy, RealFullDsparkTailCache,
-        RealFullDsparkTailEntry, RealFullDsparkTailKey, REAL_FULL_MAX_ACTIVE_REQUESTS,
+        RealFullDsparkTailEntry, RealFullDsparkTailKey, TargetKvRadixManager,
+        REAL_FULL_MAX_ACTIVE_REQUESTS, REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS,
+        REAL_FULL_SHARED_KV_PAGE_TOKENS,
     };
     use crate::cli::CoordinatorArgs;
+    use crate::commands::real_full::coordinator_kernels::{
+        glm_dsa_sparse_mla_attention_topk, glm_dsa_sparse_mla_query_bucket,
+    };
     use crate::commands::real_full::preflight::real_full_sparse_transport_plan;
-    use glmrt_core::{DEFAULT_MODEL_ID, EXPERT_HOSTS};
+    use glmrt_core::{KvCacheDType, DEFAULT_MODEL_ID, EXPERT_HOSTS};
     use glmrt_loader::LoadedTokenizer;
     use std::fs;
     use std::sync::Arc;
@@ -8160,6 +8521,130 @@ mod tests {
         assert!(!real_full_batched_dspark_prewarm_sequence(
             "real-full-startup-dspark-width-0-batched-bank-4-sequence"
         ));
+    }
+
+    #[test]
+    fn serial_dspark_width_finish_releases_single_target_kv_slot() {
+        let manager =
+            Arc::new(TargetKvRadixManager::new(4 * REAL_FULL_SHARED_KV_PAGE_TOKENS, 1).unwrap());
+        let first = manager.reserve(&[1, 2], REAL_FULL_SHARED_KV_PAGE_TOKENS);
+        let mut first = Some(first.unwrap());
+        let exhausted = manager
+            .reserve(&[3, 4], REAL_FULL_SHARED_KV_PAGE_TOKENS)
+            .unwrap_err();
+        assert!(format!("{exhausted:#}")
+            .contains("target KV active request limit exhausted: active=1 max=1"));
+
+        let mut finished = Vec::new();
+        {
+            let mut finish_sequence = |sequence_id: &str| {
+                finished.push(sequence_id.to_owned());
+                drop(first.take());
+                Ok(())
+            };
+            finish_real_full_dspark_width_prewarm_sequence(
+                &mut finish_sequence,
+                "real-full-startup-dspark-width-7-9-sequence-0",
+                8,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(finished, ["real-full-startup-dspark-width-7-9-sequence-0"]);
+        assert_eq!(manager.stats().active_reservations, 0);
+        let next = manager
+            .reserve(&[3, 4], REAL_FULL_SHARED_KV_PAGE_TOKENS)
+            .unwrap();
+        assert_eq!(manager.stats().active_reservations, 1);
+        drop(next);
+    }
+
+    #[test]
+    fn nvfp4_short_k_prefill_capture_plan_covers_every_missing_no_selector_bucket() {
+        let plan = real_full_nvfp4_short_k_prefill_capture_plan();
+        assert_eq!(plan.len(), 12);
+        let decode_budget = real_full_nvfp4_short_k_prefill_decode_budget().unwrap();
+        assert_eq!(decode_budget, 116);
+
+        let mut coverage = Vec::with_capacity(plan.len());
+        for case in plan {
+            let sequence_capacity = real_full_sequence_capacity_tokens(
+                case.anchor_prompt_tokens,
+                decode_budget,
+                crate::cli::DEFAULT_REAL_FULL_MAX_CONTEXT_TOKENS,
+            )
+            .unwrap();
+            assert!(
+                sequence_capacity > case.total_rows,
+                "seed state must cover the cumulative short-K sweep: {case:?}"
+            );
+            assert_eq!(
+                glm_dsa_sparse_mla_query_bucket(KvCacheDType::Nvfp4, case.query_rows),
+                Some(case.query_rows),
+            );
+            assert_eq!(
+                glm_dsa_sparse_mla_attention_topk(
+                    KvCacheDType::Nvfp4,
+                    case.query_rows,
+                    case.total_rows,
+                ),
+                case.sparse_topk,
+            );
+            assert_eq!(
+                glm_dsa_sparse_mla_attention_topk(
+                    KvCacheDType::Nvfp4,
+                    case.query_rows,
+                    case.total_rows + REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS.len() + 1,
+                ),
+                case.sparse_topk,
+                "capture anchor must tolerate one sampled row per sweep step: {case:?}",
+            );
+            assert!(
+                case.total_rows <= 2_048,
+                "short-K prefill capture must stay below the selector threshold: {case:?}",
+            );
+            coverage.push((case.anchor_prompt_tokens, case.query_rows, case.sparse_topk));
+        }
+
+        assert_eq!(
+            coverage,
+            [
+                (9, 16, 128),
+                (9, 32, 128),
+                (9, 64, 128),
+                (145, 16, 512),
+                (145, 32, 512),
+                (145, 64, 512),
+                (513, 16, 1_024),
+                (513, 32, 1_024),
+                (513, 64, 1_024),
+                (1_025, 16, 2_048),
+                (1_025, 32, 2_048),
+                (1_025, 64, 2_048),
+            ],
+        );
+    }
+
+    #[test]
+    fn nvfp4_short_k_post_outer_audit_sequence_is_strictly_parsed() {
+        assert_eq!(
+            real_full_nvfp4_short_k_graph_audit(
+                "real-full-startup-audit-nvfp4-short-k-q64-k1024-worker-3"
+            ),
+            Some((64, 1_024)),
+        );
+        assert_eq!(
+            real_full_nvfp4_short_k_graph_audit(
+                "real-full-startup-audit-nvfp4-short-k-q8-k1024-worker-3"
+            ),
+            None,
+        );
+        assert_eq!(
+            real_full_nvfp4_short_k_graph_audit(
+                "real-full-startup-audit-nvfp4-short-k-q64-k256-worker-3"
+            ),
+            None,
+        );
     }
 
     #[test]

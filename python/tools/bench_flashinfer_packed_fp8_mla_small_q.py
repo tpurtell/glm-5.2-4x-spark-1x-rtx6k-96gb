@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import _pinned_sparkinfer  # noqa: F401
+
 import argparse
 import ctypes
 import math
@@ -11,7 +13,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 import torch
-from b12x.attention.mla.reference import pack_mla_kv_cache_reference
+from sparkinfer.attention._shared.mla.reference import (
+    pack_mla_kv_cache_reference,
+)
 from flashinfer.mla._sparse_mla_sm120 import (
     sparse_mla_sm120_decode_dsv3_2,
 )

@@ -1,16 +1,10 @@
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.05-py3
 FROM ${BASE_IMAGE}
 
-ARG GLMRT_ROLE=dev
-ARG CUDA_ARCH=120
-ARG TARGET_PLATFORM=linux/amd64
-
-ENV GLMRT_ROLE=${GLMRT_ROLE}
-ENV GLMRT_CUDA_ARCH=${CUDA_ARCH}
-ENV GLMRT_TARGET_PLATFORM=${TARGET_PLATFORM}
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HUB_OFFLINE=1
 ENV TRANSFORMERS_OFFLINE=1
+ENV PYTHONDONTWRITEBYTECODE=1
 ENV CARGO_HOME=/opt/cargo
 ENV RUSTUP_HOME=/opt/rustup
 ENV PATH=/opt/cargo/bin:${PATH}
@@ -46,11 +40,46 @@ RUN python3 -m pip install --no-cache-dir uv && \
       "transformers==5.13.0" \
       "rich==15.0.0" && \
     uv pip install --system --break-system-packages --no-cache --no-deps \
-      "b12x==0.30.2" \
       "flashinfer-python==0.6.14"
 
+# Source/revision arguments deliberately follow the reusable toolchain and
+# Python dependency layers so a new pinned fork commit does not reinstall them.
+ARG GLMRT_ROLE=dev
+ARG CUDA_ARCH=120
+ARG TARGET_PLATFORM=linux/amd64
+ARG GLMRT_SPARKINFER_COMMIT=unknown
+
+ENV GLMRT_ROLE=${GLMRT_ROLE}
+ENV GLMRT_CUDA_ARCH=${CUDA_ARCH}
+ENV GLMRT_TARGET_PLATFORM=${TARGET_PLATFORM}
+ENV GLMRT_SPARKINFER_COMMIT=${GLMRT_SPARKINFER_COMMIT}
+
+LABEL io.glmrt.sparkinfer.revision=${GLMRT_SPARKINFER_COMMIT}
+
+COPY scripts/verify-sparkinfer-source.py /opt/glmrt/scripts/verify-sparkinfer-source.py
+COPY third_party/sparkinfer.lock.json /opt/glmrt/third_party/sparkinfer.lock.json
+COPY third_party/sparkinfer /opt/glmrt/third_party/sparkinfer
+
+RUN python3 /opt/glmrt/scripts/verify-sparkinfer-source.py \
+      --source /opt/glmrt/third_party/sparkinfer \
+      --lock /opt/glmrt/third_party/sparkinfer.lock.json && \
+    locked_revision="$(python3 /opt/glmrt/scripts/verify-sparkinfer-source.py \
+      --source /opt/glmrt/third_party/sparkinfer \
+      --lock /opt/glmrt/third_party/sparkinfer.lock.json \
+      --print-revision)" && \
+    { [ "${GLMRT_SPARKINFER_COMMIT}" = unknown ] || \
+      [ "${GLMRT_SPARKINFER_COMMIT}" = "$locked_revision" ]; } && \
+    uv pip install --system --break-system-packages --no-cache --no-deps \
+      --editable /opt/glmrt/third_party/sparkinfer && \
+    uv pip check && \
+    python3 -c 'import importlib.metadata, pathlib, sparkinfer; source = pathlib.Path("/opt/glmrt/third_party/sparkinfer").resolve(); module = pathlib.Path(sparkinfer.__file__).resolve(); assert module.is_relative_to(source), (module, source); print(importlib.metadata.version("sparkinfer"), module)' && \
+    python3 /opt/glmrt/scripts/verify-sparkinfer-source.py \
+      --source /opt/glmrt/third_party/sparkinfer \
+      --lock /opt/glmrt/third_party/sparkinfer.lock.json \
+      --require-no-python-cache
+
 WORKDIR /workspace/glmrt
-ENV PYTHONPATH=/workspace/glmrt/python/reference/glmrt_reference:/workspace/glmrt/python/reference
+ENV PYTHONPATH=/workspace/glmrt/third_party/sparkinfer:/opt/glmrt/third_party/sparkinfer:/workspace/glmrt/python/reference/glmrt_reference:/workspace/glmrt/python/reference
 COPY docker/entrypoint.sh /usr/local/bin/glmrt-entrypoint
 RUN chmod +x /usr/local/bin/glmrt-entrypoint
 

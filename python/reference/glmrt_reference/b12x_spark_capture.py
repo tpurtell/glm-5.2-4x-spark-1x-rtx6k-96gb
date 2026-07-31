@@ -43,10 +43,10 @@ def _log_route_timing(stage: str, **fields: Any) -> None:
 
 
 def capture_dense_gemm(ctx: dict[str, Any], **kwargs: Any) -> None:
-    """Launch a graph-capturable synthetic NVFP4 b12x dense GEMM.
+    """Launch a graph-capturable synthetic SparkInfer NVFP4 dense GEMM.
 
     The Spark routed expert path uses source-native ModelOpt NVFP4 weights and
-    BF16 activations. This adapter deliberately validates b12x dense_gemm on a
+    BF16 activations. This adapter deliberately validates SparkInfer dense_gemm on a
     synthetic FP4 x FP4 contract first; production routed replacement still
     needs a resident packing bridge for checkpoint weights and route scatter.
     """
@@ -60,7 +60,7 @@ def capture_dense_gemm(ctx: dict[str, Any], **kwargs: Any) -> None:
         return
 
     import torch
-    from b12x.gemm.dense import dense_gemm
+    from sparkinfer._lib.dense_gemm import dense_gemm
 
     rows = int(kwargs["rows"])
     n = int(kwargs["n"])
@@ -69,12 +69,12 @@ def capture_dense_gemm(ctx: dict[str, Any], **kwargs: Any) -> None:
     validate = bool(kwargs.get("validate", True))
     if rows <= 0 or rows > _MAX_B12X_SPARK_ROWS:
         raise ValueError(
-            f"b12x Spark dense GEMM rows must be in [1, {_MAX_B12X_SPARK_ROWS}], got {rows}"
+            f"SparkInfer dense GEMM rows must be in [1, {_MAX_B12X_SPARK_ROWS}], got {rows}"
         )
     if n <= 0 or k <= 0:
-        raise ValueError(f"b12x Spark dense GEMM requires positive n and k, got n={n}, k={k}")
+        raise ValueError(f"SparkInfer dense GEMM requires positive n and k, got n={n}, k={k}")
     if k % 16 != 0:
-        raise ValueError(f"b12x Spark dense GEMM requires k divisible by 16, got {k}")
+        raise ValueError(f"SparkInfer dense GEMM requires k divisible by 16, got {k}")
 
     output_buffer = ctx["buffers"].get("output")
     device_id = int(output_buffer["device_id"]) if output_buffer is not None else 0
@@ -120,16 +120,16 @@ def capture_single_expert_mlp(ctx: dict[str, Any], **kwargs: Any) -> None:
     validate = bool(kwargs.get("validate", True))
     if rows <= 0 or rows > _MAX_B12X_SPARK_ROWS:
         raise ValueError(
-            f"b12x Spark single-expert MLP rows must be in [1, {_MAX_B12X_SPARK_ROWS}], got {rows}"
+            f"SparkInfer single-expert MLP rows must be in [1, {_MAX_B12X_SPARK_ROWS}], got {rows}"
         )
     if hidden <= 0 or intermediate <= 0 or output_dim <= 0:
         raise ValueError(
-            "b12x Spark single-expert MLP requires positive dimensions, "
+            "SparkInfer single-expert MLP requires positive dimensions, "
             f"got hidden={hidden}, intermediate={intermediate}, output={output_dim}"
         )
     if hidden % 16 != 0 or intermediate % 16 != 0:
         raise ValueError(
-            "b12x Spark single-expert MLP requires hidden and intermediate "
+            "SparkInfer single-expert MLP requires hidden and intermediate "
             f"divisible by 16, got hidden={hidden}, intermediate={intermediate}"
         )
 
@@ -179,8 +179,8 @@ def _state_for(
         return cached
 
     import torch
-    from b12x.cute.fp4 import quantize_grouped_nvfp4_torch
-    from b12x.gemm.dense import dense_gemm
+    from sparkinfer._lib.intrinsics import quantize_grouped_nvfp4_torch
+    from sparkinfer._lib.dense_gemm import dense_gemm
 
     with torch.cuda.device(device_id), torch.inference_mode():
         generator = torch.Generator(device=f"cuda:{device_id}")
@@ -244,7 +244,7 @@ def _state_for(
             )
             candidate = output[:, :, 0].float()
             if not torch.isfinite(candidate).all().item() or not torch.isfinite(reference).all().item():
-                raise RuntimeError("b12x Spark dense GEMM validation produced non-finite output")
+                raise RuntimeError("SparkInfer dense GEMM validation produced non-finite output")
             difference = (candidate - reference).abs()
             tolerance = _VALIDATION_ATOL + _VALIDATION_RTOL * reference.abs()
             if not (difference <= tolerance).all().item():
@@ -258,7 +258,7 @@ def _state_for(
                     else 1.0
                 )
                 raise RuntimeError(
-                    "b12x Spark dense GEMM validation failed: "
+                    "SparkInfer dense GEMM validation failed: "
                     f"max_abs={max_abs:.6f}, max_rel={max_rel:.6f}, "
                     f"cosine={cosine:.6f}, rtol={_VALIDATION_RTOL:.1e}, "
                     f"atol={_VALIDATION_ATOL:.1e}, rows={rows}, n={n}, k={k}"
@@ -294,7 +294,7 @@ def _mlp_state_for(
 
     import torch
     import torch.nn.functional as F
-    from b12x.cute.fp4 import quantize_grouped_nvfp4_torch
+    from sparkinfer._lib.intrinsics import quantize_grouped_nvfp4_torch
 
     with torch.cuda.device(device_id):
         generator = torch.Generator(device=f"cuda:{device_id}")
@@ -302,7 +302,7 @@ def _mlp_state_for(
         if input_source is not None:
             if input_source.shape != (1, rows, hidden) or input_source.dtype != torch.bfloat16:
                 raise ValueError(
-                    "b12x Spark single-expert MLP input buffer must be BF16 "
+                    "SparkInfer single-expert MLP input buffer must be BF16 "
                     f"with shape {(1, rows, hidden)}, got {input_source.dtype} {tuple(input_source.shape)}"
                 )
             hidden_source = input_source
@@ -318,7 +318,7 @@ def _mlp_state_for(
             ).contiguous()
         if hidden_source.stride()[-1] != 1:
             raise ValueError(
-                "b12x Spark single-expert MLP input tensor must have contiguous hidden dimension, "
+                "SparkInfer single-expert MLP input tensor must have contiguous hidden dimension, "
                 f"got strides {hidden_source.stride()}"
             )
         fc1_source = (
@@ -436,7 +436,7 @@ def _mlp_state_for(
             _assert_close(
                 candidate,
                 reference,
-                "b12x Spark single-expert MLP validation failed",
+                "SparkInfer single-expert MLP validation failed",
                 atol=_MLP_VALIDATION_ATOL,
                 rows=rows,
                 n=output_dim,
@@ -448,8 +448,11 @@ def _mlp_state_for(
 
 
 def _launch_single_expert_mlp(state: dict[str, Any], output: Any) -> None:
-    from b12x.cute.fp4 import quantize_grouped_nvfp4_torch, silu_mul_quantize_grouped_nvfp4_torch
-    from b12x.gemm.dense import dense_gemm
+    from sparkinfer._lib.intrinsics import (
+        quantize_grouped_nvfp4_torch,
+        silu_mul_quantize_grouped_nvfp4_torch,
+    )
+    from sparkinfer._lib.dense_gemm import dense_gemm
 
     if state["input_source"] is not None:
         input_packed, input_scale = quantize_grouped_nvfp4_torch(
@@ -662,7 +665,10 @@ def _grouped_scale_view_storage(scale: Any, rows: int, cols: int) -> Any:
 
 def _modelopt_scale_bytes_to_grouped_scale_view(modelopt_scale: Any, rows: int, cols: int) -> Any:
     import torch
-    from b12x.cute.fp4 import as_grouped_scale_view, swizzle_block_scale
+    from sparkinfer._lib.intrinsics import (
+        as_grouped_scale_view,
+        swizzle_block_scale,
+    )
 
     if modelopt_scale.dtype != torch.uint8:
         raise ValueError(f"ModelOpt NVFP4 scales must be uint8, got {modelopt_scale.dtype}")

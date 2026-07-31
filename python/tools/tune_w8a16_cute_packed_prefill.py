@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark B12x-style register-dequantized CuTe W8A16 prefill GEMM."""
+"""Benchmark SparkInfer-style register-dequantized CuTe W8A16 prefill GEMM."""
 
 from __future__ import annotations
+
+import _pinned_sparkinfer  # noqa: F401
 
 import argparse
 import ctypes
@@ -19,7 +21,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.cute.runtime import from_dlpack
 
-from b12x.cute.fp4 import (
+from sparkinfer._lib.intrinsics import (
     bfloat2_mul,
     broadcast_f32_to_bfloat2,
     cp_async4_shared_global,
@@ -32,7 +34,7 @@ from b12x.cute.fp4 import (
     st_shared_v4_f32,
     st_shared_v4_u32,
 )
-from b12x.moe.fused.w4a16.kernel import W4A16GemmKernel
+from sparkinfer.moe._shared.kernels.w4a16.kernel import W4A16GemmKernel
 
 from tune_w8a16_projection import (
     CATALOG_PATH,
@@ -162,7 +164,7 @@ def convert_s8x8_to_bf16_fragments(
 
 
 class W8A16PackedGemmKernel(W4A16GemmKernel):
-    """Dense W8 specialization reusing B12x's persistent warp-MMA skeleton."""
+    """Dense W8 specialization reusing SparkInfer's persistent warp-MMA skeleton."""
 
     def __init__(
         self,
@@ -226,6 +228,411 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
         self.shared_int4 = self.sh_a_off + self.stages * self.a_sh_stage
         self.shared_words = self.shared_int4 * 4
         self.blocks_per_sm = 2 if self.shared_words * 4 <= 50_688 else 1
+
+    @cute.jit
+    def __call__(
+        self,
+        a_bf16_flat: cute.Tensor,
+        b_i32_flat: cute.Tensor,
+        c_bf16_flat: cute.Tensor,
+        scales_f32_flat: cute.Tensor,
+        global_scale: cute.Tensor,
+        packed_route_indices: cute.Tensor,
+        block_expert_ids: cute.Tensor,
+        packed_route_count: cute.Tensor,
+        topk_weights_flat: cute.Tensor,
+        c_tmp_f32_flat: cute.Tensor,
+        locks_i32_flat: cute.Tensor,
+        active_m: Int32,
+        grid_x: Int32,
+        stream: cuda.CUstream,
+    ):
+        # SparkInfer's W4A16 base kernel now accepts a second activation
+        # pointer for rotated/full-route variants. This dense W8 path has one
+        # activation allocation, so retain its stable AOT ABI and bind that
+        # allocation to both internal inputs.
+        self.kernel(
+            a_bf16_flat,
+            a_bf16_flat,
+            b_i32_flat,
+            c_bf16_flat,
+            scales_f32_flat,
+            global_scale,
+            packed_route_indices,
+            block_expert_ids,
+            packed_route_count,
+            topk_weights_flat,
+            c_tmp_f32_flat,
+            locks_i32_flat,
+            active_m,
+        ).launch(
+            grid=(grid_x, 1, 1),
+            block=[self.cta_threads, 1, 1],
+            min_blocks_per_mp=self.blocks_per_sm,
+            stream=stream,
+        )
+
+    @cute.jit
+    def _mma_accumulate_large_m(
+        self,
+        acc: cute.Tensor,
+        a_regs: cute.Tensor,
+        mb: cutlass.Constexpr[int],
+        jj: cutlass.Constexpr[int],
+        b_frag: cute.Tensor,
+    ):
+        # SparkInfer's W4A16 accumulator was split into scalar fragments to
+        # control LLVM register promotion. The packed-W8 kernels deliberately
+        # retain their original tensor accumulator, so keep their matching MMA
+        # adapter local instead of inheriting W4A16's representation.
+        d0, d1, d2, d3 = self._mma_m16n8k16_f32(
+            acc[mb, jj, 0, 0],
+            acc[mb, jj, 0, 1],
+            acc[mb, jj, 0, 2],
+            acc[mb, jj, 0, 3],
+            a_regs[mb, 0],
+            a_regs[mb, 1],
+            a_regs[mb, 2],
+            a_regs[mb, 3],
+            b_frag[0, 0],
+            b_frag[0, 1],
+        )
+        acc[mb, jj, 0, 0] = d0
+        acc[mb, jj, 0, 1] = d1
+        acc[mb, jj, 0, 2] = d2
+        acc[mb, jj, 0, 3] = d3
+        d0, d1, d2, d3 = self._mma_m16n8k16_f32(
+            acc[mb, jj, 1, 0],
+            acc[mb, jj, 1, 1],
+            acc[mb, jj, 1, 2],
+            acc[mb, jj, 1, 3],
+            a_regs[mb, 0],
+            a_regs[mb, 1],
+            a_regs[mb, 2],
+            a_regs[mb, 3],
+            b_frag[1, 0],
+            b_frag[1, 1],
+        )
+        acc[mb, jj, 1, 0] = d0
+        acc[mb, jj, 1, 1] = d1
+        acc[mb, jj, 1, 2] = d2
+        acc[mb, jj, 1, 3] = d3
+
+    @cute.jit
+    def _finish_tile(
+        self,
+        acc: cute.Tensor,
+        c_bf16_flat: cute.Tensor,
+        c_tmp_f32_flat: cute.Tensor,
+        locks_i32_flat: cute.Tensor,
+        smem_base: Int32,
+        tid: Int32,
+        output_n_tile: Int32,
+        block_valid_rows: Int32,
+        global_scale_f32: cutlass.Float32,
+        reduce_slice_count: Int32,
+        reduce_slice_idx: Int32,
+        lock_slot: Int32,
+        uses_m_block_8: cutlass.Constexpr[bool],
+    ):
+        if cutlass.const_expr(uses_m_block_8):
+            self._fold_cta_partials_m8(acc, smem_base, tid)
+        else:
+            self._fold_cta_partials_large_m(acc, smem_base, tid)
+
+        if reduce_slice_count > Int32(1):
+            self._wait_for_reduction_turn(
+                locks_i32_flat, lock_slot, reduce_slice_idx, tid
+            )
+            self._combine_splitk_accumulators(
+                acc,
+                c_tmp_f32_flat,
+                block_valid_rows,
+                lock_slot,
+                reduce_slice_idx,
+                reduce_slice_count,
+                tid,
+                uses_m_block_8,
+            )
+            self._publish_reduction_turn(
+                locks_i32_flat,
+                lock_slot,
+                reduce_slice_idx == reduce_slice_count - Int32(1),
+                tid,
+            )
+
+        if reduce_slice_idx == reduce_slice_count - Int32(1):
+            if cutlass.const_expr(uses_m_block_8):
+                self._store_tile_m8(
+                    acc,
+                    c_bf16_flat,
+                    smem_base,
+                    tid,
+                    output_n_tile,
+                    block_valid_rows,
+                    global_scale_f32,
+                )
+            else:
+                self._store_tile_large_m(
+                    acc,
+                    c_bf16_flat,
+                    smem_base,
+                    tid,
+                    output_n_tile,
+                    block_valid_rows,
+                    global_scale_f32,
+                )
+
+    @cute.jit
+    def _fold_cta_partials_large_m(
+        self, acc: cute.Tensor, smem_base: Int32, tid: Int32
+    ):
+        red_off = self.cta_threads // self.b_sh_stride_threads // 2
+        if cutlass.const_expr(red_off >= 1):
+            red_idx, red_sh_stride, red_sh_delta, red_sh_rd = self._reduction_offsets(
+                tid
+            )
+
+            for mb in cutlass.range_constexpr(self.cta_m_blocks):
+                if cutlass.const_expr(red_off == 2):
+                    if Int32(2) <= red_idx and red_idx < Int32(4):
+                        for flat_j in cutlass.range_constexpr(8):
+                            jj = flat_j // 2
+                            half = flat_j % 2
+                            red_sh_wr = red_sh_delta * Int32(flat_j) + (
+                                red_sh_rd - red_sh_stride * Int32(2)
+                            )
+                            st_shared_v4_f32(
+                                self._int4_addr(
+                                    smem_base, Int32(self.sh_red_off) + red_sh_wr
+                                ),
+                                acc[mb, jj, half, 0],
+                                acc[mb, jj, half, 1],
+                                acc[mb, jj, half, 2],
+                                acc[mb, jj, half, 3],
+                            )
+                    cute.arch.sync_threads()
+
+                if Int32(1) <= red_idx and red_idx < Int32(2):
+                    for flat_j in cutlass.range_constexpr(8):
+                        jj = flat_j // 2
+                        half = flat_j % 2
+                        red_sh_wr = red_sh_delta * Int32(flat_j) + (
+                            red_sh_rd - red_sh_stride
+                        )
+                        if cutlass.const_expr(red_off > 1):
+                            rd_addr = self._int4_addr(
+                                smem_base,
+                                Int32(self.sh_red_off)
+                                + red_sh_delta * Int32(flat_j)
+                                + red_sh_rd,
+                            )
+                            wr_addr = self._int4_addr(
+                                smem_base,
+                                Int32(self.sh_red_off) + red_sh_wr,
+                            )
+                            r0, r1, r2, r3 = ld_shared_v4_f32(rd_addr)
+                            w0, w1, w2, w3 = ld_shared_v4_f32(wr_addr)
+                            acc[mb, jj, half, 0] = acc[mb, jj, half, 0] + r0 + w0
+                            acc[mb, jj, half, 1] = acc[mb, jj, half, 1] + r1 + w1
+                            acc[mb, jj, half, 2] = acc[mb, jj, half, 2] + r2 + w2
+                            acc[mb, jj, half, 3] = acc[mb, jj, half, 3] + r3 + w3
+                        st_shared_v4_f32(
+                            self._int4_addr(
+                                smem_base, Int32(self.sh_red_off) + red_sh_wr
+                            ),
+                            acc[mb, jj, half, 0],
+                            acc[mb, jj, half, 1],
+                            acc[mb, jj, half, 2],
+                            acc[mb, jj, half, 3],
+                        )
+                cute.arch.sync_threads()
+
+                if red_idx == Int32(0):
+                    for flat_j in cutlass.range_constexpr(8):
+                        jj = flat_j // 2
+                        half = flat_j % 2
+                        rd_addr = self._int4_addr(
+                            smem_base,
+                            Int32(self.sh_red_off)
+                            + red_sh_delta * Int32(flat_j)
+                            + red_sh_rd,
+                        )
+                        r0, r1, r2, r3 = ld_shared_v4_f32(rd_addr)
+                        acc[mb, jj, half, 0] = acc[mb, jj, half, 0] + r0
+                        acc[mb, jj, half, 1] = acc[mb, jj, half, 1] + r1
+                        acc[mb, jj, half, 2] = acc[mb, jj, half, 2] + r2
+                        acc[mb, jj, half, 3] = acc[mb, jj, half, 3] + r3
+                cute.arch.sync_threads()
+
+    @cute.jit
+    def _combine_splitk_accumulators(
+        self,
+        acc: cute.Tensor,
+        c_tmp_f32_flat: cute.Tensor,
+        block_valid_rows: Int32,
+        lock_slot: Int32,
+        reduce_slice_idx: Int32,
+        reduce_slice_count: Int32,
+        tid: Int32,
+        uses_m_block_8: cutlass.Constexpr[bool],
+    ):
+        active_threads = Int32(32 * self.tb_n_warps)
+        c_size_int4 = Int32((self.cta_m_blocks * 16 * self.cta_n_blocks * 16) // 4)
+        c_cur_offset = lock_slot * c_size_int4
+        if cutlass.const_expr(uses_m_block_8):
+            if tid < active_threads:
+                for jj in cutlass.range_constexpr(4):
+                    k = jj * 2
+                    acc[jj, 0], acc[jj, 1], acc[jj, 2], acc[jj, 3] = (
+                        self._merge_splitk_slot(
+                            c_tmp_f32_flat,
+                            c_cur_offset,
+                            active_threads,
+                            Int32(k),
+                            tid,
+                            reduce_slice_idx,
+                            reduce_slice_count,
+                            acc[jj, 0],
+                            acc[jj, 1],
+                            acc[jj, 2],
+                            acc[jj, 3],
+                        )
+                    )
+        else:
+            lane_row = (tid & Int32(31)) // Int32(4)
+            if tid < active_threads:
+                for k in cutlass.range_constexpr(self.cta_m_blocks * 8):
+                    mb = k // 8
+                    flat_j = k % 8
+                    jj = flat_j // 2
+                    half = flat_j % 2
+                    row_valid = Int32(mb * 16) + lane_row < block_valid_rows
+                    if row_valid:
+                        (
+                            acc[mb, jj, half, 0],
+                            acc[mb, jj, half, 1],
+                            acc[mb, jj, half, 2],
+                            acc[mb, jj, half, 3],
+                        ) = self._merge_splitk_slot(
+                            c_tmp_f32_flat,
+                            c_cur_offset,
+                            active_threads,
+                            Int32(k),
+                            tid,
+                            reduce_slice_idx,
+                            reduce_slice_count,
+                            acc[mb, jj, half, 0],
+                            acc[mb, jj, half, 1],
+                            acc[mb, jj, half, 2],
+                            acc[mb, jj, half, 3],
+                        )
+
+    @cute.jit
+    def _store_tile_large_m(
+        self,
+        acc: cute.Tensor,
+        c_bf16_flat: cute.Tensor,
+        smem_base: Int32,
+        tid: Int32,
+        output_n_tile: Int32,
+        block_valid_rows: Int32,
+        global_scale_f32: cutlass.Float32,
+    ):
+        if cutlass.const_expr(self.has_n_tile_tail):
+            (
+                c_gl_stride,
+                c_gl_stride_covered,
+                c_sh_stride,
+                c_gl_wr_delta,
+                c_sh_rd_delta,
+                c_gl_wr,
+                c_sh_rd,
+            ) = self._output_store_cursor_tail(tid, output_n_tile)
+        else:
+            (
+                c_gl_stride,
+                c_sh_stride,
+                c_gl_wr_delta,
+                c_sh_rd_delta,
+                c_gl_wr,
+                c_sh_rd,
+            ) = self._output_store_cursor(tid, output_n_tile)
+            c_gl_stride_covered = c_gl_stride
+        c_sh_wr = (
+            Int32(4) * c_sh_stride * ((tid & Int32(31)) // Int32(4))
+            + (tid & Int32(31)) % Int32(4)
+            + Int32(32) * (tid // Int32(32))
+        )
+
+        if tid // Int32(32) < Int32(self.tb_n_warps):
+            write_scale = cutlass.Float32(1.0)
+            if cutlass.const_expr(not self.mul_topk_weights):
+                write_scale = global_scale_f32
+            for mb in cutlass.range_constexpr(self.cta_m_blocks):
+                for jj in cutlass.range_constexpr(4):
+                    wr = c_sh_wr + Int32(8 * jj)
+                    self._write_bf16x2_shared(
+                        smem_base,
+                        wr,
+                        acc[mb, jj, 0, 0],
+                        acc[mb, jj, 0, 1],
+                        write_scale,
+                    )
+                    self._write_bf16x2_shared(
+                        smem_base,
+                        wr + (Int32(4) * c_sh_stride) * Int32(8),
+                        acc[mb, jj, 0, 2],
+                        acc[mb, jj, 0, 3],
+                        write_scale,
+                    )
+                    self._write_bf16x2_shared(
+                        smem_base,
+                        wr + Int32(4),
+                        acc[mb, jj, 1, 0],
+                        acc[mb, jj, 1, 1],
+                        write_scale,
+                    )
+                    self._write_bf16x2_shared(
+                        smem_base,
+                        wr + (Int32(4) * c_sh_stride) * Int32(8) + Int32(4),
+                        acc[mb, jj, 1, 2],
+                        acc[mb, jj, 1, 3],
+                        write_scale,
+                    )
+                c_sh_wr += Int32(16 * (4 * (2 * self.cta_n_blocks + 1)))
+        cute.arch.sync_threads()
+
+        store_iters = (
+            16 * self.cta_m_blocks
+            + self.cta_threads // (2 * self.cta_n_blocks)
+            - 1
+        ) // (self.cta_threads // (2 * self.cta_n_blocks))
+        if cutlass.const_expr(self.has_n_tile_tail):
+            self._drain_output_smem_tail(
+                c_bf16_flat,
+                smem_base,
+                c_gl_stride,
+                c_gl_stride_covered,
+                c_gl_wr,
+                c_gl_wr_delta,
+                c_sh_rd,
+                c_sh_rd_delta,
+                block_valid_rows,
+                store_iters,
+            )
+        else:
+            self._drain_output_smem(
+                c_bf16_flat,
+                smem_base,
+                c_gl_stride,
+                c_gl_wr,
+                c_gl_wr_delta,
+                c_sh_rd,
+                c_sh_rd_delta,
+                block_valid_rows,
+                store_iters,
+            )
 
     @cute.jit
     def _prefetch_initial_tiles(
@@ -330,6 +737,60 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
             cute.arch.cp_async_commit_group()
         cute.arch.cp_async_wait_group(self.stages - 2)
         cute.arch.sync_threads()
+
+    @cute.jit
+    def _prefetch_pipeline_step(
+        self,
+        a_bf16_flat: cute.Tensor,
+        b_i32_flat: cute.Tensor,
+        scales_f32_flat: cute.Tensor,
+        smem_base: Int32,
+        tid: Int32,
+        pipe: cutlass.Constexpr[int],
+        kk: cutlass.Constexpr[int],
+        tile_idx: Int32,
+        k_tiles: Int32,
+        reduce_k_tile: Int32,
+        block_valid_rows: Int32,
+        a_gl_stride: Int32,
+        b_gl_stride: Int32,
+        s_gl_stride: Int32,
+        scales_expert_off: Int32,
+        b_gl_rd_base: Int32,
+        a_gl_rd_row: Int32,
+        a_gl_rd_col0: Int32,
+        a_sh_wr: Int32,
+        a_rows_per_iter: Int32,
+        output_n_tile: Int32,
+        expert_idx: Int32,
+    ):
+        # W8 has one activation view and its own staging implementation. Keep
+        # this override so changes to W4A16's optional alternate-activation
+        # pipeline do not leak into the stable packed-W8 kernel.
+        if cutlass.const_expr(kk == self.b_sh_wr_iters - 2):
+            self._prefetch_lookahead_tile(
+                a_bf16_flat,
+                b_i32_flat,
+                scales_f32_flat,
+                smem_base,
+                tid,
+                pipe,
+                tile_idx,
+                k_tiles,
+                reduce_k_tile,
+                block_valid_rows,
+                a_gl_stride,
+                b_gl_stride,
+                s_gl_stride,
+                scales_expert_off,
+                b_gl_rd_base,
+                a_gl_rd_row,
+                a_gl_rd_col0,
+                a_sh_wr,
+                a_rows_per_iter,
+                output_n_tile,
+                expert_idx,
+            )
 
     @cute.jit
     def _stage_k_tile_async(
@@ -745,6 +1206,7 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
     def _run_tile_large_m(
         self,
         a_bf16_flat: cute.Tensor,
+        _a_alt_bf16_flat: cute.Tensor,
         b_i32_flat: cute.Tensor,
         c_bf16_flat: cute.Tensor,
         scales_f32_flat: cute.Tensor,
@@ -2299,7 +2761,7 @@ class W8A16WarpSpecializedFragmentKernel(
 
 
 def repack_w8_for_mma(weight_k: torch.Tensor) -> torch.Tensor:
-    """Reorder K-major signed W8 into B12x's lane/fragment tile order."""
+    """Reorder K-major signed W8 into SparkInfer's lane/fragment tile order."""
     size_k, size_n = weight_k.shape
     if size_k % PACKED_TILE_K or size_n % PACKED_TILE_N:
         raise ValueError("packed W8 requires K/N multiples of 16/64")

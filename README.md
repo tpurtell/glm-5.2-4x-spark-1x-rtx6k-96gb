@@ -168,3 +168,11 @@ JSON-only format.
 
 Agents customizing the engine should start with [`DEVELOPER.md`](DEVELOPER.md).
 GLMRT is released under the [MIT License](LICENSE).
+
+## Performance by Profile
+
+| Profile | Weighted decode | Verify throughput | Acceptance | Fresh 8K prefill |
+|---|---:|---:|---:|---:|
+| Balanced | 28.34 tok/s | 30.46 tok/s | 78.2% | 1,725 tok/s |
+| Long | 27.44 tok/s | 29.57 tok/s | 75.9% | 1,712 tok/s |
+| Accurate | 23.21 tok/s | 25.36 tok/s | 85.0% | 966 tok/s |

@@ -110,12 +110,15 @@ stage_repo() {
   echo "== staging repo on $host:$remote_dir =="
   ssh -o BatchMode=yes "$host" "mkdir -p '$remote_dir'"
   rsync -az --delete \
-    --exclude '.git/' \
+    --exclude '.git' \
     --exclude '.venv/' \
     --exclude '.glmrt-cache/' \
+    --exclude '.mypy_cache/' \
     --exclude '.pytest_cache/' \
     --exclude '.ruff_cache/' \
     --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '*.pyo' \
     --exclude 'rust/target/' \
     --exclude 'native/build/' \
     --exclude 'native/build-cuda/' \
@@ -125,6 +128,22 @@ stage_repo() {
     --exclude 'reports/phase0_artifacts/benchmarks/' \
     --exclude 'reports/phase0_artifacts/logs/' \
     "$repo_root"/ "$host:$remote_dir"/
+  rsync -az --delete --delete-excluded \
+    --exclude '.git' \
+    --exclude '.venv/' \
+    --exclude '.mypy_cache/' \
+    --exclude '.pytest_cache/' \
+    --exclude '.ruff_cache/' \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '*.pyo' \
+    "$repo_root/third_party/sparkinfer/" \
+    "$host:$remote_dir/third_party/sparkinfer/"
+  ssh -o BatchMode=yes "$host" \
+    "python3 '$remote_dir/scripts/verify-sparkinfer-source.py' \
+      --source '$remote_dir/third_party/sparkinfer' \
+      --lock '$remote_dir/third_party/sparkinfer.lock.json' \
+      --require-no-python-cache"
 }
 
 image_exists() {

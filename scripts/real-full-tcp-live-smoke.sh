@@ -152,6 +152,31 @@ PY
   fi
 }
 
+configure_pinned_sparkinfer() {
+  local configured_python="${GLMRT_PYTHON:-${PYO3_PYTHON:-}}"
+  if [ -z "$configured_python" ] && [ -x "$repo_root/.venv/bin/python" ]; then
+    configured_python="$repo_root/.venv/bin/python"
+  fi
+  if [ -z "$configured_python" ]; then
+    configured_python="$(command -v python3 || true)"
+  fi
+  if [ -z "$configured_python" ] || [ ! -x "$configured_python" ]; then
+    echo "Python interpreter not found; set GLMRT_PYTHON" >&2
+    exit 2
+  fi
+  configured_python="$(realpath -s "$configured_python")"
+  export GLMRT_PYTHON="$configured_python"
+  export PYO3_PYTHON="${PYO3_PYTHON:-$configured_python}"
+
+  local sparkinfer_source="$repo_root/third_party/sparkinfer"
+  local sparkinfer_lock="$repo_root/third_party/sparkinfer.lock.json"
+  export PYTHONPATH="$sparkinfer_source${PYTHONPATH:+:$PYTHONPATH}"
+  "$configured_python" "$repo_root/scripts/verify-sparkinfer-source.py" \
+    --source "$sparkinfer_source" \
+    --lock "$sparkinfer_lock" \
+    --assert-import-source
+}
+
 need curl
 need jq
 need timeout
@@ -220,6 +245,8 @@ if [ "$dry_run" = "1" ]; then
   printf 'GLMRT_B12X=%s\n' "${GLMRT_B12X:-}"
   exit 0
 fi
+
+configure_pinned_sparkinfer
 
 mkdir -p "$log_dir" "$artifact_dir"
 
@@ -303,21 +330,37 @@ wait_for_health() {
   return 1
 }
 
-warmup_expert_id_for_owner() {
+warmup_expert_ids_for_owner() {
   local owner="$1"
-  local expert_id
-  expert_id="$(
-    jq -r --arg owner "$owner" --argjson layer "$warmup_layer_id" '
-      .assignments[]
-      | select(.owner == $owner and .layer_id == $layer and (.tensor_name | endswith(".gate_proj.weight")))
-      | .expert_id
-    ' "$loadplan" | sort -n | head -n1
-  )"
-  if [ -z "$expert_id" ] || [ "$expert_id" = "null" ]; then
-    echo "no owned layer ${warmup_layer_id} gate projection expert found for ${owner} in ${loadplan}" >&2
+  local count="$2"
+  local expert_ids
+  if ! expert_ids="$(
+    jq -er \
+      --arg owner "$owner" \
+      --argjson layer "$warmup_layer_id" \
+      --argjson count "$count" '
+      [
+        .assignments[]
+        | select(
+            .owner == $owner
+            and .layer_id == $layer
+            and .expert_id != null
+            and (.tensor_name | endswith(".gate_proj.weight"))
+          )
+        | .expert_id
+      ]
+      | unique
+      | sort
+      | select(length >= $count)
+      | .[:$count]
+      | map(tostring)
+      | join(",")
+    ' "$loadplan"
+  )"; then
+    echo "fewer than ${count} owned layer ${warmup_layer_id} gate projection experts found for ${owner} in ${loadplan}" >&2
     exit 2
   fi
-  echo "$expert_id"
+  echo "$expert_ids"
 }
 
 warmup_protocol_v2_experts() {
@@ -326,23 +369,31 @@ warmup_protocol_v2_experts() {
     return
   fi
 
-  echo "== warming Spark experts with binary ProtocolV2 precompile frames transport=${coordinator_transport} ==" >&2
+  local wire_contract="bf16-in/bf16-out"
+  local warmup_routes_per_row=1
+  local -a wire_args=()
+
+  echo "== warming Spark experts with binary ProtocolV2 precompile frames transport=${coordinator_transport} wire=${wire_contract} ==" >&2
   IFS=',' read -r -a entries <<< "$expert_hosts"
   for entry in "${entries[@]}"; do
     local owner
     local addr_part
     local expert_id
+    local expert_ids
     local warmup_log
     owner="$(target_owner "$entry")"
     addr_part="$(target_addr "$entry")"
     if [[ "$addr_part" != *:* ]]; then
       addr_part="${addr_part}:${expert_port}"
     fi
-    expert_id="$(warmup_expert_id_for_owner "$owner")"
+    # Distinct owner-valid IDs exercise the production top-k metadata shape
+    # while remaining valid for both role-filtered and TP-sharded experts.
+    expert_ids="$(warmup_expert_ids_for_owner "$owner" "$warmup_routes_per_row")"
+    expert_id="${expert_ids%%,*}"
     warmup_log="${artifact_dir}/${log_prefix}-warmup-${owner}.log"
-    echo "protocol_v2_warmup owner=${owner} addr=${addr_part} layer_id=${warmup_layer_id} expert_id=${expert_id} warmup_iterations=${warmup_iterations} warmup_timeout_ms=${warmup_timeout_ms} measured_timeout_ms=${warmup_measured_timeout_ms}" >&2
+    echo "protocol_v2_warmup owner=${owner} addr=${addr_part} layer_id=${warmup_layer_id} expert_id=${expert_id} expert_ids=${expert_ids} routes_per_row=${warmup_routes_per_row} warmup_iterations=${warmup_iterations} warmup_timeout_ms=${warmup_timeout_ms} measured_timeout_ms=${warmup_measured_timeout_ms}" >&2
     if ! {
-      echo "protocol_v2_warmup owner=${owner} addr=${addr_part} layer_id=${warmup_layer_id} expert_id=${expert_id} warmup_iterations=${warmup_iterations} warmup_timeout_ms=${warmup_timeout_ms} measured_timeout_ms=${warmup_measured_timeout_ms}"
+      echo "protocol_v2_warmup owner=${owner} addr=${addr_part} layer_id=${warmup_layer_id} expert_id=${expert_id} expert_ids=${expert_ids} routes_per_row=${warmup_routes_per_row} warmup_iterations=${warmup_iterations} warmup_timeout_ms=${warmup_timeout_ms} measured_timeout_ms=${warmup_measured_timeout_ms}"
       "$bin" bench-protocol-v2-tcp \
         --addr "$addr_part" \
         --transport "$coordinator_transport" \
@@ -360,8 +411,11 @@ warmup_protocol_v2_experts() {
         --prefill-chain-rows "$warmup_prefill_chain_rows" \
         --layer-id "$warmup_layer_id" \
         --expert-id "$expert_id" \
+        --expert-ids "$expert_ids" \
+        --routes-per-row "$warmup_routes_per_row" \
         --expected-executor "$warmup_expected_executor" \
         --require-expected-executor \
+        "${wire_args[@]}" \
         --timeout-ms "$warmup_measured_timeout_ms"
     } >"$warmup_log" 2>&1; then
       cat "$warmup_log" >&2 || true

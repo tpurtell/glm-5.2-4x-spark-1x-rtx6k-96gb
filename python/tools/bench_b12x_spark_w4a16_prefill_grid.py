@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import _pinned_sparkinfer  # noqa: F401
+
 import argparse
 import json
 import random
@@ -68,7 +70,7 @@ def measure(operation, warmup: int, iterations: int, repeats: int) -> list[float
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep production-style B12X W4A16 route blocks, tiles, and "
+            "Sweep production-style SparkInfer W4A16 route blocks, tiles, and "
             "persistent grids."
         )
     )
@@ -85,11 +87,6 @@ def main() -> None:
         type=int,
         default=1,
         help="rotate graphs across independent weight sets to defeat hot-weight caching",
-    )
-    parser.add_argument(
-        "--weight-layout",
-        choices=("packed", "modelopt"),
-        default="packed",
     )
     parser.add_argument("--block-sizes", type=int, nargs="+", default=(16, 32))
     parser.add_argument("--grid-sizes", type=int, nargs="+", default=(48, 64, 80, 96))
@@ -109,14 +106,14 @@ def main() -> None:
         "--fused-topk-sum",
         action="store_true",
         help=(
-            "benchmark B12X's BF16 atomic top-k epilogue with route-packed "
+            "benchmark SparkInfer's BF16 atomic top-k epilogue with route-packed "
             "metadata (an unsupported diagnostic extension of the decode path)"
         ),
     )
     parser.add_argument(
         "--tc-prefill-tiles",
         action="store_true",
-        help="apply B12X's wider TC-decode FC2 tile selection without fused summation",
+        help="apply SparkInfer's wider TC-decode FC2 tile selection without fused summation",
     )
     parser.add_argument("--fc1-tile-n", type=int, default=0)
     parser.add_argument("--fc1-tile-k", type=int, default=0)
@@ -127,7 +124,7 @@ def main() -> None:
         type=int,
         choices=(2, 3, 4),
         default=4,
-        help="override B12X's compile-time async staging depth",
+        help="override SparkInfer's compile-time async staging depth",
     )
     parser.add_argument(
         "--target-blocks-per-sm",
@@ -171,17 +168,13 @@ def main() -> None:
         parser.error(
             "weight-experts must be between active-experts and " f"{EXPERTS}"
         )
-    if args.direct_topk_routes and args.rows > 4:
-        parser.error("direct-topk-routes requires rows <= 4")
-    if args.direct_topk_routes and args.weight_layout != "packed":
-        parser.error("direct-topk-routes requires packed weights")
+    if args.direct_topk_routes and args.rows > 6:
+        parser.error("direct-topk-routes requires rows <= 6")
     if args.direct_topk_routes and (args.fused_topk_sum or args.tc_prefill_tiles):
         parser.error(
             "direct-topk-routes benchmarks the production separate-route output"
         )
-    if args.decomposed and (
-        args.direct_topk_routes or args.weight_layout != "packed"
-    ):
+    if args.decomposed and args.direct_topk_routes:
         parser.error("--decomposed requires route-packed packed weights")
     if any(block not in (8, 16, 32, 48, 64) for block in args.block_sizes):
         parser.error("block sizes must be selected from 8, 16, 32, 48, 64")
@@ -221,12 +214,12 @@ def main() -> None:
         if args.active_experts > args.weight_experts:
             parser.error("route-counts-json activates an unallocated expert")
 
-    from b12x.moe.fused.w4a16.host import (
+    from sparkinfer.moe._shared.kernels.w4a16.host import (
         max_packed_route_slots,
         packed_gemm_scratch_elements,
     )
-    from b12x.moe.fused.w4a16 import kernel as w4a16_kernel
-    from b12x.moe.fused.w4a16.kernel import (
+    from sparkinfer.moe._shared.kernels.w4a16 import kernel as w4a16_kernel
+    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
         _cutlass_element_dtype,
         compile_w4a16_activation,
         compile_w4a16_fused_moe,
@@ -235,9 +228,8 @@ def main() -> None:
         cute,
         make_ptr,
     )
-    from b12x.moe.fused.w4a16.prepare import (
+    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
-        prepare_w4a16_modelopt_native_weights,
     )
 
     w4a16_kernel._STAGES = args.pipeline_stages
@@ -349,31 +341,18 @@ def main() -> None:
         global_scale = torch.ones(
             args.weight_experts, dtype=torch.float32, device=device
         )
-        if args.weight_layout == "packed":
-            prepared = prepare_w4a16_modelopt_nvfp4_weights(
-                w13,
-                w13_scale,
-                global_scale,
-                w2,
-                w2_scale,
-                global_scale,
-                activation="silu",
-                params_dtype=torch.bfloat16,
-                w13_layout="w13",
-                reuse_input_storage=True,
-            )
-        else:
-            prepared = prepare_w4a16_modelopt_native_weights(
-                w13,
-                w13_scale,
-                global_scale,
-                w2,
-                w2_scale,
-                global_scale,
-                activation="silu",
-                params_dtype=torch.bfloat16,
-                w13_layout="w13",
-            )
+        prepared = prepare_w4a16_modelopt_nvfp4_weights(
+            w13,
+            w13_scale,
+            global_scale,
+            w2,
+            w2_scale,
+            global_scale,
+            activation="silu",
+            params_dtype=torch.bfloat16,
+            w13_layout="w13",
+            reuse_input_storage=True,
+        )
         prepared_sets.append(prepared)
 
     routed_rows = args.rows * TOP_K
@@ -484,7 +463,7 @@ def main() -> None:
             fast_math=True,
             sms=sms,
             max_shared_mem=max_shared_mem,
-            weight_layout=args.weight_layout,
+            weight_layout="packed",
             scale_format="e4m3_k16",
             direct_topk_routes=args.direct_topk_routes,
             tc_decode_fused_sum=args.fused_topk_sum or args.tc_prefill_tiles,
@@ -553,21 +532,25 @@ def main() -> None:
             )
             decomposed_fc2_locks = torch.zeros_like(decomposed_fc1_locks)
 
+        rotation_placeholder = torch.zeros(1, dtype=torch.float16, device=device)
+
+        def bf16_ptr(tensor: torch.Tensor):
+            return make_ptr(
+                _cutlass_element_dtype("bf16"),
+                tensor.data_ptr(),
+                cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
+
         def launch_compiled(compiled, grid: int, prepared) -> None:
             workspace.zero_()
+            hidden_ptr = bf16_ptr(hidden)
             compiled.compiled(
-                make_ptr(
-                    _cutlass_element_dtype("bf16"),
-                    hidden.data_ptr(),
-                    cute.AddressSpace.gmem,
-                    assumed_align=16,
-                ),
-                prepared.w13.view(
-                    torch.int32 if args.weight_layout == "packed" else torch.uint8
-                ).view(-1),
-                prepared.w2.view(
-                    torch.int32 if args.weight_layout == "packed" else torch.uint8
-                ).view(-1),
+                hidden_ptr,
+                hidden_ptr,
+                hidden_ptr,
+                prepared.w13.view(torch.int32).view(-1),
+                prepared.w2.view(torch.int32).view(-1),
                 fc1_out[: routed_rows * 2 * INTERMEDIATE],
                 activated,
                 fc1_out[: routed_rows * HIDDEN],
@@ -589,6 +572,9 @@ def main() -> None:
                 fc1_scratch,
                 fc2_scratch,
                 workspace,
+                rotation_placeholder,
+                rotation_placeholder,
+                rotation_placeholder,
                 args.rows,
                 grid,
                 cuda.CUstream(stream.cuda_stream),
@@ -613,17 +599,12 @@ def main() -> None:
                 assumed_align=4,
             )
             decomposed_fc1_locks.zero_()
+            hidden_ptr = bf16_ptr(hidden)
             decomposed_fc1.compiled(
-                make_ptr(
-                    _cutlass_element_dtype("bf16"),
-                    hidden.data_ptr(),
-                    cute.AddressSpace.gmem,
-                    assumed_align=16,
-                ),
-                prepared.w13.view(
-                    torch.int32 if args.weight_layout == "packed" else torch.uint8
-                ).view(-1),
-                fc1_out[: routed_rows * 2 * INTERMEDIATE],
+                hidden_ptr,
+                hidden_ptr,
+                prepared.w13.view(torch.int32).view(-1),
+                bf16_ptr(fc1_out[: routed_rows * 2 * INTERMEDIATE]),
                 prepared.w13_scale.view(torch.uint8).view(torch.int32).view(-1),
                 prepared.w13_global_scale,
                 packed_routes,
@@ -643,17 +624,12 @@ def main() -> None:
                 stream_arg,
             )
             decomposed_fc2_locks.zero_()
+            activated_ptr = bf16_ptr(activated)
             decomposed_fc2.compiled(
-                make_ptr(
-                    _cutlass_element_dtype("bf16"),
-                    activated.data_ptr(),
-                    cute.AddressSpace.gmem,
-                    assumed_align=16,
-                ),
-                prepared.w2.view(
-                    torch.int32 if args.weight_layout == "packed" else torch.uint8
-                ).view(-1),
-                fc1_out[: routed_rows * HIDDEN],
+                activated_ptr,
+                activated_ptr,
+                prepared.w2.view(torch.int32).view(-1),
+                bf16_ptr(fc1_out[: routed_rows * HIDDEN]),
                 prepared.w2_scale.view(torch.uint8).view(torch.int32).view(-1),
                 prepared.w2_global_scale,
                 packed_routes,
@@ -691,7 +667,7 @@ def main() -> None:
                     fast_math=True,
                     sms=sms,
                     max_shared_mem=max_shared_mem,
-                    weight_layout=args.weight_layout,
+                    weight_layout="packed",
                     scale_format="e4m3_k16",
                     direct_topk_routes=False,
                     tc_decode_fused_sum=False,
@@ -798,7 +774,7 @@ def main() -> None:
                 "tc_prefill_tiles": args.tc_prefill_tiles,
                 "target_blocks_per_sm": args.target_blocks_per_sm or None,
                 "weight_experts": args.weight_experts,
-                "weight_layout": args.weight_layout,
+                "weight_layout": "packed",
                 "weight_sets": args.weight_sets,
                 **validation,
             }

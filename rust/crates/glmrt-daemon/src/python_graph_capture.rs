@@ -14,7 +14,7 @@ pub(crate) const GLMRT_SPARK_LAYER_BLOCK_ATTENTION_CAPTURE_ENV: &str =
     "GLMRT_SPARK_LAYER_BLOCK_ATTENTION_PYTHON_CAPTURE";
 
 const COORDINATOR_PYTHON_CAPTURE_MODULES: &[&str] = &[
-    "b12x",
+    "sparkinfer",
     "flashinfer",
     "triton",
     "b12x_mla_capture",
@@ -26,7 +26,7 @@ const COORDINATOR_PYTHON_CAPTURE_MODULES: &[&str] = &[
 ];
 const SPARK_PYTHON_CAPTURE_MODULES: &[&str] = &["b12x_spark_capture"];
 const SPARK_LAYER_BLOCK_ATTENTION_CAPTURE_MODULES: &[&str] =
-    &["b12x", "flashinfer", "b12x_mla_capture"];
+    &["sparkinfer", "flashinfer", "b12x_mla_capture"];
 static COORDINATOR_PYTHON_CAPTURE_STARTUP_OPEN: AtomicBool = AtomicBool::new(true);
 
 #[cfg(test)]
@@ -67,6 +67,13 @@ pub(crate) struct PythonGraphCaptureLaunch<'a> {
     pub(crate) function: &'a str,
     pub(crate) cuda_stream: *mut c_void,
     pub(crate) buffers: &'a [PythonDeviceBufferArg<'a>],
+    pub(crate) kwargs: &'a [(&'a str, PythonKernelArg<'a>)],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PythonBoolQuery<'a> {
+    pub(crate) module: &'a str,
+    pub(crate) function: &'a str,
     pub(crate) kwargs: &'a [(&'a str, PythonKernelArg<'a>)],
 }
 
@@ -203,6 +210,23 @@ pub(crate) fn launch_python_kernel(launch: PythonGraphCaptureLaunch<'_>) -> Resu
         })
 }
 
+pub(crate) fn query_python_bool_during_startup(query: PythonBoolQuery<'_>) -> Result<bool> {
+    anyhow::ensure!(
+        coordinator_python_capture_startup_open(),
+        "Python planner queries are closed after coordinator startup"
+    );
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| call_python_bool_query(py, &query))
+        .map_err(|err| anyhow::anyhow!(format_python_error(err)))
+        .with_context(|| {
+            format!(
+                "querying Python planner {}.{}",
+                query.module, query.function
+            )
+        })
+}
+
 fn call_python_graph_capture<'py>(
     py: Python<'py>,
     launch: &PythonGraphCaptureLaunch<'_>,
@@ -238,6 +262,23 @@ fn call_python_graph_capture<'py>(
     }
 
     function.call((context,), Some(&kwargs))
+}
+
+fn call_python_bool_query(py: Python<'_>, query: &PythonBoolQuery<'_>) -> PyResult<bool> {
+    add_glmrt_python_reference_path(py)?;
+    let module = PyModule::import_bound(py, query.module)?;
+    let function = module.getattr(query.function)?;
+    let kwargs = PyDict::new_bound(py);
+    for (name, value) in query.kwargs {
+        match value {
+            PythonKernelArg::Bool(value) => kwargs.set_item(name, value)?,
+            PythonKernelArg::F64(value) => kwargs.set_item(name, value)?,
+            PythonKernelArg::I64(value) => kwargs.set_item(name, value)?,
+            PythonKernelArg::Str(value) => kwargs.set_item(name, value)?,
+            PythonKernelArg::Usize(value) => kwargs.set_item(name, value)?,
+        }
+    }
+    function.call((), Some(&kwargs))?.extract::<bool>()
 }
 
 fn add_glmrt_python_reference_path(py: Python<'_>) -> PyResult<()> {
@@ -465,6 +506,40 @@ def capture(ctx, *, rows, label, deterministic):
             Ok(())
         })
         .map_err(|err| anyhow::anyhow!(format_python_error(err)))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn startup_bool_query_passes_kwargs_and_extracts_result() -> Result<()> {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| -> PyResult<()> {
+            let module = PyModule::from_code_bound(
+                py,
+                r#"
+def plan(*, workload, rows, enabled):
+    return workload == "decode" and rows == 8 and enabled
+"#,
+                "glmrt_test_bool_query.py",
+                "glmrt_test_bool_query",
+            )?;
+            let sys = PyModule::import_bound(py, "sys")?;
+            sys.getattr("modules")?
+                .set_item("glmrt_test_bool_query", module)?;
+            Ok(())
+        })
+        .map_err(|err| anyhow::anyhow!(format_python_error(err)))?;
+
+        let kwargs = [
+            ("workload", PythonKernelArg::Str("decode")),
+            ("rows", PythonKernelArg::Usize(8)),
+            ("enabled", PythonKernelArg::Bool(true)),
+        ];
+        assert!(query_python_bool_during_startup(PythonBoolQuery {
+            module: "glmrt_test_bool_query",
+            function: "plan",
+            kwargs: &kwargs,
+        })?);
 
         Ok(())
     }

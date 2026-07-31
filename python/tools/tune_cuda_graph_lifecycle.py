@@ -321,7 +321,7 @@ class NativeLibrary:
     def aot_init(self) -> None:
         self.check(
             self.lib.glmrt_cuda_b12x_coordinator_aot_init(),
-            "initialize coordinator B12X AOT modules",
+            "initialize coordinator SparkInfer AOT modules",
         )
 
     def begin_capture(self, stream: ctypes.c_void_p) -> None:
@@ -721,7 +721,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Validate B12X AOT and retained CUDA graph lifecycle behavior."
+        description=(
+            "Validate SparkInfer AOT and retained CUDA graph lifecycle behavior."
+        )
     )
     parser.add_argument("--native-lib", type=Path, required=True)
     parser.add_argument("--replays", type=int, default=200)

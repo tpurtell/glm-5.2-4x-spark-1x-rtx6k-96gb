@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import _pinned_sparkinfer  # noqa: F401
+
 import argparse
 import heapq
 import json
@@ -74,9 +76,8 @@ def report(label: str, samples: list[float]) -> None:
     )
 
 
-def prepare_weights(device: torch.device, bench_experts: int, weight_layout: str):
-    from b12x.moe.fused.w4a16.prepare import (
-        prepare_w4a16_modelopt_native_weights,
+def prepare_weights(device: torch.device, bench_experts: int):
+    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
     )
 
@@ -103,31 +104,18 @@ def prepare_weights(device: torch.device, bench_experts: int, weight_layout: str
         device=device,
     ).view(torch.float8_e4m3fn)
     globals_ = torch.ones(bench_experts, dtype=torch.float32, device=device)
-    if weight_layout == "packed":
-        prepared = prepare_w4a16_modelopt_nvfp4_weights(
-            w13,
-            w13_scale,
-            globals_,
-            w2,
-            w2_scale,
-            globals_,
-            activation="silu",
-            params_dtype=torch.bfloat16,
-            w13_layout="w13",
-            reuse_input_storage=True,
-        )
-    else:
-        prepared = prepare_w4a16_modelopt_native_weights(
-            w13,
-            w13_scale,
-            globals_,
-            w2,
-            w2_scale,
-            globals_,
-            activation="silu",
-            params_dtype=torch.bfloat16,
-            w13_layout="w13",
-        )
+    prepared = prepare_w4a16_modelopt_nvfp4_weights(
+        w13,
+        w13_scale,
+        globals_,
+        w2,
+        w2_scale,
+        globals_,
+        activation="silu",
+        params_dtype=torch.bfloat16,
+        w13_layout="w13",
+        reuse_input_storage=True,
+    )
     # The selected expert IDs stay in [0, BENCH_EXPERTS), but compiling with
     # the production expert count preserves the real pointer strides and route plan.
     return replace(prepared, num_experts=EXPERTS)
@@ -147,9 +135,6 @@ def main() -> None:
             "JSON array of per-expert route counts; requires one row bucket and "
             "overrides the synthetic route pattern"
         ),
-    )
-    parser.add_argument(
-        "--weight-layout", choices=("packed", "modelopt"), default="packed"
     )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=50)
@@ -196,12 +181,12 @@ def main() -> None:
         ):
             parser.error("expert route counts activate an unallocated expert")
 
-    from b12x.moe.fused.w4a16.host import (
+    from sparkinfer.moe._shared.kernels.w4a16.host import (
         make_w4a16_packed_buffers,
         max_packed_route_slots,
         packed_gemm_scratch_elements,
     )
-    from b12x.moe.fused.w4a16.kernel import (
+    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
         compile_w4a16_fused_moe,
         run_w4a16_moe,
     )
@@ -210,7 +195,7 @@ def main() -> None:
     properties = torch.cuda.get_device_properties(device)
     sms = int(properties.multi_processor_count)
     max_shared_mem = int(properties.shared_memory_per_block_optin)
-    prepared = prepare_weights(device, args.bench_experts, args.weight_layout)
+    prepared = prepare_weights(device, args.bench_experts)
     top_k = args.top_k
     for rows in args.rows:
         x = torch.randn((rows, HIDDEN), dtype=torch.bfloat16, device=device)
@@ -313,14 +298,14 @@ def main() -> None:
         launch()
         torch.cuda.synchronize()
         report(
-            f"{args.weight_layout}_w4a16_eager rows={rows} topk={top_k} routes={rows * top_k}",
+            f"packed_w4a16_eager rows={rows} topk={top_k} routes={rows * top_k}",
             measure(launch, args.warmup, args.iterations, args.repeats),
         )
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             launch()
         report(
-            f"{args.weight_layout}_w4a16_graph rows={rows} topk={top_k} routes={rows * top_k}",
+            f"packed_w4a16_graph rows={rows} topk={top_k} routes={rows * top_k}",
             measure(graph.replay, args.warmup, args.iterations, args.repeats),
         )
 
@@ -347,7 +332,7 @@ def main() -> None:
                 fast_math=True,
                 sms=sms,
                 max_shared_mem=max_shared_mem,
-                weight_layout=args.weight_layout,
+                weight_layout="packed",
                 scale_format="e4m3_k16",
                 direct_topk_routes=False,
                 tc_decode_fused_sum=False,
@@ -390,7 +375,7 @@ def main() -> None:
                 args.repeats,
             )
             print(
-                f"{args.weight_layout}_w4a16_candidate rows={rows} topk={top_k} "
+                f"packed_w4a16_candidate rows={rows} topk={top_k} "
                 f"routes={rows * top_k} block={block_size} "
                 f"blocks_per_sm={candidate.blocks_per_sm} "
                 f"tiles={candidate.fc1_tile_n}x{candidate.fc1_tile_k}/"

@@ -21,7 +21,7 @@ release_trim() {
 
 release_known_key() {
   case "$1" in
-    PROFILE|MODEL|COORDINATOR_GPU_HEADROOM_GIB|KV_POOL_TOKENS|MAX_CONTEXT_TOKENS|MAX_OUTPUT_TOKENS|CONCURRENCY|VISION_MODEL|SPECULATION|MTP_BF16_EXPERTS|DSPARK_MODEL|DSPARK_REVISION|ADDR|EXPERT_PORT|SPARK_[0-3]_HOST|SPARK_[0-3]_LANE_A|SPARK_[0-3]_LANE_B|COORDINATOR_DOCKER_DEV|COORDINATOR_DOCKER_INFERENCE|SPARK_EXPERT_DOCKER_DEV|SPARK_EXPERT_DOCKER_INFERENCE)
+    PROFILE|MODEL|COORDINATOR_GPU_HEADROOM_GIB|KV_POOL_TOKENS|MAX_CONTEXT_TOKENS|MAX_OUTPUT_TOKENS|CONCURRENCY|VISION_MODEL|SPECULATION|MTP_BF16_EXPERTS|DSPARK_MODEL|DSPARK_REVISION|DSPARK_FIXED_DRAFTS|SPARKINFER_GLM_H64_QUERY_PROJECTION|ADDR|EXPERT_PORT|SPARK_[0-3]_HOST|SPARK_[0-3]_LANE_A|SPARK_[0-3]_LANE_B|COORDINATOR_DOCKER_DEV|COORDINATOR_DOCKER_INFERENCE|SPARK_EXPERT_DOCKER_DEV|SPARK_EXPERT_DOCKER_INFERENCE)
       return 0
       ;;
     *)
@@ -46,6 +46,8 @@ release_load_config() {
   MTP_BF16_EXPERTS=auto
   DSPARK_MODEL=redhat
   DSPARK_REVISION=
+  DSPARK_FIXED_DRAFTS=
+  SPARKINFER_GLM_H64_QUERY_PROJECTION=auto
   ADDR=0.0.0.0:8000
   EXPERT_PORT=9100
   COORDINATOR_DOCKER_DEV=glrmt-coordinator-dev
@@ -79,6 +81,16 @@ release_load_config() {
   case "$PROFILE" in balanced|long|accuracy) ;; *) release_die "PROFILE must be balanced, long, or accuracy" ;; esac
   case "$SPECULATION" in plain|mtp|dspark) ;; *) release_die "SPECULATION must be plain, mtp, or dspark" ;; esac
   case "$MTP_BF16_EXPERTS" in auto|on|off) ;; *) release_die "MTP_BF16_EXPERTS must be auto, on, or off" ;; esac
+  case "$SPARKINFER_GLM_H64_QUERY_PROJECTION" in
+    auto|disable|force) ;;
+    *) release_die "SPARKINFER_GLM_H64_QUERY_PROJECTION must be auto, disable, or force" ;;
+  esac
+  if [[ -n "$DSPARK_FIXED_DRAFTS" ]]; then
+    [[ "$DSPARK_FIXED_DRAFTS" =~ ^[0-7]$ ]] ||
+      release_die "DSPARK_FIXED_DRAFTS must be empty or in 0..7"
+    [[ "$SPECULATION" == dspark ]] ||
+      release_die "DSPARK_FIXED_DRAFTS requires SPECULATION=dspark"
+  fi
   case "${VISION_MODEL,,}" in ""|off|none|baseten) ;; *) release_die "VISION_MODEL must be baseten, off, or unset" ;; esac
   [[ "$CONCURRENCY" =~ ^[1-8]$ ]] || release_die "CONCURRENCY must be in 1..8"
   [[ "$EXPERT_PORT" =~ ^[0-9]+$ ]] && ((EXPERT_PORT >= 1 && EXPERT_PORT <= 65535)) || release_die "EXPERT_PORT must be in 1..65535"

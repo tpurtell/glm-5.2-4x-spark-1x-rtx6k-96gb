@@ -2733,111 +2733,6 @@ void test_cuda_graph_bf16_replay_matches_uncaptured() {
   free_buffer(&dy_direct);
 }
 
-void test_b12x_scale_swizzle_matches_tile_order_or_skip() {
-  int available = 0;
-  require_status(glmrt_cuda_b12x_spark_aot_available(&available),
-                 "glmrt_cuda_b12x_spark_aot_available");
-  if (available == 0) {
-    return;
-  }
-
-  constexpr size_t rows = 128;
-  constexpr size_t cols = 4;
-  std::vector<uint8_t> source(rows * cols, 0);
-  std::iota(source.begin(), source.end(), static_cast<uint8_t>(0));
-  std::vector<uint8_t> expected(source.size(), 0);
-  for (size_t row = 0; row < rows; ++row) {
-    const size_t row_quarter = row / 32;
-    const size_t row_inner = row % 32;
-    for (size_t col = 0; col < cols; ++col) {
-      const size_t offset = ((row_inner * 4 + row_quarter) * 4) + col;
-      expected[offset] = source[row * cols + col];
-    }
-  }
-
-  auto input = device_buffer(source.size());
-  auto output = device_buffer(source.size());
-  copy_h2d(input, source);
-  cudaStream_t stream = nullptr;
-  require_cuda(cudaStreamCreate(&stream), "cudaStreamCreate B12X scale swizzle");
-  require_status(glmrt_cuda_b12x_swizzle_scale_async(input, output, rows, cols, stream),
-                 "glmrt_cuda_b12x_swizzle_scale_async");
-  require_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize B12X scale swizzle");
-  assert(copy_d2h<uint8_t>(output, source.size()) == expected);
-  require_cuda(cudaStreamDestroy(stream), "cudaStreamDestroy B12X scale swizzle");
-  free_buffer(&input);
-  free_buffer(&output);
-}
-
-void test_b12x_nvfp4_row_payload_gather_matches_canonical_rows_or_skip() {
-  constexpr size_t source_rows = 3;
-  constexpr size_t rows = 2;
-  constexpr size_t hidden = 64;
-  constexpr size_t packed_row_bytes = hidden / 2;
-  constexpr size_t scale_cols = hidden / 16;
-  constexpr size_t row_stride_bytes = packed_row_bytes + scale_cols;
-  std::vector<uint16_t> input(source_rows * hidden, 0);
-  for (size_t index = 0; index < input.size(); ++index) {
-    input[index] = f32_to_bf16((static_cast<float>(index % 29) - 14.0f) / 7.0f);
-  }
-  const std::vector<uint32_t> indices = {2, 0};
-
-  auto input_device = device_buffer(input.size() * sizeof(uint16_t));
-  auto payload_device = device_buffer(source_rows * row_stride_bytes);
-  auto indices_device = device_buffer(indices.size() * sizeof(uint32_t));
-  auto packed_device = device_buffer(rows * packed_row_bytes);
-  auto scale_device = device_buffer(128 * scale_cols);
-  copy_h2d(input_device, input);
-  copy_h2d(indices_device, indices);
-  cudaStream_t stream = nullptr;
-  require_cuda(cudaStreamCreate(&stream), "cudaStreamCreate B12X row payload");
-  require_status(glmrt_cuda_b12x_quantize_bf16_nvfp4_row_payload_async(
-                     input_device, payload_device, source_rows, hidden, stream),
-                 "glmrt_cuda_b12x_quantize_bf16_nvfp4_row_payload_async");
-  require_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize NVFP4 row payload");
-  const auto payload = copy_d2h<uint8_t>(payload_device, source_rows * row_stride_bytes);
-
-  int available = 0;
-  require_status(glmrt_cuda_b12x_spark_aot_available(&available),
-                 "glmrt_cuda_b12x_spark_aot_available row payload");
-  if (available == 0) {
-    require_cuda(cudaStreamDestroy(stream), "cudaStreamDestroy NVFP4 row payload");
-    free_buffer(&input_device);
-    free_buffer(&payload_device);
-    free_buffer(&indices_device);
-    free_buffer(&packed_device);
-    free_buffer(&scale_device);
-    return;
-  }
-  require_status(glmrt_cuda_b12x_prepare_nvfp4_row_payload_async(
-                     payload_device, source_rows, row_stride_bytes, indices_device, packed_device,
-                     scale_device, rows, hidden, stream),
-                 "glmrt_cuda_b12x_prepare_nvfp4_row_payload_async");
-  require_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize B12X row payload");
-
-  const auto packed = copy_d2h<uint8_t>(packed_device, rows * packed_row_bytes);
-  const auto scale = copy_d2h<uint8_t>(scale_device, 128 * scale_cols);
-  for (size_t row = 0; row < rows; ++row) {
-    const size_t source_offset = indices[row] * row_stride_bytes;
-    assert(std::equal(payload.begin() + source_offset,
-                      payload.begin() + source_offset + packed_row_bytes,
-                      packed.begin() + row * packed_row_bytes));
-    const size_t row_quarter = row / 32;
-    const size_t row_inner = row % 32;
-    for (size_t col = 0; col < scale_cols; ++col) {
-      const size_t swizzled = ((row_inner * 4 + row_quarter) * 4) + col;
-      assert(scale[swizzled] == payload[source_offset + packed_row_bytes + col]);
-    }
-  }
-
-  require_cuda(cudaStreamDestroy(stream), "cudaStreamDestroy B12X row payload");
-  free_buffer(&input_device);
-  free_buffer(&payload_device);
-  free_buffer(&indices_device);
-  free_buffer(&packed_device);
-  free_buffer(&scale_device);
-}
-
 void test_bf16_weight_nvfp4_quantization_matches_representable_block() {
   constexpr size_t rows = 1;
   constexpr size_t cols = 16;
@@ -2913,8 +2808,6 @@ int main() {
   test_cuda_mla_kv_mxfp4_pack_roundtrip_matches_representable_values();
   test_cuda_graph_replay_matches_uncaptured();
   test_cuda_graph_bf16_replay_matches_uncaptured();
-  test_b12x_scale_swizzle_matches_tile_order_or_skip();
-  test_b12x_nvfp4_row_payload_gather_matches_canonical_rows_or_skip();
   test_nvfp4_pack_unpack_or_skip_with_reason();
   std::cout << "glmrt_cuda_selftest passed\n";
   return 0;

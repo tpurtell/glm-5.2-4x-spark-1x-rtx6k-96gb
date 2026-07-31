@@ -81,7 +81,7 @@ def synchronized_wall_samples(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare the current B12X top-k BF16 sum plus FP8 codec with a "
+            "Compare the current SparkInfer top-k BF16 sum plus FP8 codec with a "
             "single exact-rounding fused response kernel."
         )
     )
@@ -152,7 +152,7 @@ def main() -> None:
                 sum_bf16(
                     device_buffer(routed), device_buffer(summed), rows, stream
                 ),
-                "summing B12X top-k rows as BF16",
+                "summing SparkInfer top-k rows as BF16",
             )
             check_status(
                 library,
@@ -177,7 +177,7 @@ def main() -> None:
                     FP8_ROW_BYTES,
                     stream,
                 ),
-                "summing and packing B12X top-k rows as FP8",
+                "summing and packing SparkInfer top-k rows as FP8",
             )
 
         current_operation()

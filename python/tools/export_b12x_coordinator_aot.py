@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import _pinned_sparkinfer  # noqa: F401
+
 import argparse
 import os
 from pathlib import Path
@@ -16,11 +18,11 @@ PROJECTIONS = (
 
 
 def export_kernels(output_dir: Path) -> None:
-    os.environ["B12X_CUTE_COMPILE_DISK_CACHE"] = "0"
-    os.environ["B12X_CUTE_COMPILE_MEMORY_CACHE"] = "0"
+    os.environ["SPARKINFER_COMPILE_DISK_CACHE"] = "0"
+    os.environ["SPARKINFER_COMPILE_MEMORY_CACHE"] = "0"
 
     import torch
-    from b12x.moe.fused.w4a16.kernel import (
+    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
         _select_tile_config,
         compile_w4a16_gemm,
     )
@@ -96,7 +98,7 @@ def export_kernels(output_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export coordinator decode-only B12X W4A16 projections."
+        description="Export coordinator decode-only SparkInfer W4A16 projections."
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()

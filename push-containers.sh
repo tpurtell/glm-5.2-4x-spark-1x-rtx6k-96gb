@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$repo_root/scripts/release-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: ./push-containers.sh TAG
+
+Tags and pushes the current coordinator and Spark inference images to GHCR.
+The supplied release tag and latest are published for both images. The
+coordinator image is local; the Spark image is published from SPARK_0_HOST.
+
+Example:
+  ./push-containers.sh v2
+EOF
+}
+
+if [[ $# -eq 1 && ("$1" == -h || "$1" == --help) ]]; then
+  usage
+  exit 0
+fi
+[[ $# -eq 1 ]] || {
+  usage >&2
+  exit 2
+}
+
+tag="$1"
+[[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] ||
+  release_die "invalid Docker tag: $tag"
+[[ "$tag" != latest ]] ||
+  release_die "provide a version tag; latest is published automatically"
+
+release_load_config "$repo_root/glmrt.config"
+release_need docker
+release_need ssh
+
+coordinator_repository="ghcr.io/tpurtell/glmrt-coordinator"
+spark_repository="ghcr.io/tpurtell/glmrt-spark-expert"
+spark_host="$SPARK_0_HOST"
+
+docker info >/dev/null 2>&1 ||
+  release_die "local Docker daemon is unavailable"
+docker image inspect "$COORDINATOR_DOCKER_INFERENCE" >/dev/null 2>&1 ||
+  release_die "coordinator image is missing: $COORDINATOR_DOCKER_INFERENCE"
+
+ssh -o BatchMode=yes -o ConnectTimeout=10 "$spark_host" bash -s -- \
+  "$SPARK_EXPERT_DOCKER_INFERENCE" <<'REMOTE'
+set -euo pipefail
+image="$1"
+docker info >/dev/null
+docker image inspect "$image" >/dev/null
+REMOTE
+
+coordinator_revision="$(
+  docker image inspect \
+    -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$COORDINATOR_DOCKER_INFERENCE"
+)"
+spark_revision="$(
+  ssh -o BatchMode=yes "$spark_host" bash -s -- \
+    "$SPARK_EXPERT_DOCKER_INFERENCE" <<'REMOTE'
+set -euo pipefail
+docker image inspect \
+  -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$1"
+REMOTE
+)"
+[[ -n "$coordinator_revision" && "$coordinator_revision" != "<no value>" ]] ||
+  release_die "coordinator image has no engine revision label"
+[[ -n "$spark_revision" && "$spark_revision" != "<no value>" ]] ||
+  release_die "$spark_host Spark image has no engine revision label"
+[[ "$coordinator_revision" == "$spark_revision" ]] ||
+  release_die "image revision mismatch: coordinator=$coordinator_revision spark=$spark_revision"
+
+echo "Publishing GLMRT containers"
+echo "  revision:    $coordinator_revision"
+echo "  coordinator: $coordinator_repository:$tag"
+echo "  spark:       $spark_repository:$tag (from $spark_host)"
+
+docker tag "$COORDINATOR_DOCKER_INFERENCE" "$coordinator_repository:$tag"
+ssh -o BatchMode=yes "$spark_host" bash -s -- \
+  "$SPARK_EXPERT_DOCKER_INFERENCE" "$spark_repository:$tag" <<'REMOTE'
+set -euo pipefail
+docker tag "$1" "$2"
+REMOTE
+
+docker push "$coordinator_repository:$tag"
+ssh -o BatchMode=yes "$spark_host" docker push "$spark_repository:$tag"
+
+docker tag "$COORDINATOR_DOCKER_INFERENCE" "$coordinator_repository:latest"
+ssh -o BatchMode=yes "$spark_host" bash -s -- \
+  "$SPARK_EXPERT_DOCKER_INFERENCE" "$spark_repository:latest" <<'REMOTE'
+set -euo pipefail
+docker tag "$1" "$2"
+REMOTE
+
+docker push "$coordinator_repository:latest"
+ssh -o BatchMode=yes "$spark_host" docker push "$spark_repository:latest"
+
+echo "Published both $tag and latest:"
+echo "  docker pull $coordinator_repository:$tag"
+echo "  docker pull $spark_repository:$tag"

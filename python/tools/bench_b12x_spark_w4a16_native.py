@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import _pinned_sparkinfer  # noqa: F401
+
 import argparse
 import ctypes
 import json
@@ -334,12 +336,6 @@ def main() -> None:
         default="device",
         help="Allocate packed weights like the benchmark or the production Spark slabs.",
     )
-    parser.add_argument(
-        "--weight-layout",
-        choices=("packed", "modelopt"),
-        default="packed",
-        help="Select the packed production or source-native ModelOpt decode object.",
-    )
     parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
     expert_route_counts = None
@@ -427,11 +423,7 @@ def main() -> None:
         parser.error("production-staging requires decode with mapped input memory")
     if args.copy_token_output and args.scenario != "decode":
         parser.error("copy-token-output requires the decode scenario")
-    if args.weight_layout == "modelopt" and args.scenario != "decode":
-        parser.error("the ModelOpt-layout native object is decode-only")
-    if args.m1_fused_sum_candidate and (
-        args.scenario != "decode" or args.weight_layout != "packed"
-    ):
+    if args.m1_fused_sum_candidate and args.scenario != "decode":
         parser.error("m1-fused-sum-candidate requires packed decode")
     parity_candidate_count = sum(
         (
@@ -454,7 +446,6 @@ def main() -> None:
         or not 2 <= args.prefill_rows <= 8
         or args.routes_per_row != TOP_K
         or args.empty_routes
-        or args.weight_layout != "packed"
     ):
         parser.error(
             "M1 parity candidates require packed prefill M=2..8 with eight routes"
@@ -480,8 +471,7 @@ def main() -> None:
         ):
             parser.error("expert-route-counts activates an unallocated expert")
 
-    from b12x.moe.fused.w4a16.prepare import (
-        prepare_w4a16_modelopt_native_weights,
+    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
     )
 
@@ -526,16 +516,8 @@ def main() -> None:
             device=device,
         ).view(torch.float8_e4m3fn)
         global_scale = torch.ones(weight_experts, dtype=torch.float32, device=device)
-        prepare_weights = (
-            prepare_w4a16_modelopt_native_weights
-            if args.weight_layout == "modelopt"
-            else prepare_w4a16_modelopt_nvfp4_weights
-        )
-        prepare_kwargs = {}
-        if args.weight_layout == "packed":
-            prepare_kwargs["reuse_input_storage"] = True
         prepared_sets.append(
-            prepare_weights(
+            prepare_w4a16_modelopt_nvfp4_weights(
                 w13,
                 w13_scale,
                 global_scale,
@@ -545,7 +527,7 @@ def main() -> None:
                 activation="silu",
                 params_dtype=torch.bfloat16,
                 w13_layout="w13",
-                **prepare_kwargs,
+                reuse_input_storage=True,
             )
         )
 
@@ -761,8 +743,6 @@ def main() -> None:
     decode_symbol = (
         "glmrt_cuda_b12x_spark_w4a16_decode_m1_fused_sum_nvfp4_async"
         if args.m1_fused_sum_candidate
-        else "glmrt_cuda_b12x_spark_w4a16_modelopt_decode_m1_nvfp4_async"
-        if args.weight_layout == "modelopt"
         else "glmrt_cuda_b12x_spark_w4a16_decode_m1_nvfp4_async"
     )
     decode_launch = getattr(lib, decode_symbol)
@@ -928,7 +908,11 @@ def main() -> None:
                 prepared.w2_global_scale, EXPERTS * 4
             )
         torch.cuda.synchronize()
-    check_status(lib, lib.glmrt_cuda_b12x_spark_aot_init(), "initializing B12X AOT")
+    check_status(
+        lib,
+        lib.glmrt_cuda_b12x_spark_aot_init(),
+        "initializing SparkInfer AOT",
+    )
 
     mapped_input = HostBuffer()
     mapped_topk_ids = HostBuffer()
@@ -1359,7 +1343,7 @@ def main() -> None:
                 "concurrent_route_overlap": args.concurrent_route_overlap,
                 "copy_token_output": args.copy_token_output,
                 "weight_memory": args.weight_memory,
-                "weight_layout": args.weight_layout,
+                "weight_layout": "packed",
                 "effective_grid_x": effective_grid_x if args.scenario == "decode" else None,
                 "requested_grid_x": requested_grid_x if args.scenario == "decode" else None,
                 "prefill_grid_x": args.prefill_grid_x,

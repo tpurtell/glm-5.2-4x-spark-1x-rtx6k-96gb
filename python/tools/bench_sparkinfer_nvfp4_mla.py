@@ -3,7 +3,7 @@
 
 Run against a Sparkinfer source checkout, for example:
 
-  PYTHONPATH=.glmrt-cache/external/sparkinfer-master \
+  PYTHONPATH=third_party/sparkinfer \
     .venv/bin/python python/tools/bench_sparkinfer_nvfp4_mla.py
 
 The 432-byte cache record is the production BF16-RoPE ABI:
@@ -12,6 +12,8 @@ padding, and 128 bytes BF16 RoPE.
 """
 
 from __future__ import annotations
+
+import _pinned_sparkinfer  # noqa: F401
 
 import argparse
 import json
