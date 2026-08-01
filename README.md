@@ -1,4 +1,8 @@
-# GLMRT
+# GLMRT - LLM engine for GLM 5.2
+
+## 4x Spark + 1x RTX 6000 @ 65 tok/s decode + 1,750 tok/s prefill
+
+<sub>X.com style headline low-entropy prompt test</sub>
 
 ## What
 
