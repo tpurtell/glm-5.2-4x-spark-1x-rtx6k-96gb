@@ -145,6 +145,21 @@ REMOTE
   echo "  $host: ssh/docker/aarch64 ready"
 done
 
+release_sync_program=rsync
+if command -v rdmasync >/dev/null 2>&1 &&
+  ssh -o BatchMode=yes "$seed_host" "command -v rdmasync >/dev/null 2>&1"; then
+  release_sync_program=rdmasync
+  echo "== using RDMA source/artifact synchronization =="
+fi
+
+release_sync() {
+  if [[ "$release_sync_program" == rdmasync ]]; then
+    rdmasync -a --rdma=required --rdma-show-config "$@"
+  else
+    rsync -a "$@"
+  fi
+}
+
 if [[ -z "$remote_dir" ]]; then
   remote_dir="$(
     ssh -o BatchMode=yes "$seed_host" \
@@ -195,7 +210,7 @@ docker build \
 
 echo "== staging native Spark build on $seed_host:$remote_dir =="
 ssh -o BatchMode=yes "$seed_host" "mkdir -p '$remote_dir'"
-rsync -az --delete \
+release_sync --delete \
   --exclude '.git' \
   --exclude '.venv/' \
   --exclude '.mypy_cache/' \
@@ -207,6 +222,7 @@ rsync -az --delete \
   --exclude '.glmrt-cache/' \
   --exclude '.glmrt-release/' \
   --exclude '.glmrt-release-image/' \
+  --exclude '.glmrt-wip/' \
   --exclude 'dist/' \
   --exclude 'rust/target/' \
   --exclude 'native/build*/' \
@@ -214,7 +230,7 @@ rsync -az --delete \
 # The broad staging sync protects excluded paths from deletion. Reconcile the
 # pinned source separately so bytecode left by an earlier build cannot survive
 # merely because it is now excluded.
-rsync -az --delete --delete-excluded \
+release_sync --delete --delete-excluded \
   --exclude '.git' \
   --exclude '.venv/' \
   --exclude '.mypy_cache/' \
@@ -325,7 +341,7 @@ docker cp \
 docker rm "$container" >/dev/null
 trap - EXIT
 REMOTE
-rsync -az --delete \
+release_sync --delete \
   "$seed_host:$remote_dir/dist/spark-expert/" \
   "$repo_root/dist/spark-expert/"
 dist_source_manifest=()
@@ -371,13 +387,49 @@ for host in "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
   # ensure_image cannot mistake the stale tag for the fresh seed image.
   ssh -o BatchMode=yes "$host" "docker image rm --force '$SPARK_EXPERT_DOCKER_INFERENCE' >/dev/null 2>&1 || true"
 done
-GLMRT_SPARK_HOSTS="$hosts_csv" \
-GLMRT_SPARK_IMAGE="$SPARK_EXPERT_DOCKER_INFERENCE" \
-GLMRT_SPARK_IMAGE_SEED_HOST="$seed_host" \
-GLMRT_SPARK_IMAGE_COPY_METHOD=spark-netcat \
-GLMRT_SPARK_IMAGE_ONLY=1 \
-GLMRT_SPARK_SKIP_STAGE=1 \
-"$repo_root/scripts/phase0-spark-tcp-bench.sh"
+rdmapipe_ready=1
+for host in "$seed_host" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
+  if ! ssh -o BatchMode=yes "$host" "command -v rdmapipe >/dev/null 2>&1"; then
+    rdmapipe_ready=0
+    break
+  fi
+done
+if ((rdmapipe_ready)); then
+  echo "== concurrently distributing Spark image over RDMA =="
+  image_copy_pids=()
+  image_copy_hosts=()
+  printf -v spark_image_quoted '%q' "$SPARK_EXPERT_DOCKER_INFERENCE"
+  for host in "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
+    (
+      set -o pipefail
+      echo "== RDMA image copy $seed_host -> $host =="
+      ssh -o BatchMode=yes "$seed_host" \
+        "set -o pipefail; docker image save $spark_image_quoted | rdmapipe --send" |
+        ssh -o BatchMode=yes "$host" \
+          "set -o pipefail; rdmapipe --recv | docker image load"
+      echo "== RDMA image copy $seed_host -> $host complete =="
+    ) &
+    image_copy_pids+=("$!")
+    image_copy_hosts+=("$host")
+  done
+  image_copy_failed=0
+  for index in "${!image_copy_pids[@]}"; do
+    if ! wait "${image_copy_pids[$index]}"; then
+      echo "RDMA image copy to ${image_copy_hosts[$index]} failed" >&2
+      image_copy_failed=1
+    fi
+  done
+  ((image_copy_failed == 0)) || release_die "concurrent RDMA Spark image distribution failed"
+else
+  echo "== rdmapipe unavailable on one or more Sparks; using serial netcat image distribution =="
+  GLMRT_SPARK_HOSTS="$hosts_csv" \
+  GLMRT_SPARK_IMAGE="$SPARK_EXPERT_DOCKER_INFERENCE" \
+  GLMRT_SPARK_IMAGE_SEED_HOST="$seed_host" \
+  GLMRT_SPARK_IMAGE_COPY_METHOD=spark-netcat \
+  GLMRT_SPARK_IMAGE_ONLY=1 \
+  GLMRT_SPARK_SKIP_STAGE=1 \
+  "$repo_root/scripts/phase0-spark-tcp-bench.sh"
+fi
 
 coordinator_revision="$(
   docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' \

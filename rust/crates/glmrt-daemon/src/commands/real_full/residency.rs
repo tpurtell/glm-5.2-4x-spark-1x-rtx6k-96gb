@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use glmrt_core::{DType, TensorCatalog, TensorInfo, TensorRole};
-use glmrt_loader::{load_tensor_bytes, read_tensor_bytes_into, LoadedTensor, LoadedTensorSummary};
+use glmrt_ffi::{GlmrtHostBuffer, NativeLibrary};
+use glmrt_loader::{read_tensor_bytes_into, LoadedTensorSummary};
 use std::collections::BTreeMap;
 use std::env;
+use std::slice;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
@@ -10,9 +12,10 @@ use std::time::Instant;
 use super::coordinator_kernels::{
     coordinator_w4a16_o_proj_decode_enabled, coordinator_w4a16_q_b_decode_enabled,
     coordinator_w8a16_o_proj_decode_enabled, coordinator_w8a16_q_a_decode_enabled,
-    coordinator_w8a16_q_b_decode_enabled, preload_coordinator_w4a16_projection,
-    preload_coordinator_w8a16_projection, preload_resident_weight_from_host_staging,
-    release_preloaded_resident_weight_device_buffer,
+    coordinator_w8a16_q_b_decode_enabled, cuda_native_library,
+    preload_coordinator_w4a16_projection, preload_coordinator_w8a16_projection,
+    preload_resident_weight_from_host_staging, preload_resident_weight_from_pinned_host_profiled,
+    release_preloaded_resident_weight_device_buffer, ResidentWeightPreloadTimings,
 };
 use super::layer_blocks::{tensor_is_spark_layer_block_resident, SparkLayerBlock};
 use super::sparse_mlp::cache_router_correction_bias_host_values;
@@ -21,6 +24,7 @@ use super::types::RealFullCoordinatorResidentPreloadPlan;
 const COORDINATOR_RESIDENT_PRELOAD_SCOPE: &str =
     "select coordinator-owned immutable GLM-5.2 tensors for named startup GPU residency";
 const COORDINATOR_RESIDENT_SAMPLE_LIMIT: usize = 12;
+const COORDINATOR_RESIDENT_SOURCE_WORKERS: usize = 8;
 const COORDINATOR_INCLUDE_MTP_LAYER_ENV: &str = "GLMRT_COORDINATOR_INCLUDE_MTP_LAYER";
 const REAL_FULL_MTP_ENV: &str = "GLMRT_REAL_FULL_MTP";
 const REAL_FULL_MTP_PROBE_ENV: &str = "GLMRT_REAL_FULL_MTP_PROBE";
@@ -39,6 +43,105 @@ pub(crate) struct SparkLayerBlockResidentPreloadStats {
     pub(crate) layers: usize,
     pub(crate) tensors: usize,
     pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CoordinatorResidentTensorPreloadProfile {
+    bytes: u64,
+    total_ms: f64,
+    validation_cache_ms: f64,
+    resident: ResidentWeightPreloadTimings,
+    w4a16_pack_ms: f64,
+    w8a16_pack_ms: f64,
+    release_ms: f64,
+    w4a16_packed: bool,
+    w8a16_q_a_packed: bool,
+    w8a16_q_b_packed: bool,
+    w8a16_o_packed: bool,
+    source_released: bool,
+}
+
+struct CoordinatorPinnedSourceBuffer {
+    library: &'static NativeLibrary,
+    buffer: GlmrtHostBuffer,
+}
+
+// Ownership of the pinned allocation moves between exactly one source worker
+// and the coordinator preload thread. The worker does not touch it again until
+// the synchronous H2D copy returns and ownership is sent back.
+unsafe impl Send for CoordinatorPinnedSourceBuffer {}
+
+impl CoordinatorPinnedSourceBuffer {
+    fn new(library: &'static NativeLibrary) -> Self {
+        Self {
+            library,
+            buffer: GlmrtHostBuffer::default(),
+        }
+    }
+
+    fn ensure_capacity(&mut self, bytes: usize) -> Result<f64> {
+        if !self.buffer.ptr.is_null() && self.buffer.bytes >= bytes {
+            return Ok(0.0);
+        }
+        let started = Instant::now();
+        if !self.buffer.ptr.is_null() {
+            self.library
+                .free_host_buffer(&mut self.buffer)
+                .context("freeing undersized coordinator resident source pinned buffer")?;
+            self.buffer = GlmrtHostBuffer::default();
+        }
+        self.buffer = self
+            .library
+            .alloc_host_buffer(bytes)
+            .context("allocating coordinator resident source pinned buffer")?;
+        anyhow::ensure!(
+            !self.buffer.ptr.is_null() && self.buffer.bytes >= bytes,
+            "coordinator resident source pinned allocation returned {} bytes for {bytes}",
+            self.buffer.bytes
+        );
+        Ok(started.elapsed().as_secs_f64() * 1_000.0)
+    }
+
+    fn capacity(&self) -> usize {
+        self.buffer.bytes
+    }
+
+    fn as_mut_slice(&mut self, bytes: usize) -> Result<&mut [u8]> {
+        anyhow::ensure!(
+            !self.buffer.ptr.is_null() && self.buffer.bytes >= bytes,
+            "coordinator resident source pinned buffer has {} bytes, needs {bytes}",
+            self.buffer.bytes
+        );
+        Ok(unsafe { slice::from_raw_parts_mut(self.buffer.ptr.cast::<u8>(), bytes) })
+    }
+
+    fn as_slice(&self, bytes: usize) -> Result<&[u8]> {
+        anyhow::ensure!(
+            !self.buffer.ptr.is_null() && self.buffer.bytes >= bytes,
+            "coordinator resident source pinned buffer has {} bytes, needs {bytes}",
+            self.buffer.bytes
+        );
+        Ok(unsafe { slice::from_raw_parts(self.buffer.ptr.cast::<u8>(), bytes) })
+    }
+}
+
+impl Drop for CoordinatorPinnedSourceBuffer {
+    fn drop(&mut self) {
+        if !self.buffer.ptr.is_null() {
+            let _ = self.library.free_host_buffer(&mut self.buffer);
+            self.buffer = GlmrtHostBuffer::default();
+        }
+    }
+}
+
+struct CoordinatorResidentSourceMessage {
+    worker_id: usize,
+    index: usize,
+    summary: Result<LoadedTensorSummary>,
+    buffer: CoordinatorPinnedSourceBuffer,
+    completed_ms: f64,
+    allocation_ms: f64,
+    read_ms: f64,
 }
 
 pub(crate) fn preload_real_full_spark_layer_block_weights(
@@ -102,64 +205,179 @@ pub(super) fn preload_real_full_coordinator_resident_weights(
     catalog: &TensorCatalog,
 ) -> Result<RealFullCoordinatorResidentPreloadPlan> {
     let preload_started = Instant::now();
-    let tensors = coordinator_resident_tensors(catalog);
+    let mut tensors = coordinator_resident_tensors(catalog);
+    // Give every source worker its largest tensor first. Its pinned allocation
+    // can then be reused for every later tensor without repeated cudaHostAlloc /
+    // cudaFreeHost calls contending with H2D and projection packing.
+    tensors.sort_by(|left, right| {
+        right
+            .byte_length
+            .cmp(&left.byte_length)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let source_library_started = Instant::now();
+    let source_library = cuda_native_library()?;
+    let source_library_ms = source_library_started.elapsed().as_secs_f64() * 1_000.0;
     let source_started = Instant::now();
     let next_tensor = AtomicUsize::new(0);
     let source_workers = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
-        .min(32)
+        .min(COORDINATOR_RESIDENT_SOURCE_WORKERS)
         .min(tensors.len().max(1));
     let (source_sender, source_receiver) = mpsc::channel();
     let mut source_bytes = 0_u64;
     let mut source_ms = 0.0_f64;
+    let mut source_allocation_ms = 0.0_f64;
+    let mut source_read_ms = 0.0_f64;
+    let mut source_worker_peak_bytes = vec![0_usize; source_workers];
     let mut loaded_bytes = 0_u64;
     let mut upload_pack_ms = 0.0_f64;
+    let mut validation_cache_ms = 0.0_f64;
+    let mut resident_library_ms = 0.0_f64;
+    let mut resident_lock_ms = 0.0_f64;
+    let mut device_allocation_ms = 0.0_f64;
+    let mut staging_allocation_ms = 0.0_f64;
+    let mut staging_fill_ms = 0.0_f64;
+    let mut h2d_ms = 0.0_f64;
+    let mut resident_finalize_ms = 0.0_f64;
+    let mut w4a16_pack_ms = 0.0_f64;
+    let mut w8a16_pack_ms = 0.0_f64;
+    let mut release_ms = 0.0_f64;
+    let mut uploaded_tensors = 0_usize;
+    let mut w4a16_packed_tensors = 0_usize;
+    let mut w8a16_q_a_packed_tensors = 0_usize;
+    let mut w8a16_q_b_packed_tensors = 0_usize;
+    let mut w8a16_o_packed_tensors = 0_usize;
+    let mut released_source_tensors = 0_usize;
     std::thread::scope(|scope| -> Result<()> {
-        for _ in 0..source_workers {
+        let mut source_return_senders = Vec::with_capacity(source_workers);
+        for worker_id in 0..source_workers {
             let sender = source_sender.clone();
             let next_tensor = &next_tensor;
             let tensors = &tensors;
-            scope.spawn(move || loop {
-                let index = next_tensor.fetch_add(1, Ordering::Relaxed);
-                let Some(tensor) = tensors.get(index) else {
-                    break;
-                };
-                let loaded = load_tensor_bytes(catalog, &tensor.name).with_context(|| {
-                    format!("reading coordinator resident tensor {}", tensor.name)
-                });
-                let completed_ms = source_started.elapsed().as_secs_f64() * 1_000.0;
-                if sender.send((index, loaded, completed_ms)).is_err() {
-                    break;
+            let (return_sender, return_receiver) = mpsc::channel();
+            source_return_senders.push(return_sender);
+            scope.spawn(move || {
+                let mut buffer = CoordinatorPinnedSourceBuffer::new(source_library);
+                loop {
+                    let index = next_tensor.fetch_add(1, Ordering::Relaxed);
+                    let Some(tensor) = tensors.get(index) else {
+                        break;
+                    };
+                    let expected_bytes: usize =
+                        match tensor.byte_length.try_into().with_context(|| {
+                            format!(
+                                "coordinator resident source tensor {} byte length {} does not fit in usize",
+                                tensor.name, tensor.byte_length
+                            )
+                        }) {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                let _ = sender.send(Err(error));
+                                break;
+                            }
+                        };
+                    let allocation_ms = match buffer.ensure_capacity(expected_bytes) {
+                        Ok(elapsed_ms) => elapsed_ms,
+                        Err(error) => {
+                            let _ = sender.send(Err(error.context(format!(
+                                "allocating coordinator resident source tensor {}",
+                                tensor.name
+                            ))));
+                            break;
+                        }
+                    };
+                    let read_started = Instant::now();
+                    let summary = buffer
+                        .as_mut_slice(expected_bytes)
+                        .and_then(|staging| read_tensor_bytes_into(catalog, &tensor.name, staging))
+                        .with_context(|| {
+                            format!("reading coordinator resident tensor {}", tensor.name)
+                        });
+                    let read_ms = read_started.elapsed().as_secs_f64() * 1_000.0;
+                    let completed_ms = source_started.elapsed().as_secs_f64() * 1_000.0;
+                    let message = CoordinatorResidentSourceMessage {
+                        worker_id,
+                        index,
+                        summary,
+                        buffer,
+                        completed_ms,
+                        allocation_ms,
+                        read_ms,
+                    };
+                    if sender.send(Ok(message)).is_err() {
+                        break;
+                    }
+                    buffer = match return_receiver.recv() {
+                        Ok(buffer) => buffer,
+                        Err(_) => break,
+                    };
                 }
             });
         }
         drop(source_sender);
         for _ in 0..tensors.len() {
-            let (index, loaded, completed_ms) = source_receiver
+            let message = source_receiver
                 .recv()
-                .context("coordinator resident source workers stopped before completion")?;
+                .context("coordinator resident source workers stopped before completion")??;
             let tensor = tensors
-                .get(index)
+                .get(message.index)
                 .context("coordinator resident source worker returned an invalid tensor index")?;
-            let loaded = loaded?;
-            source_ms = source_ms.max(completed_ms);
+            let summary = message.summary?;
+            source_ms = source_ms.max(message.completed_ms);
+            source_allocation_ms += message.allocation_ms;
+            source_read_ms += message.read_ms;
+            source_worker_peak_bytes[message.worker_id] =
+                source_worker_peak_bytes[message.worker_id].max(message.buffer.capacity());
             source_bytes = source_bytes
-                .checked_add(loaded.bytes.len() as u64)
+                .checked_add(summary.bytes_read)
                 .context("coordinator resident source byte count overflow")?;
-            let upload_started = Instant::now();
-            let tensor_bytes =
-                preload_real_full_coordinator_resident_tensor(catalog, tensor, loaded)?;
-            upload_pack_ms += upload_started.elapsed().as_secs_f64() * 1_000.0;
+            let profile = preload_real_full_coordinator_resident_tensor(
+                catalog,
+                tensor,
+                &summary,
+                &message.buffer,
+            )?;
+            upload_pack_ms += profile.total_ms;
+            validation_cache_ms += profile.validation_cache_ms;
+            resident_library_ms += profile.resident.library_ms;
+            resident_lock_ms += profile.resident.lock_ms;
+            device_allocation_ms += profile.resident.device_allocation_ms;
+            staging_allocation_ms += profile.resident.staging_allocation_ms;
+            staging_fill_ms += profile.resident.staging_fill_ms;
+            h2d_ms += profile.resident.h2d_ms;
+            resident_finalize_ms += profile.resident.finalize_ms;
+            w4a16_pack_ms += profile.w4a16_pack_ms;
+            w8a16_pack_ms += profile.w8a16_pack_ms;
+            release_ms += profile.release_ms;
+            uploaded_tensors += usize::from(profile.resident.uploaded);
+            w4a16_packed_tensors += usize::from(profile.w4a16_packed);
+            w8a16_q_a_packed_tensors += usize::from(profile.w8a16_q_a_packed);
+            w8a16_q_b_packed_tensors += usize::from(profile.w8a16_q_b_packed);
+            w8a16_o_packed_tensors += usize::from(profile.w8a16_o_packed);
+            released_source_tensors += usize::from(profile.source_released);
             loaded_bytes = loaded_bytes
-                .checked_add(tensor_bytes)
+                .checked_add(profile.bytes)
                 .context("coordinator resident loaded byte count overflow")?;
+            source_return_senders
+                .get(message.worker_id)
+                .context("coordinator resident source worker return channel is missing")?
+                .send(message.buffer)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "coordinator resident source worker {} stopped before buffer return",
+                        message.worker_id
+                    )
+                })?;
         }
+        drop(source_return_senders);
         Ok(())
     })?;
+    let source_peak_pinned_bytes = source_worker_peak_bytes.iter().copied().sum::<usize>();
     let source_gbps = source_bytes as f64 / (source_ms * 1.0e6).max(1.0);
     eprintln!(
-        "real_full_coordinator_resident_source_load tensors={} workers={} bytes={} elapsed_ms={source_ms:.3} source_gbps={source_gbps:.3}",
+        "real_full_coordinator_resident_source_load tensors={} workers={} bytes={} elapsed_ms={source_ms:.3} source_gbps={source_gbps:.3} library_ms={source_library_ms:.3} allocation_ms={source_allocation_ms:.3} read_sum_ms={source_read_ms:.3} peak_pinned_bytes={source_peak_pinned_bytes}",
         tensors.len(),
         source_workers,
         source_bytes,
@@ -172,6 +390,21 @@ pub(super) fn preload_real_full_coordinator_resident_weights(
         tensors.len(),
         loaded_bytes,
     );
+    let attributed_ms = validation_cache_ms
+        + resident_library_ms
+        + resident_lock_ms
+        + device_allocation_ms
+        + staging_allocation_ms
+        + staging_fill_ms
+        + h2d_ms
+        + resident_finalize_ms
+        + w4a16_pack_ms
+        + w8a16_pack_ms
+        + release_ms;
+    let unattributed_ms = (upload_pack_ms - attributed_ms).max(0.0);
+    eprintln!(
+        "real_full_coordinator_resident_preload_detail uploaded_tensors={uploaded_tensors} validation_cache_ms={validation_cache_ms:.3} library_ms={resident_library_ms:.3} lock_ms={resident_lock_ms:.3} device_allocation_ms={device_allocation_ms:.3} staging_allocation_ms={staging_allocation_ms:.3} staging_fill_ms={staging_fill_ms:.3} h2d_ms={h2d_ms:.3} finalize_ms={resident_finalize_ms:.3} w4a16_pack_tensors={w4a16_packed_tensors} w4a16_pack_ms={w4a16_pack_ms:.3} w8a16_q_a_tensors={w8a16_q_a_packed_tensors} w8a16_q_b_tensors={w8a16_q_b_packed_tensors} w8a16_o_tensors={w8a16_o_packed_tensors} w8a16_pack_ms={w8a16_pack_ms:.3} released_source_tensors={released_source_tensors} release_ms={release_ms:.3} unattributed_ms={unattributed_ms:.3}"
+    );
     Ok(coordinator_resident_preload_plan_for_tensors(
         catalog,
         "loaded",
@@ -182,25 +415,25 @@ pub(super) fn preload_real_full_coordinator_resident_weights(
 fn preload_real_full_coordinator_resident_tensor(
     catalog: &TensorCatalog,
     tensor: &TensorInfo,
-    loaded: LoadedTensor,
-) -> Result<u64> {
+    summary: &LoadedTensorSummary,
+    source: &CoordinatorPinnedSourceBuffer,
+) -> Result<CoordinatorResidentTensorPreloadProfile> {
+    let tensor_started = Instant::now();
     let expected_bytes: usize = tensor.byte_length.try_into().with_context(|| {
         format!(
             "coordinator resident tensor {} byte length {} does not fit in usize",
             tensor.name, tensor.byte_length
         )
     })?;
-    let summary = loaded.summary();
-    validate_coordinator_resident_tensor_summary(tensor, &summary)?;
-    cache_router_correction_bias_host_values(catalog, tensor, &loaded.bytes)?;
-    preload_resident_weight_from_host_staging(
+    let validation_cache_started = Instant::now();
+    validate_coordinator_resident_tensor_summary(tensor, summary)?;
+    cache_router_correction_bias_host_values(catalog, tensor, source.as_slice(expected_bytes)?)?;
+    let validation_cache_ms = validation_cache_started.elapsed().as_secs_f64() * 1_000.0;
+    let resident = preload_resident_weight_from_pinned_host_profiled(
         &tensor.name,
         expected_bytes,
-        "startup resident coordinator weight pinned staging",
-        |staging| {
-            staging[..expected_bytes].copy_from_slice(&loaded.bytes);
-            Ok(())
-        },
+        "startup resident coordinator weight direct pinned source",
+        source.buffer,
     )
     .with_context(|| format!("preloading coordinator resident tensor {}", tensor.name))?;
     let pack_w4a16_q_b = tensor.name.ends_with(".self_attn.q_b_proj.weight")
@@ -221,6 +454,9 @@ fn preload_real_full_coordinator_resident_tensor(
         !(pack_w4a16_q_b && pack_w8a16_q_b),
         "coordinator Q-B projection cannot enable W4A16 and W8A16 simultaneously"
     );
+    let mut w4a16_pack_ms = 0.0_f64;
+    let mut w8a16_pack_ms = 0.0_f64;
+    let mut release_ms = 0.0_f64;
     if pack_w4a16_q_b || pack_w4a16_o_proj {
         anyhow::ensure!(
             tensor.dtype == DType::Bf16 && tensor.shape.len() == 2,
@@ -236,8 +472,10 @@ fn preload_real_full_coordinator_resident_tensor(
                 tensor.name
             )
         })?;
+        let pack_started = Instant::now();
         preload_coordinator_w4a16_projection(&tensor.name, size_k, size_n)
             .with_context(|| format!("packing coordinator W4A16 projection {}", tensor.name))?;
+        w4a16_pack_ms = pack_started.elapsed().as_secs_f64() * 1_000.0;
     }
     if pack_w8a16_q_a || pack_w8a16_q_b || pack_w8a16_o_proj {
         anyhow::ensure!(
@@ -254,8 +492,11 @@ fn preload_real_full_coordinator_resident_tensor(
                 tensor.name
             )
         })?;
+        let pack_started = Instant::now();
         preload_coordinator_w8a16_projection(&tensor.name, size_k, size_n)
             .with_context(|| format!("packing coordinator W8A16 projection {}", tensor.name))?;
+        w8a16_pack_ms = pack_started.elapsed().as_secs_f64() * 1_000.0;
+        let release_started = Instant::now();
         release_preloaded_resident_weight_device_buffer(&tensor.name, expected_bytes)
             .with_context(|| {
                 format!(
@@ -263,8 +504,22 @@ fn preload_real_full_coordinator_resident_tensor(
                     tensor.name
                 )
             })?;
+        release_ms = release_started.elapsed().as_secs_f64() * 1_000.0;
     }
-    Ok(summary.bytes_read)
+    Ok(CoordinatorResidentTensorPreloadProfile {
+        bytes: summary.bytes_read,
+        total_ms: tensor_started.elapsed().as_secs_f64() * 1_000.0,
+        validation_cache_ms,
+        resident,
+        w4a16_pack_ms,
+        w8a16_pack_ms,
+        release_ms,
+        w4a16_packed: pack_w4a16_q_b || pack_w4a16_o_proj,
+        w8a16_q_a_packed: pack_w8a16_q_a,
+        w8a16_q_b_packed: pack_w8a16_q_b,
+        w8a16_o_packed: pack_w8a16_o_proj,
+        source_released: pack_w8a16_q_a || pack_w8a16_q_b || pack_w8a16_o_proj,
+    })
 }
 
 fn coordinator_resident_preload_plan_for_tensors(

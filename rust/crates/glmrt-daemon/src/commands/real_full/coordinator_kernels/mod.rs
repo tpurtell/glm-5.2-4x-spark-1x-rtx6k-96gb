@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::ThreadId;
+use std::time::Instant;
 
 mod attention;
 pub(in crate::commands::real_full) use attention::*;
@@ -849,6 +850,18 @@ struct CoordinatorCudaResidentWeights {
     w4a16_quant_scratch: ReusableDeviceBuffer,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::commands::real_full) struct ResidentWeightPreloadTimings {
+    pub(in crate::commands::real_full) library_ms: f64,
+    pub(in crate::commands::real_full) lock_ms: f64,
+    pub(in crate::commands::real_full) device_allocation_ms: f64,
+    pub(in crate::commands::real_full) staging_allocation_ms: f64,
+    pub(in crate::commands::real_full) staging_fill_ms: f64,
+    pub(in crate::commands::real_full) h2d_ms: f64,
+    pub(in crate::commands::real_full) finalize_ms: f64,
+    pub(in crate::commands::real_full) uploaded: bool,
+}
+
 impl CoordinatorCudaResidentWeights {
     fn resident_weight_buffer(
         &mut self,
@@ -896,7 +909,27 @@ impl CoordinatorCudaResidentWeights {
         label: &'static str,
         fill_staging: impl FnOnce(&mut [u8]) -> Result<()>,
     ) -> Result<GlmrtDeviceBuffer> {
+        self.resident_weight_buffer_from_host_staging_profiled(
+            library,
+            name,
+            bytes,
+            label,
+            fill_staging,
+        )
+        .map(|(buffer, _)| buffer)
+    }
+
+    fn resident_weight_buffer_from_host_staging_profiled(
+        &mut self,
+        library: &'static NativeLibrary,
+        name: &str,
+        bytes: usize,
+        label: &'static str,
+        fill_staging: impl FnOnce(&mut [u8]) -> Result<()>,
+    ) -> Result<(GlmrtDeviceBuffer, ResidentWeightPreloadTimings)> {
+        let mut timings = ResidentWeightPreloadTimings::default();
         let key = resident_weight_registry_key(name, bytes);
+        let allocation_started = Instant::now();
         let buffer = {
             let resident = self
                 .resident_weights
@@ -904,13 +937,17 @@ impl CoordinatorCudaResidentWeights {
                 .or_insert_with(ResidentDeviceBuffer::default);
             resident.ensure_capacity(library, name, bytes, label)?
         };
+        timings.device_allocation_ms = allocation_started.elapsed().as_secs_f64() * 1_000.0;
         let needs_upload = self
             .resident_weights
             .get(&key)
             .map(|resident| !resident.uploaded)
             .unwrap_or(true);
         if needs_upload {
+            let staging_allocation_started = Instant::now();
             let staging = self.host_buffer(library, bytes, label)?;
+            timings.staging_allocation_ms =
+                staging_allocation_started.elapsed().as_secs_f64() * 1_000.0;
             if staging.ptr.is_null() {
                 anyhow::bail!("resident CUDA weight {name} pinned staging buffer is null");
             }
@@ -922,18 +959,77 @@ impl CoordinatorCudaResidentWeights {
             }
             let staging_slice =
                 unsafe { slice::from_raw_parts_mut(staging.ptr.cast::<u8>(), bytes) };
+            let staging_fill_started = Instant::now();
             fill_staging(staging_slice)?;
+            timings.staging_fill_ms = staging_fill_started.elapsed().as_secs_f64() * 1_000.0;
+            let h2d_started = Instant::now();
             library
                 .copy_host_buffer_h2d(buffer, staging, bytes)
                 .with_context(|| format!("uploading resident CUDA weight {name}"))?;
+            timings.h2d_ms = h2d_started.elapsed().as_secs_f64() * 1_000.0;
+            let finalize_started = Instant::now();
             let resident = self
                 .resident_weights
                 .get_mut(&key)
                 .with_context(|| format!("resident CUDA weight {name} disappeared after upload"))?;
             resident.uploaded = true;
             resident.upload_count += 1;
+            timings.finalize_ms = finalize_started.elapsed().as_secs_f64() * 1_000.0;
+            timings.uploaded = true;
         }
-        Ok(buffer)
+        Ok((buffer, timings))
+    }
+
+    fn resident_weight_buffer_from_pinned_host_profiled(
+        &mut self,
+        library: &'static NativeLibrary,
+        name: &str,
+        bytes: usize,
+        label: &'static str,
+        source: GlmrtHostBuffer,
+    ) -> Result<(GlmrtDeviceBuffer, ResidentWeightPreloadTimings)> {
+        let mut timings = ResidentWeightPreloadTimings::default();
+        anyhow::ensure!(
+            !source.ptr.is_null(),
+            "resident CUDA weight {name} pinned source buffer is null"
+        );
+        anyhow::ensure!(
+            source.bytes >= bytes,
+            "resident CUDA weight {name} pinned source buffer has {} bytes, needs {bytes}",
+            source.bytes
+        );
+        let key = resident_weight_registry_key(name, bytes);
+        let allocation_started = Instant::now();
+        let buffer = {
+            let resident = self
+                .resident_weights
+                .entry(key.clone())
+                .or_insert_with(ResidentDeviceBuffer::default);
+            resident.ensure_capacity(library, name, bytes, label)?
+        };
+        timings.device_allocation_ms = allocation_started.elapsed().as_secs_f64() * 1_000.0;
+        let needs_upload = self
+            .resident_weights
+            .get(&key)
+            .map(|resident| !resident.uploaded)
+            .unwrap_or(true);
+        if needs_upload {
+            let h2d_started = Instant::now();
+            library
+                .copy_host_buffer_h2d(buffer, source, bytes)
+                .with_context(|| format!("uploading resident CUDA weight {name}"))?;
+            timings.h2d_ms = h2d_started.elapsed().as_secs_f64() * 1_000.0;
+            let finalize_started = Instant::now();
+            let resident = self
+                .resident_weights
+                .get_mut(&key)
+                .with_context(|| format!("resident CUDA weight {name} disappeared after upload"))?;
+            resident.uploaded = true;
+            resident.upload_count += 1;
+            timings.finalize_ms = finalize_started.elapsed().as_secs_f64() * 1_000.0;
+            timings.uploaded = true;
+        }
+        Ok((buffer, timings))
     }
 
     fn preloaded_resident_weight_buffer(
@@ -2138,6 +2234,14 @@ impl CoordinatorCudaGraphWorkspaceSlot {
             &mut CoordinatorCudaWorkspace,
         ) -> Result<()>,
     ) -> Result<()> {
+        if graph_capture_trace_enabled() {
+            eprintln!(
+                "real_full_graph_capture_initial shape={} bucket={} program={program:?} signature={signature:?} entries={}",
+                self.plan.key.shape.label(),
+                self.plan.key.row_bucket.row_capacity,
+                self.captured_graphs.len(),
+            );
+        }
         let stream = self.stream_ptr();
         unsafe {
             library
@@ -2816,20 +2920,26 @@ impl OwnedCoordinatorDeviceBuffer {
     }
 }
 
+pub(in crate::commands::real_full) struct CoordinatorOwnedDeviceBufferBankScope(usize);
+
+impl Drop for CoordinatorOwnedDeviceBufferBankScope {
+    fn drop(&mut self) {
+        COORDINATOR_OWNED_DEVICE_BUFFER_BANK.with(|current| current.set(self.0));
+    }
+}
+
+pub(in crate::commands::real_full) fn coordinator_owned_device_buffer_bank_scope(
+    bank: usize,
+) -> CoordinatorOwnedDeviceBufferBankScope {
+    let previous = COORDINATOR_OWNED_DEVICE_BUFFER_BANK.with(|current| current.replace(bank));
+    CoordinatorOwnedDeviceBufferBankScope(previous)
+}
+
 pub(in crate::commands::real_full) fn with_coordinator_owned_device_buffer_bank<T, E>(
     bank: usize,
     action: impl FnOnce() -> std::result::Result<T, E>,
 ) -> std::result::Result<T, E> {
-    struct RestoreBank(usize);
-
-    impl Drop for RestoreBank {
-        fn drop(&mut self) {
-            COORDINATOR_OWNED_DEVICE_BUFFER_BANK.with(|current| current.set(self.0));
-        }
-    }
-
-    let previous = COORDINATOR_OWNED_DEVICE_BUFFER_BANK.with(|current| current.replace(bank));
-    let _restore = RestoreBank(previous);
+    let _scope = coordinator_owned_device_buffer_bank_scope(bank);
     action()
 }
 

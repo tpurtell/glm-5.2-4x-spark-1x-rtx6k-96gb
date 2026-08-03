@@ -24,8 +24,15 @@ Environment:
   GLMRT_SPARK_FORCE_BUILD_IMAGE     set 1 to rebuild remotely even when image exists
   GLMRT_SPARK_IMAGE_ONLY            set 1 to stage/ensure images and exit before starting experts
   GLMRT_SPARK_BUILD_PROFILE         debug or release; default: release
-  GLMRT_SPARK_PREBUILT              use /opt/glmrt release artifacts from the
-                                      image instead of building mounted source
+  GLMRT_SPARK_PREBUILT              use prebuilt artifacts instead of building
+                                      mounted source
+  GLMRT_SPARK_PREBUILT_BIN          default: /opt/glmrt/bin/glmrt
+  GLMRT_SPARK_PREBUILT_NATIVE_LIB   default: /opt/glmrt/lib/libglmrt_native.so
+  GLMRT_SPARK_EXISTING_CONTAINER    execute inside this persistent dev
+                                      container instead of creating one
+  GLMRT_SPARK_RUNTIME_CACHE_DIR     persistent host/container cache root;
+                                      defaults to /wip/cache for WIP containers
+                                      and ~/.cache/glmrt for release containers
   GLMRT_SPARK_GPU_RUNTIME           nvidia or manual; default: nvidia
   GLMRT_SPARK_WORKDIR               default: $HOME/glmrt-phase0-spark-bench
   GLMRT_SPARK_SKIP_STAGE            set 1 when the committed source is already staged remotely
@@ -129,6 +136,10 @@ force_build_image="${GLMRT_SPARK_FORCE_BUILD_IMAGE:-0}"
 image_only="${GLMRT_SPARK_IMAGE_ONLY:-0}"
 build_profile="${GLMRT_SPARK_BUILD_PROFILE:-release}"
 prebuilt="${GLMRT_SPARK_PREBUILT:-0}"
+prebuilt_bin="${GLMRT_SPARK_PREBUILT_BIN:-/opt/glmrt/bin/glmrt}"
+prebuilt_native_lib="${GLMRT_SPARK_PREBUILT_NATIVE_LIB:-/opt/glmrt/lib/libglmrt_native.so}"
+existing_container="${GLMRT_SPARK_EXISTING_CONTAINER:-}"
+runtime_cache_dir="${GLMRT_SPARK_RUNTIME_CACHE_DIR:-}"
 gpu_runtime="${GLMRT_SPARK_GPU_RUNTIME:-nvidia}"
 port="${GLMRT_SPARK_EXPERT_PORT:-9100}"
 expert_transport="${GLMRT_SPARK_EXPERT_TRANSPORT:-tcp}"
@@ -434,6 +445,20 @@ case "$prebuilt" in
     exit 2
     ;;
 esac
+if [ -n "$existing_container" ]; then
+  [ "$prebuilt" = "1" ] || {
+    echo "GLMRT_SPARK_EXISTING_CONTAINER requires GLMRT_SPARK_PREBUILT=1" >&2
+    exit 2
+  }
+  [[ "$existing_container" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]+$ ]] || {
+    echo "invalid GLMRT_SPARK_EXISTING_CONTAINER: $existing_container" >&2
+    exit 2
+  }
+  [[ "$prebuilt_bin" = /* && "$prebuilt_native_lib" = /* ]] || {
+    echo "persistent-container prebuilt artifact paths must be absolute" >&2
+    exit 2
+  }
+fi
 case "$gpu_runtime" in
   nvidia|manual) ;;
   *)
@@ -650,6 +675,10 @@ fi
 
 container_name_for_host() {
   local host="$1"
+  if [ -n "$existing_container" ]; then
+    echo "$existing_container"
+    return
+  fi
   echo "${container_prefix}-${host}-${port}"
 }
 
@@ -665,6 +694,12 @@ cleanup() {
   for host in "${hosts[@]}"; do
     local container
     container="$(container_name_for_host "$host")"
+    if [ -n "$existing_container" ]; then
+      ssh -o BatchMode=yes "$host" \
+        "docker exec '$container' '$remote_dir/scripts/wip-process.sh' stop 'expert-$port'" \
+        >/dev/null 2>&1 || true
+      continue
+    fi
     ssh -o BatchMode=yes "$host" bash -s -- "$container" "$remote_dir" <<'REMOTE' >/dev/null 2>&1 || true
 set -euo pipefail
 container="$1"
@@ -686,6 +721,7 @@ stage_repo() {
     --exclude '.git' \
     --exclude '.venv/' \
     --exclude '.glmrt-cache/' \
+    --exclude '.glmrt-wip/' \
     --exclude '.mypy_cache/' \
     --exclude '.pytest_cache/' \
     --exclude '.ruff_cache/' \
@@ -997,9 +1033,14 @@ start_expertd() {
   local intermediate_rdma_additional_peers_arg="${intermediate_rdma_additional_peers:-__unset__}"
   local intermediate_rdma_devices_arg="${intermediate_rdma_devices:-__unset__}"
   local serve_profile_arg="${serve_profile:-__unset__}"
+  # ssh flattens its argument vector into a remote shell command. A quoted
+  # empty argument is not preserved, so use sentinels for optional arguments
+  # late in the vector or every following positional parameter shifts left.
+  local existing_container_arg="${existing_container:-__unset__}"
+  local runtime_cache_dir_arg="${runtime_cache_dir:-__unset__}"
   echo "== starting $mode ProtocolV2 expertd on $host:$port transport=$expert_transport real_layer=${expert_real_layer:-all} mtp_bf16_experts=$mtp_bf16_experts intermediate_shard=${intermediate_shard_rank}/${intermediate_shards} intermediate_reduction=$intermediate_reduction reduction_dtype=$intermediate_reduction_dtype owner_reduction_dtype=$intermediate_owner_reduction_dtype fused_fp8_reduction=$fused_fp8_reduction protocol_v2_execution_lanes=$protocol_v2_verbs_host_execution_lanes packed_direct_max_rows=$protocol_v2_packed_direct_max_rows spark_layer_blocks=$spark_layer_blocks transformer_tp=$spark_transformer_tp transformer_tp_range=$spark_transformer_tp_range managed_route_projections=${managed_route_projections:-0} grouped_multirow=${grouped_multirow:-0} route_cuda_graphs=${route_cuda_graphs:-0} b12x_spark_aot=${b12x_spark_aot:-0} b12x_route_lanes=$b12x_route_lanes b12x_grouped_decode=$b12x_grouped_decode serve_profile=${serve_profile:-unset} b12x_w4a16_device_weights=$b12x_w4a16_device_weights b12x_w4a16_m1_fused_sum=$b12x_w4a16_m1_fused_sum b12x_w4a16_small_m_mode=$b12x_w4a16_small_m_mode nccl_ib_hca=$nccl_ib_hca nccl_cross_nic=$nccl_cross_nic nccl_netdevs_policy=$nccl_netdevs_policy nccl_ib_merge_nics=$nccl_ib_merge_nics nccl_p2p_net_chunksize=$nccl_p2p_net_chunksize nccl_launch_order_implicit=$nccl_launch_order_implicit route_cuda_event_timing=${route_cuda_event_timing:-0} route_timing=${route_timing:-0} build_profile=$build_profile gpu_runtime=$gpu_runtime =="
   ssh -o BatchMode=yes "$host" bash -s -- \
-    "$remote_dir" "$image" "$container" "$mode" "$port" "$catalog_arg" "$loadplan_arg" "$host" "$layer_id" "$expert_real_layer" "$managed_route_projections" "$build_profile" "$gpu_runtime" "${GLMRT_PROTOCOL_V2_TCP_TIMING:-0}" "${GLMRT_REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING:-0}" "$grouped_multirow" "$route_cuda_graphs" "$route_timing" "$expert_transport" "$verbs_ib_port_num_arg" "$route_cuda_event_timing" "$b12x_spark_aot" "$route_validate" "$b12x_route_lanes" "$intermediate_shards" "$intermediate_shard_rank" "$intermediate_reduction" "$intermediate_reduction_dtype" "$intermediate_reduction_root" "$intermediate_reduction_port" "$intermediate_reduction_min_rows" "$nccl_socket_ifname" "$nccl_ib_hca" "$nccl_debug" "$b12x_grouped_decode" "$intermediate_owner_max_rows" "$intermediate_owner_port" "$intermediate_owner_peers_arg" "$spark_layer_blocks" "$spark_layer_block_kv_dtype" "$spark_transformer_tp" "$spark_transformer_tp_range" "$spark_transformer_tp_root" "$spark_transformer_tp_port" "$spark_transformer_tp_collective_probe_iters" "$fused_fp8_reduction" "$nccl_bf16_reduce" "$b12x_w4a16_decode_grid_x_arg" "$b12x_w4a16_device_weights" "$intermediate_row_sharded_reduction" "$nccl_launch_order_implicit" "$protocol_v2_verbs_host_execution_lanes" "$intermediate_rdma_peers" "$intermediate_rdma_port" "$intermediate_rdma_slot_bytes" "$intermediate_rdma_ring_depth" "$intermediate_owner_reduction_dtype" "$nccl_cross_nic" "$intermediate_rdma_additional_peers_arg" "$intermediate_rdma_devices_arg" "$intermediate_rdma_stripe_min_bytes" "$nccl_netdevs_policy" "$nccl_ib_merge_nics" "$nccl_p2p_net_chunksize" "$protocol_v2_packed_direct_max_rows" "$b12x_w4a16_m1_fused_sum" "$b12x_w4a16_small_m_mode" "$model_id" "${GLMRT_SPARK_INCLUDE_MTP_LAYER:-1}" "$mtp_bf16_experts" "$release_config_sha256_arg" "$prebuilt" "$route_preload_io_workers" "$weight_preload_nccl_port" "$route_preload_cooperative" "$serve_profile_arg" <<'REMOTE'
+    "$remote_dir" "$image" "$container" "$mode" "$port" "$catalog_arg" "$loadplan_arg" "$host" "$layer_id" "$expert_real_layer" "$managed_route_projections" "$build_profile" "$gpu_runtime" "${GLMRT_PROTOCOL_V2_TCP_TIMING:-0}" "${GLMRT_REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING:-0}" "$grouped_multirow" "$route_cuda_graphs" "$route_timing" "$expert_transport" "$verbs_ib_port_num_arg" "$route_cuda_event_timing" "$b12x_spark_aot" "$route_validate" "$b12x_route_lanes" "$intermediate_shards" "$intermediate_shard_rank" "$intermediate_reduction" "$intermediate_reduction_dtype" "$intermediate_reduction_root" "$intermediate_reduction_port" "$intermediate_reduction_min_rows" "$nccl_socket_ifname" "$nccl_ib_hca" "$nccl_debug" "$b12x_grouped_decode" "$intermediate_owner_max_rows" "$intermediate_owner_port" "$intermediate_owner_peers_arg" "$spark_layer_blocks" "$spark_layer_block_kv_dtype" "$spark_transformer_tp" "$spark_transformer_tp_range" "$spark_transformer_tp_root" "$spark_transformer_tp_port" "$spark_transformer_tp_collective_probe_iters" "$fused_fp8_reduction" "$nccl_bf16_reduce" "$b12x_w4a16_decode_grid_x_arg" "$b12x_w4a16_device_weights" "$intermediate_row_sharded_reduction" "$nccl_launch_order_implicit" "$protocol_v2_verbs_host_execution_lanes" "$intermediate_rdma_peers" "$intermediate_rdma_port" "$intermediate_rdma_slot_bytes" "$intermediate_rdma_ring_depth" "$intermediate_owner_reduction_dtype" "$nccl_cross_nic" "$intermediate_rdma_additional_peers_arg" "$intermediate_rdma_devices_arg" "$intermediate_rdma_stripe_min_bytes" "$nccl_netdevs_policy" "$nccl_ib_merge_nics" "$nccl_p2p_net_chunksize" "$protocol_v2_packed_direct_max_rows" "$b12x_w4a16_m1_fused_sum" "$b12x_w4a16_small_m_mode" "$model_id" "${GLMRT_SPARK_INCLUDE_MTP_LAYER:-1}" "$mtp_bf16_experts" "$release_config_sha256_arg" "$prebuilt" "$route_preload_io_workers" "$weight_preload_nccl_port" "$route_preload_cooperative" "$serve_profile_arg" "$existing_container_arg" "$prebuilt_bin" "$prebuilt_native_lib" "$runtime_cache_dir_arg" <<'REMOTE'
 set -euo pipefail
 remote_dir="$1"
 image="$2"
@@ -1105,6 +1146,16 @@ serve_profile="${76:-}"
 if [ "$serve_profile" = "__unset__" ]; then
   serve_profile=""
 fi
+existing_container="${77:-}"
+if [ "$existing_container" = "__unset__" ]; then
+  existing_container=""
+fi
+prebuilt_bin="${78:-/opt/glmrt/bin/glmrt}"
+prebuilt_native_lib="${79:-/opt/glmrt/lib/libglmrt_native.so}"
+runtime_cache_dir="${80:-}"
+if [ "$runtime_cache_dir" = "__unset__" ]; then
+  runtime_cache_dir=""
+fi
 
 discover_rdma_device_map() {
   local entries=()
@@ -1139,7 +1190,17 @@ if [ "$expert_transport" = "verbs-host" ]; then
   echo "verbs-host RDMA device map: $rdma_device_map" >&2
 fi
 
-docker rm -f "$container" >/dev/null 2>&1 || true
+if [ -z "$existing_container" ]; then
+  docker rm -f "$container" >/dev/null 2>&1 || true
+fi
+if [ -n "$existing_container" ]; then
+  runtime_cache_dir="${runtime_cache_dir:-/wip/cache}"
+  runtime_catalog_cache_dir="$runtime_cache_dir/catalogs"
+else
+  host_runtime_cache_dir="${runtime_cache_dir:-${XDG_CACHE_HOME:-$HOME/.cache}/glmrt}"
+  mkdir -p "$host_runtime_cache_dir/catalogs"
+  runtime_catalog_cache_dir=/var/cache/glmrt/catalogs
+fi
 docker_args=(
   run -d
   --name "$container"
@@ -1160,6 +1221,7 @@ docker_args=(
   -e GLMRT_SPARK_INCLUDE_MTP_LAYER="$include_mtp_layer"
   -e GLMRT_MTP_BF16_EXPERTS="$mtp_bf16_experts"
   -e GLMRT_RELEASE_CONFIG_SHA256="$release_config_sha256"
+  -e GLMRT_RUNTIME_CATALOG_CACHE_DIR="$runtime_catalog_cache_dir"
   -e GLMRT_BENCH_MODE="$mode"
   -e GLMRT_BENCH_PORT="$port"
   -e GLMRT_BENCH_CATALOG="$catalog"
@@ -1170,6 +1232,8 @@ docker_args=(
   -e GLMRT_BENCH_TRANSPORT="$expert_transport"
   -e GLMRT_SPARK_BUILD_PROFILE="$build_profile"
   -e GLMRT_SPARK_PREBUILT="$prebuilt"
+  -e GLMRT_SPARK_PREBUILT_BIN="$prebuilt_bin"
+  -e GLMRT_SPARK_PREBUILT_NATIVE_LIB="$prebuilt_native_lib"
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_MANAGED_PROJECTIONS="$managed_route_projections"
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_IO_WORKERS="$route_preload_io_workers"
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE="$route_preload_cooperative"
@@ -1229,6 +1293,9 @@ docker_args=(
   -e GLMRT_REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING="$protocol_v2_executor_timing"
   -e GLMRT_REAL_FULL_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS="$protocol_v2_packed_direct_max_rows"
 )
+if [ -z "$existing_container" ]; then
+  docker_args+=(-v "$host_runtime_cache_dir:/var/cache/glmrt")
+fi
 if [ -n "$serve_profile" ]; then
   docker_args+=(-e GLMRT_SERVE_PROFILE="$serve_profile")
 fi
@@ -1273,20 +1340,66 @@ if [ -e /dev/infiniband ]; then
   docker_args+=(--device=/dev/infiniband)
 fi
 
+if [ -n "$existing_container" ]; then
+  [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" = true ] || {
+    echo "persistent WIP container is not running: $container" >&2
+    exit 2
+  }
+  docker exec "$container" test -x "$remote_dir/scripts/wip-process.sh"
+  docker exec "$container" mkdir -p "$runtime_catalog_cache_dir"
+  docker_args+=(
+    -e "PYTHONPATH=$remote_dir/third_party/sparkinfer:$remote_dir/python/reference/glmrt_reference:$remote_dir/python/reference:/opt/glmrt/third_party/sparkinfer"
+  )
+  exec_env_args=()
+  for ((arg_index = 0; arg_index < ${#docker_args[@]}; arg_index++)); do
+    if [ "${docker_args[$arg_index]}" = -e ]; then
+      ((arg_index += 1))
+      exec_env_args+=(-e "${docker_args[$arg_index]}")
+    fi
+  done
+  process_name="expert-$port"
+  docker exec "$container" \
+    "$remote_dir/scripts/wip-process.sh" stop "$process_name"
+  docker exec -d \
+    "${exec_env_args[@]}" \
+    -w "$remote_dir" \
+    "$container" \
+    "$remote_dir/scripts/wip-process.sh" run "$process_name" bash -lc '
+set -euo pipefail
+cd "$PWD"
+test -x "$GLMRT_SPARK_PREBUILT_BIN"
+test -s "$GLMRT_SPARK_PREBUILT_NATIVE_LIB"
+export GLMRT_REAL_FULL_CUDA_REFERENCE_KERNELS=1
+export GLMRT_NATIVE_LIB="$GLMRT_SPARK_PREBUILT_NATIVE_LIB"
+real_layer_args=()
+case "${GLMRT_BENCH_REAL_LAYER:-}" in
+  ""|all|none) ;;
+  *) real_layer_args=(--real-layer "$GLMRT_BENCH_REAL_LAYER") ;;
+esac
+exec "$GLMRT_SPARK_PREBUILT_BIN" expertd \
+  --transport "${GLMRT_BENCH_TRANSPORT:-tcp}" \
+  --listen "0.0.0.0:${GLMRT_BENCH_PORT}" \
+  --model-id "$GLMRT_MODEL_ID" \
+  "${real_layer_args[@]}" \
+  --role "$GLMRT_BENCH_ROLE_HOSTNAME"
+'
+  exit 0
+fi
+
 docker "${docker_args[@]}" "$image" bash -lc '
 set -euo pipefail
 cd /workspace/glmrt
 if [ "${GLMRT_SPARK_PREBUILT:-0}" = "1" ]; then
-  test -x /opt/glmrt/bin/glmrt
-  test -s /opt/glmrt/lib/libglmrt_native.so
+  test -x "$GLMRT_SPARK_PREBUILT_BIN"
+  test -s "$GLMRT_SPARK_PREBUILT_NATIVE_LIB"
   export GLMRT_REAL_FULL_CUDA_REFERENCE_KERNELS=1
-  export GLMRT_NATIVE_LIB=/opt/glmrt/lib/libglmrt_native.so
+  export GLMRT_NATIVE_LIB="$GLMRT_SPARK_PREBUILT_NATIVE_LIB"
   real_layer_args=()
   case "${GLMRT_BENCH_REAL_LAYER:-}" in
     ""|all|none) ;;
     *) real_layer_args=(--real-layer "$GLMRT_BENCH_REAL_LAYER") ;;
   esac
-  exec /opt/glmrt/bin/glmrt expertd \
+  exec "$GLMRT_SPARK_PREBUILT_BIN" expertd \
     --transport "${GLMRT_BENCH_TRANSPORT:-tcp}" \
     --listen "0.0.0.0:${GLMRT_BENCH_PORT}" \
     --model-id "$GLMRT_MODEL_ID" \
@@ -1400,7 +1513,13 @@ wait_for_port() {
     sleep 1
   done
   echo "expert daemon on ${host}:${port} did not become ready within ${timeout_s}s" >&2
-  ssh -o BatchMode=yes "$host" "docker logs '$(container_name_for_host "$host")' 2>&1 | tail -120" >&2 || true
+  if [ -n "$existing_container" ]; then
+    ssh -o BatchMode=yes "$host" \
+      "docker exec '$existing_container' '$remote_dir/scripts/wip-process.sh' log 'expert-$port' 120" \
+      >&2 || true
+  else
+    ssh -o BatchMode=yes "$host" "docker logs '$(container_name_for_host "$host")' 2>&1 | tail -120" >&2 || true
+  fi
   exit 1
 }
 
@@ -1429,6 +1548,8 @@ if [ "$model_sync_only" = "1" ]; then
   echo "Spark model-cache sync complete: $model_id"
   exit 0
 fi
+start_hosts=()
+start_pids=()
 for host_index in "${!hosts[@]}"; do
   host="${hosts[$host_index]}"
   if [ "$skip_stage" != "1" ]; then
@@ -1453,9 +1574,21 @@ for host_index in "${!hosts[@]}"; do
       expert_ids+=("${host}=$(expert_id_for_host "$host")")
     fi
   fi
-  start_expertd "$host" "$(container_name_for_host "$host")" "$loadplan" "$host_index"
   targets+=("${host}:${port}")
+  start_expertd "$host" "$(container_name_for_host "$host")" "$loadplan" "$host_index" &
+  start_hosts+=("$host")
+  start_pids+=("$!")
 done
+start_failed=0
+for host_index in "${!start_pids[@]}"; do
+  if ! wait "${start_pids[$host_index]}"; then
+    echo "failed to start expertd on ${start_hosts[$host_index]}" >&2
+    start_failed=1
+  fi
+done
+if [ "$start_failed" != "0" ]; then
+  exit 1
+fi
 
 for host in "${hosts[@]}"; do
   wait_for_port "$host"

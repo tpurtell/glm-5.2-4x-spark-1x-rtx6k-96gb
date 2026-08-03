@@ -67,6 +67,7 @@ tar \
   --exclude=.glmrt-cache \
   --exclude=.glmrt-release \
   --exclude=.glmrt-release-image \
+  --exclude=.glmrt-wip \
   --exclude=dist \
   --exclude=rust/target \
   --exclude='native/build*' \

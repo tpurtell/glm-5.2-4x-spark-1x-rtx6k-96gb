@@ -3,6 +3,17 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+startup_started_ns="$(date +%s%N)"
+startup_phase_started_ns="$startup_started_ns"
+
+report_shell_startup_phase() {
+  local stage="$1" now_ns elapsed_ms total_ms
+  now_ns="$(date +%s%N)"
+  elapsed_ms=$(((now_ns - startup_phase_started_ns) / 1000000))
+  total_ms=$(((now_ns - startup_started_ns) / 1000000))
+  echo "coordinator_shell_startup_phase stage=$stage elapsed_ms=$elapsed_ms total_ms=$total_ms" >&2
+  startup_phase_started_ns="$now_ns"
+}
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
@@ -894,8 +905,11 @@ if [ -n "$loadplan" ]; then
   }
 fi
 
+report_shell_startup_phase configuration
 configure_host_python
+report_shell_startup_phase host-python
 configure_pinned_sparkinfer
+report_shell_startup_phase sparkinfer-source-verification
 
 if [ "$require_cuda" = "1" ]; then
   if [ "$build_native" = "1" ] && [ "$native_lib_explicit" = "0" ]; then
@@ -966,8 +980,21 @@ export GLMRT_COORDINATOR_W8A16_ASYNC_ATTENTION="$w8a16_async_attention"
 export GLMRT_REAL_FULL_REQUEST_THREAD_PINNED="${GLMRT_REAL_FULL_REQUEST_THREAD_PINNED:-$GLMRT_B12X}"
 export GLMRT_REAL_FULL_REQUEST_THREAD_PINNED_WORKERS="${GLMRT_REAL_FULL_REQUEST_THREAD_PINNED_WORKERS:-1}"
 export GLMRT_ENGINE_COMMIT="${GLMRT_ENGINE_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
-export FLASHINFER_WORKSPACE_BASE="${GLMRT_FLASHINFER_WORKSPACE_BASE:-$HOME/.cache/glmrt/flashinfer-workspace-${UID}}"
-mkdir -p "$FLASHINFER_WORKSPACE_BASE"
+kernel_cache_base="${GLMRT_KERNEL_CACHE_BASE:-${GLMRT_FLASHINFER_WORKSPACE_BASE:-${FLASHINFER_WORKSPACE_BASE:-$HOME/.cache/glmrt/kernel-cache-${UID}}}}"
+kernel_cache_environment_id="${GLMRT_KERNEL_CACHE_ENVIRONMENT_ID:-}"
+if [ -z "$kernel_cache_environment_id" ]; then
+  kernel_cache_environment_id="host-$(uname -srm)-$(sha256sum "$native_lib" | awk '{print $1}')"
+fi
+mkdir -p "$kernel_cache_base"
+kernel_cache_identity="$("$GLMRT_PYTHON" "$repo_root/scripts/kernel-cache-identity.py" \
+  --cache-root "$kernel_cache_base" \
+  --environment-id "$kernel_cache_environment_id")"
+kernel_cache_identity_root="$kernel_cache_base/$kernel_cache_identity"
+export FLASHINFER_WORKSPACE_BASE="$kernel_cache_identity_root/flashinfer"
+export SPARKINFER_COMPILE_CACHE_DIR="${GLMRT_SPARKINFER_COMPILE_CACHE_DIR:-$kernel_cache_identity_root/sparkinfer/compile}"
+mkdir -p "$FLASHINFER_WORKSPACE_BASE" "$SPARKINFER_COMPILE_CACHE_DIR"
+echo "kernel_cache_identity identity=$kernel_cache_identity base=$kernel_cache_base flashinfer=$FLASHINFER_WORKSPACE_BASE sparkinfer=$SPARKINFER_COMPILE_CACHE_DIR"
+report_shell_startup_phase kernel-cache-identity
 
 if [ -z "$expert_hosts" ]; then
   IFS=',' read -r -a hosts <<< "$hosts_csv"
@@ -1009,6 +1036,7 @@ if [ "$start_experts" = "1" ]; then
     GLMRT_PHASE0_SPARK_EXPERT_MODE=real \
     scripts/phase0-spark-tcp-bench.sh
 fi
+report_shell_startup_phase expert-launch
 
 if [ "$check_experts" = "1" ] && [ "$coordinator_transport" != "verbs-host" ]; then
   echo "== checking expert TCP targets ==" >&2
@@ -1030,6 +1058,7 @@ if [ "$build_daemon" = "1" ]; then
   fi
   cargo build --manifest-path rust/Cargo.toml -p glmrt-daemon "${cargo_profile_args[@]}"
 fi
+report_shell_startup_phase daemon-build
 
 if [ ! -x "$bin" ]; then
   bin="$repo_root/scripts/glmrt"
@@ -1052,6 +1081,7 @@ if [ -n "$expert_warmup_status_file" ]; then
 else
   warmup_protocol_v2_experts
 fi
+report_shell_startup_phase expert-warmup-dispatch
 
 echo "== starting real-full ${coordinator_transport} API coordinator ==" >&2
 echo "listen=${addr}" >&2
@@ -1075,6 +1105,8 @@ if [ -n "$shared_cpu_list" ] \
   echo "shared_cpu_list=${shared_cpu_list:-none} request_worker_cpus=${GLMRT_REAL_FULL_REQUEST_WORKER_CPUS:-none} scheduler_worker_cpu=${GLMRT_REAL_FULL_SCHEDULER_WORKER_CPU:-none}" >&2
 fi
 if [ -n "$shared_cpu_list" ]; then
+  report_shell_startup_phase coordinator-exec
   exec taskset -c "$shared_cpu_list" "${coordinator_command[@]}"
 fi
+report_shell_startup_phase coordinator-exec
 exec "${coordinator_command[@]}"

@@ -3,14 +3,20 @@ use glmrt_core::{
     owner_for_expert, PlacementPolicy, TensorCatalog, TensorRole, EXPERT_HOSTS, SUPPORTED_MODEL_IDS,
 };
 use glmrt_loader::{
-    build_catalog, build_load_plan, classification_summary_markdown, encode_tokenizer_text,
-    load_tensor_bytes_with_options, resolve_snapshot, LoadedTensorSummary, TensorLoadOptions,
+    build_catalog, build_catalog_for_snapshot, build_load_plan, classification_summary_markdown,
+    encode_tokenizer_text, load_tensor_bytes_with_options, resolve_snapshot, LoadedTensorSummary,
+    TensorLoadOptions,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    env,
     fs::{self, File},
+    io::{Read, Write},
+    path::{Path, PathBuf},
     str::FromStr,
+    time::Instant,
 };
 
 use crate::cli::{InspectModelArgs, LoadTensorsArgs, MakeLoadPlanArgs, TokenizeArgs};
@@ -22,14 +28,287 @@ pub(crate) use loadplan::read_expert_owner_lookup;
 use loadplan::write_node_load_plans;
 pub(crate) use loadplan::{read_expert_loadplan, read_expert_serving_loadplan};
 
+const RUNTIME_CATALOG_CACHE_DIR_ENV: &str = "GLMRT_RUNTIME_CATALOG_CACHE_DIR";
+const RUNTIME_CATALOG_CACHE_SCHEMA: u32 = 1;
+
+#[derive(Debug, Deserialize)]
+struct RuntimeCatalogSafetensorsIndex {
+    weight_map: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RuntimeCatalogCacheManifest {
+    schema: u32,
+    model_id: String,
+    snapshot_path: String,
+    source_identity: String,
+    payload_bytes: u64,
+    payload_sha256: String,
+}
+
 pub(crate) fn build_runtime_catalog(model_id: &str) -> Result<TensorCatalog> {
     anyhow::ensure!(
         SUPPORTED_MODEL_IDS.contains(&model_id),
         "unsupported production checkpoint {model_id:?}; supported checkpoints: {}",
         SUPPORTED_MODEL_IDS.join(", ")
     );
-    build_catalog(model_id, None)
-        .with_context(|| format!("building runtime tensor catalog for {model_id}"))
+    let Some(cache_dir) = env::var_os(RUNTIME_CATALOG_CACHE_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return build_catalog(model_id, None)
+            .with_context(|| format!("building runtime tensor catalog for {model_id}"));
+    };
+
+    let resolution = resolve_snapshot(model_id, None)?;
+    let snapshot_path = resolution
+        .snapshot_path
+        .as_deref()
+        .with_context(|| format!("no local snapshot found for {model_id}"))?;
+    let identity_started = Instant::now();
+    let source_identity = runtime_catalog_source_identity(model_id, snapshot_path)?;
+    let identity_ms = identity_started.elapsed().as_secs_f64() * 1_000.0;
+    let load_started = Instant::now();
+    match read_runtime_catalog_cache(&cache_dir, model_id, snapshot_path, &source_identity) {
+        Ok(Some(catalog)) => {
+            eprintln!(
+                "runtime_catalog_cache status=hit identity={} identity_ms={identity_ms:.3} load_ms={:.3} tensors={} path={}",
+                source_identity,
+                load_started.elapsed().as_secs_f64() * 1_000.0,
+                catalog.tensors.len(),
+                cache_dir.display(),
+            );
+            return Ok(catalog);
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!(
+            "runtime_catalog_cache status=invalid identity={} path={} error={error:#}",
+            source_identity,
+            cache_dir.display(),
+        ),
+    }
+
+    let build_started = Instant::now();
+    let catalog = build_catalog_for_snapshot(model_id, snapshot_path)
+        .with_context(|| format!("building runtime tensor catalog for {model_id}"))?;
+    let build_ms = build_started.elapsed().as_secs_f64() * 1_000.0;
+    let write_started = Instant::now();
+    if let Err(error) = write_runtime_catalog_cache(
+        &cache_dir,
+        model_id,
+        snapshot_path,
+        &source_identity,
+        &catalog,
+    ) {
+        eprintln!(
+            "runtime_catalog_cache status=write-failed identity={} path={} error={error:#}",
+            source_identity,
+            cache_dir.display(),
+        );
+    } else {
+        eprintln!(
+            "runtime_catalog_cache status=miss identity={} identity_ms={identity_ms:.3} build_ms={build_ms:.3} write_ms={:.3} tensors={} path={}",
+            source_identity,
+            write_started.elapsed().as_secs_f64() * 1_000.0,
+            catalog.tensors.len(),
+            cache_dir.display(),
+        );
+    }
+    Ok(catalog)
+}
+
+fn runtime_catalog_source_identity(model_id: &str, snapshot_path: &Path) -> Result<String> {
+    let config_path = snapshot_path.join("config.json");
+    let index_path = snapshot_path.join("model.safetensors.index.json");
+    let config = fs::read(&config_path).with_context(|| {
+        format!(
+            "reading runtime catalog identity source {}",
+            config_path.display()
+        )
+    })?;
+    let index_bytes = fs::read(&index_path).with_context(|| {
+        format!(
+            "reading runtime catalog identity source {}",
+            index_path.display()
+        )
+    })?;
+    let index: RuntimeCatalogSafetensorsIndex =
+        serde_json::from_slice(&index_bytes).with_context(|| {
+            format!(
+                "parsing runtime catalog identity source {}",
+                index_path.display()
+            )
+        })?;
+    let files = index.weight_map.into_values().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        !files.is_empty(),
+        "runtime catalog index contains no weight shards"
+    );
+
+    let mut hasher = Sha256::new();
+    update_catalog_identity_field(&mut hasher, b"glmrt-runtime-catalog-v1");
+    update_catalog_identity_field(&mut hasher, model_id.as_bytes());
+    update_catalog_identity_field(&mut hasher, snapshot_path.as_os_str().as_encoded_bytes());
+    update_catalog_identity_field(&mut hasher, &config);
+    update_catalog_identity_field(&mut hasher, &index_bytes);
+    for file_name in files {
+        let shard_path = snapshot_path.join(&file_name);
+        let mut shard = File::open(&shard_path).with_context(|| {
+            format!(
+                "opening runtime catalog identity shard {}",
+                shard_path.display()
+            )
+        })?;
+        let mut header_length_bytes = [0_u8; 8];
+        shard
+            .read_exact(&mut header_length_bytes)
+            .with_context(|| {
+                format!("reading safetensors header length {}", shard_path.display())
+            })?;
+        let header_length = u64::from_le_bytes(header_length_bytes);
+        let shard_length = shard.metadata()?.len();
+        anyhow::ensure!(
+            header_length <= shard_length.saturating_sub(8),
+            "invalid safetensors header length {header_length} for {} bytes in {}",
+            shard_length,
+            shard_path.display(),
+        );
+        let header_length = usize::try_from(header_length)
+            .context("safetensors header length does not fit usize")?;
+        let mut header = vec![0_u8; header_length];
+        shard
+            .read_exact(&mut header)
+            .with_context(|| format!("reading safetensors header {}", shard_path.display()))?;
+        update_catalog_identity_field(&mut hasher, file_name.as_bytes());
+        update_catalog_identity_field(&mut hasher, &header_length_bytes);
+        update_catalog_identity_field(&mut hasher, &header);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn update_catalog_identity_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn runtime_catalog_cache_paths(cache_dir: &Path, source_identity: &str) -> (PathBuf, PathBuf) {
+    (
+        cache_dir.join(format!("{source_identity}.catalog.json")),
+        cache_dir.join(format!("{source_identity}.manifest.json")),
+    )
+}
+
+fn read_runtime_catalog_cache(
+    cache_dir: &Path,
+    model_id: &str,
+    snapshot_path: &Path,
+    source_identity: &str,
+) -> Result<Option<TensorCatalog>> {
+    let (payload_path, manifest_path) = runtime_catalog_cache_paths(cache_dir, source_identity);
+    if !payload_path.is_file() || !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let manifest: RuntimeCatalogCacheManifest =
+        serde_json::from_reader(File::open(&manifest_path).with_context(|| {
+            format!(
+                "opening runtime catalog manifest {}",
+                manifest_path.display()
+            )
+        })?)
+        .with_context(|| {
+            format!(
+                "parsing runtime catalog manifest {}",
+                manifest_path.display()
+            )
+        })?;
+    anyhow::ensure!(
+        manifest.schema == RUNTIME_CATALOG_CACHE_SCHEMA,
+        "runtime catalog cache schema mismatch"
+    );
+    anyhow::ensure!(
+        manifest.model_id == model_id,
+        "runtime catalog cache model mismatch"
+    );
+    anyhow::ensure!(
+        manifest.snapshot_path == snapshot_path.display().to_string(),
+        "runtime catalog cache snapshot mismatch"
+    );
+    anyhow::ensure!(
+        manifest.source_identity == source_identity,
+        "runtime catalog cache identity mismatch"
+    );
+    let payload = fs::read(&payload_path)
+        .with_context(|| format!("reading runtime catalog payload {}", payload_path.display()))?;
+    anyhow::ensure!(
+        payload.len() as u64 == manifest.payload_bytes,
+        "runtime catalog cache payload length mismatch"
+    );
+    let payload_sha256 = format!("{:x}", Sha256::digest(&payload));
+    anyhow::ensure!(
+        payload_sha256 == manifest.payload_sha256,
+        "runtime catalog cache payload hash mismatch"
+    );
+    let catalog: TensorCatalog = serde_json::from_slice(&payload)
+        .with_context(|| format!("parsing runtime catalog payload {}", payload_path.display()))?;
+    anyhow::ensure!(
+        catalog.model_id == model_id,
+        "cached runtime catalog model mismatch"
+    );
+    anyhow::ensure!(
+        catalog.snapshot_path == snapshot_path.display().to_string(),
+        "cached runtime catalog snapshot mismatch"
+    );
+    Ok(Some(catalog))
+}
+
+fn write_runtime_catalog_cache(
+    cache_dir: &Path,
+    model_id: &str,
+    snapshot_path: &Path,
+    source_identity: &str,
+    catalog: &TensorCatalog,
+) -> Result<()> {
+    fs::create_dir_all(cache_dir)
+        .with_context(|| format!("creating runtime catalog cache {}", cache_dir.display()))?;
+    let payload = serde_json::to_vec(catalog).context("serializing runtime catalog cache")?;
+    let manifest = RuntimeCatalogCacheManifest {
+        schema: RUNTIME_CATALOG_CACHE_SCHEMA,
+        model_id: model_id.to_owned(),
+        snapshot_path: snapshot_path.display().to_string(),
+        source_identity: source_identity.to_owned(),
+        payload_bytes: payload.len() as u64,
+        payload_sha256: format!("{:x}", Sha256::digest(&payload)),
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .context("serializing runtime catalog cache manifest")?;
+    let (payload_path, manifest_path) = runtime_catalog_cache_paths(cache_dir, source_identity);
+    write_atomic_runtime_catalog_cache_file(&payload_path, &payload)?;
+    write_atomic_runtime_catalog_cache_file(&manifest_path, &manifest_bytes)?;
+    Ok(())
+}
+
+fn write_atomic_runtime_catalog_cache_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temporary = path.with_extension(format!(
+        "{}.tmp.{}",
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("cache"),
+        std::process::id(),
+    ));
+    let mut file = File::create(&temporary)
+        .with_context(|| format!("creating runtime catalog cache {}", temporary.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing runtime catalog cache {}", temporary.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing runtime catalog cache {}", temporary.display()))?;
+    fs::rename(&temporary, path).with_context(|| {
+        format!(
+            "installing runtime catalog cache {} -> {}",
+            temporary.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub(crate) fn build_runtime_owner_lookup(catalog: &TensorCatalog) -> Result<ExpertOwnerLookup> {
@@ -236,4 +515,97 @@ pub(crate) fn default_load_tensor_names(catalog: &TensorCatalog) -> Vec<String> 
         }
     }
     names
+}
+
+#[cfg(test)]
+mod runtime_catalog_cache_tests {
+    use super::*;
+    use glmrt_core::{DType, ModelFacts, TensorInfo};
+    use tempfile::tempdir;
+
+    fn test_catalog(model_id: &str, snapshot_path: &Path) -> TensorCatalog {
+        TensorCatalog {
+            model_id: model_id.to_owned(),
+            snapshot_path: snapshot_path.display().to_string(),
+            facts: ModelFacts {
+                model_id: model_id.to_owned(),
+                ..ModelFacts::default()
+            },
+            tensors: vec![TensorInfo {
+                name: "model.layers.3.mlp.experts.0.gate_proj.weight".to_owned(),
+                file: "model-00001-of-00001.safetensors".to_owned(),
+                dtype: DType::F4,
+                shape: vec![8, 8],
+                byte_offset: 16,
+                byte_length: 32,
+                role: TensorRole::RoutedExpert,
+                layer_id: Some(3),
+                expert_id: Some(0),
+                is_quantization_metadata: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn runtime_catalog_cache_validates_payload_integrity() {
+        let temporary = tempdir().expect("temporary directory");
+        let snapshot_path = temporary.path().join("snapshot");
+        let cache_dir = temporary.path().join("cache");
+        fs::create_dir_all(&snapshot_path).expect("snapshot directory");
+        let model_id = SUPPORTED_MODEL_IDS[0];
+        let source_identity = "a".repeat(64);
+        let catalog = test_catalog(model_id, &snapshot_path);
+
+        write_runtime_catalog_cache(
+            &cache_dir,
+            model_id,
+            &snapshot_path,
+            &source_identity,
+            &catalog,
+        )
+        .expect("write cache");
+        let loaded =
+            read_runtime_catalog_cache(&cache_dir, model_id, &snapshot_path, &source_identity)
+                .expect("read cache")
+                .expect("cache hit");
+        assert_eq!(loaded.tensors.len(), 1);
+        assert_eq!(loaded.tensors[0].name, catalog.tensors[0].name);
+
+        let (payload_path, _) = runtime_catalog_cache_paths(&cache_dir, &source_identity);
+        let mut payload = fs::read(&payload_path).expect("cached payload");
+        payload[0] ^= 1;
+        fs::write(&payload_path, payload).expect("corrupt cached payload");
+        let error =
+            read_runtime_catalog_cache(&cache_dir, model_id, &snapshot_path, &source_identity)
+                .expect_err("corrupt cache must fail closed");
+        assert!(error.to_string().contains("payload hash mismatch"));
+    }
+
+    #[test]
+    fn runtime_catalog_identity_changes_with_safetensors_header() {
+        let temporary = tempdir().expect("temporary directory");
+        let snapshot_path = temporary.path().join("snapshot");
+        fs::create_dir_all(&snapshot_path).expect("snapshot directory");
+        fs::write(snapshot_path.join("config.json"), b"{}\n").expect("config");
+        fs::write(
+            snapshot_path.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"tensor":"model-00001-of-00001.safetensors"}}"#,
+        )
+        .expect("index");
+        let shard_path = snapshot_path.join("model-00001-of-00001.safetensors");
+        let write_shard = |header: &[u8]| {
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.push(0);
+            fs::write(&shard_path, bytes).expect("shard");
+        };
+        write_shard(b"{}");
+        let first = runtime_catalog_source_identity(SUPPORTED_MODEL_IDS[0], &snapshot_path)
+            .expect("first identity");
+        write_shard(b"{ }");
+        let second = runtime_catalog_source_identity(SUPPORTED_MODEL_IDS[0], &snapshot_path)
+            .expect("second identity");
+
+        assert_ne!(first, second);
+    }
 }

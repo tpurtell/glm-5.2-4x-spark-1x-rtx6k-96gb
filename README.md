@@ -1,6 +1,6 @@
 # GLMRT - LLM engine for GLM 5.2
 
-## 4x Spark + 1x RTX 6000 @ 65 tok/s decode + 1,750 tok/s prefill
+## 4x Spark + 1x RTX 6000 @ 64 tok/s decode + 1,650 tok/s prefill
 
 <sub>X.com style headline low-entropy prompt test</sub>
 
@@ -17,7 +17,7 @@ continuous batching, long context, tool use, reasoning, vision, and plain,
 native-MTP, or dSpark decoding. It is built for this particular hardware
 layout, but is open source for anyone who wants to adapt it to their own.
 It is also zippy in `balanced` mode: about 35 TPS on real Python coding and
-about 1,800 TPS on large prefills.
+about 1,650 TPS on large prefills.
 
 ## Why
 
@@ -85,6 +85,14 @@ The server exposes an OpenAI-compatible API at
 selected GLM-5.2 checkpoint must already be present in the Hugging Face cache
 on each host.
 
+## Startup Time
+
+The measured cold launch and resident-expert warm restart are shown below.
+Cold startup streams model snapshots from local NVMe; warm startup reuses the
+resident Spark experts and their execution lanes.
+
+[![GLMRT startup timeline](docs/startup-timeline.svg)](docs/startup-timeline.svg)
+
 ## High Level Benchmarks
 
 These results use the `balanced` profile and the hardware described above.
@@ -131,9 +139,9 @@ unique first-token nonces prevented prompt-cache reuse.
 
 | Concurrent requests | Aggregate tok/s | Scaling | Median request tok/s | Median TTFT |
 |---:|---:|---:|---:|---:|
-| 1 | 33.25 | 1.00x | 33.25 | 439 ms |
-| 2 | 50.98 | 1.53x | 26.40 | 825 ms |
-| 4 | 57.43 | 1.73x | 15.36 | 1,551 ms |
+| 1 | 34.96 | 1.00x | 34.96 | 106 ms |
+| 2 | 52.75 | 1.51x | 28.17 | 163 ms |
+| 4 | 63.36 | 1.81x | 16.07 | 223 ms |
 
 ### Pi coding-agent task
 
@@ -175,8 +183,8 @@ GLMRT is released under the [MIT License](LICENSE).
 
 ## Performance by Profile
 
-| Profile | Weighted decode | Verify throughput | Acceptance | Fresh 8K prefill |
+| Profile | Weighted decode | Verify throughput | Acceptance | 8K prefill (2K cached) |
 |---|---:|---:|---:|---:|
-| Balanced | 28.34 tok/s | 30.46 tok/s | 78.2% | 1,725 tok/s |
-| Long | 27.44 tok/s | 29.57 tok/s | 75.9% | 1,712 tok/s |
-| Accurate | 23.21 tok/s | 25.36 tok/s | 85.0% | 966 tok/s |
+| Balanced | 28.16 tok/s | 30.59 tok/s | 78.0% | 1,641 tok/s |
+| Long | 27.44 tok/s | 29.57 tok/s | 75.9% | 1,606 tok/s |
+| Accurate | 22.02 tok/s | 23.82 tok/s | 82.5% | 995 tok/s |

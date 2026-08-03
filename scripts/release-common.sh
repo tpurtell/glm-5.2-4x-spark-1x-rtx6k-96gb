@@ -195,9 +195,9 @@ release_stop_host_api() {
     echo "  coordinator: stopping host API pid=$pid"
     kill -TERM "$pid"
   done
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 300); do
     ss -ltn "sport = :$port" 2>/dev/null | tail -n +2 | grep -q . || return 0
-    sleep 1
+    sleep 0.1
   done
   release_die "host API did not exit within 30 seconds"
 }
@@ -248,6 +248,159 @@ release_stop_services() {
   for index in "${!stop_pids[@]}"; do
     if ! wait "${stop_pids[$index]}"; then
       echo "  ${stop_hosts[$index]}: failed to stop one or more GLMRT containers" >&2
+      failed=1
+    fi
+  done
+  ((failed == 0))
+}
+
+release_stop_persistent_local_container() {
+  local container="$1"
+  if ! docker container inspect "$container" >/dev/null 2>&1; then
+    return
+  fi
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$container")" == true ]]; then
+    echo "  coordinator: stopping persistent $container"
+    docker stop -t 30 "$container" >/dev/null
+  else
+    echo "  coordinator: persistent $container is already stopped"
+  fi
+}
+
+release_stop_persistent_remote_container() {
+  local host="$1"
+  local container="$2"
+  ssh -o BatchMode=yes "$host" bash -s -- "$host" "$container" <<'REMOTE'
+set -euo pipefail
+host="$1"
+container="$2"
+if ! docker container inspect "$container" >/dev/null 2>&1; then
+  exit 0
+fi
+if [[ "$(docker inspect -f '{{.State.Running}}' "$container")" == true ]]; then
+  echo "  $host: stopping persistent $container"
+  docker stop -t 30 "$container" >/dev/null
+else
+  echo "  $host: persistent $container is already stopped"
+fi
+REMOTE
+}
+
+release_stop_wip_containers() {
+  local coordinator_container="${1:-glrmt-coordinator-wip}"
+  local spark_container="${2:-glrmt-spark-expert-wip}"
+  local failed=0
+
+  release_stop_persistent_local_container "$coordinator_container" || failed=1
+
+  local host
+  local -a hosts=() pids=()
+  for host in "$SPARK_0_HOST" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
+    release_stop_persistent_remote_container "$host" "$spark_container" &
+    hosts+=("$host")
+    pids+=("$!")
+  done
+  local index
+  for index in "${!pids[@]}"; do
+    if ! wait "${pids[$index]}"; then
+      echo "  ${hosts[$index]}: failed to stop persistent $spark_container" >&2
+      failed=1
+    fi
+  done
+  ((failed == 0))
+}
+
+release_stop_wip_process_in_container() {
+  local container="$1"
+  local process_name="$2"
+  docker exec -i "$container" bash -s -- "$process_name" <<'CONTAINER'
+set -euo pipefail
+name="$1"
+pid_file="/wip/run/$name.pid"
+identity_file="/wip/run/$name.identity"
+[ -f "$pid_file" ] || exit 0
+pid="$(<"$pid_file")"
+if ! [[ "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+  rm -f "$pid_file" "$identity_file"
+  exit 0
+fi
+command_line="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+case "$command_line" in
+  *wip-process.sh*run*"$name"*) ;;
+  *) echo "refusing to stop stale WIP pid $pid for $name: $command_line" >&2; exit 2 ;;
+esac
+kill -TERM "$pid"
+for _ in $(seq 1 300); do
+  kill -0 "$pid" 2>/dev/null || { rm -f "$pid_file" "$identity_file"; exit 0; }
+  sleep 0.1
+done
+echo "WIP process did not stop within 30 seconds: $name pid=$pid" >&2
+exit 2
+CONTAINER
+}
+
+release_stop_wip_coordinator() {
+  local coordinator_process="${1:-coordinator-${ADDR##*:}}"
+  local coordinator_container=glrmt-coordinator-wip
+
+  if docker container inspect "$coordinator_container" >/dev/null 2>&1 &&
+    [[ "$(docker inspect -f '{{.State.Running}}' "$coordinator_container")" == true ]]; then
+    echo "  coordinator: stopping WIP process $coordinator_process"
+    release_stop_wip_process_in_container \
+      "$coordinator_container" "$coordinator_process"
+  fi
+}
+
+release_stop_wip_services() {
+  local coordinator_process="${1:-coordinator-${ADDR##*:}}"
+  local expert_process="${2:-expert-$EXPERT_PORT}"
+  local coordinator_container=glrmt-coordinator-wip
+  local spark_container=glrmt-spark-expert-wip
+  local failed=0
+
+  release_stop_wip_coordinator "$coordinator_process" || failed=1
+
+  local host
+  local -a hosts=() pids=()
+  for host in "$SPARK_0_HOST" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
+    (
+      if ! ssh -o BatchMode=yes "$host" \
+        "test \"\$(docker inspect -f '{{.State.Running}}' '$spark_container' 2>/dev/null || true)\" = true"; then
+        exit 0
+      fi
+      ssh -o BatchMode=yes "$host" docker exec -i "$spark_container" \
+        bash -s -- "$expert_process" <<'CONTAINER'
+set -euo pipefail
+name="$1"
+pid_file="/wip/run/$name.pid"
+identity_file="/wip/run/$name.identity"
+[ -f "$pid_file" ] || exit 0
+pid="$(<"$pid_file")"
+if ! [[ "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+  rm -f "$pid_file" "$identity_file"
+  exit 0
+fi
+command_line="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+case "$command_line" in
+  *wip-process.sh*run*"$name"*) ;;
+  *) echo "refusing to stop stale WIP pid $pid for $name: $command_line" >&2; exit 2 ;;
+esac
+kill -TERM "$pid"
+for _ in $(seq 1 300); do
+  kill -0 "$pid" 2>/dev/null || { rm -f "$pid_file" "$identity_file"; exit 0; }
+  sleep 0.1
+done
+echo "WIP process did not stop within 30 seconds: $name pid=$pid" >&2
+exit 2
+CONTAINER
+    ) &
+    hosts+=("$host")
+    pids+=("$!")
+  done
+  local index
+  for index in "${!pids[@]}"; do
+    if ! wait "${pids[$index]}"; then
+      echo "  ${hosts[$index]}: failed to stop WIP process $expert_process" >&2
       failed=1
     fi
   done

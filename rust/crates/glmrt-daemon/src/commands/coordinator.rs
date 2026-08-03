@@ -1,13 +1,40 @@
 use anyhow::{Context, Result};
 use glmrt_core::{KvCacheAllocator, KvCacheConfig, KvCacheDType};
+use std::thread::JoinHandle;
+use std::time::Instant;
 
 use crate::cli::CoordinatorArgs;
 use crate::commands::real_full::{load_real_full_serving, run_real_glm_full_preflight};
 use crate::python_graph_capture::{
     finish_coordinator_python_capture_startup, initialize_coordinator_python_capture_from_env,
+    PythonCaptureStatus,
 };
 
+type CoordinatorPythonCaptureTask = JoinHandle<Result<Option<PythonCaptureStatus>>>;
+
+fn finish_python_capture_task(
+    task: &mut Option<CoordinatorPythonCaptureTask>,
+    status: &mut Option<PythonCaptureStatus>,
+    started: Instant,
+) -> Result<()> {
+    let join_started = Instant::now();
+    let result = task
+        .take()
+        .context("coordinator Python graph-capture initialization task is missing")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("coordinator Python graph-capture initialization panicked"))?
+        .context("initializing coordinator Python graph-capture bridge")?;
+    *status = result;
+    eprintln!(
+        "coordinator_startup_python_capture total_ms={:.3} barrier_wait_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1_000.0,
+        join_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    Ok(())
+}
+
 pub(crate) async fn run_coordinator(args: CoordinatorArgs) -> Result<()> {
+    let startup_started = Instant::now();
     if matches!(args.backend.as_str(), "real-glm-full" | "cuda-reference") && args.preflight_only {
         return run_real_glm_full_preflight(&args);
     }
@@ -23,12 +50,18 @@ pub(crate) async fn run_coordinator(args: CoordinatorArgs) -> Result<()> {
     };
     let transport = glmrt_api::ApiTransport::parse(&args.transport)
         .ok_or_else(|| anyhow::anyhow!("unsupported coordinator transport: {}", args.transport))?;
-    let python_capture = if args.backend == "cuda-reference" {
+    let python_capture_started = Instant::now();
+    let mut python_capture_task = if args.backend == "cuda-reference" {
         None
     } else {
-        initialize_coordinator_python_capture_from_env()
-            .context("initializing coordinator Python graph-capture bridge")?
+        Some(
+            std::thread::Builder::new()
+                .name("glmrt-python-capture-init".to_owned())
+                .spawn(initialize_coordinator_python_capture_from_env)
+                .context("spawning coordinator Python graph-capture initialization")?,
+        )
     };
+    let mut python_capture = None;
     let expert_targets = args
         .expert_hosts
         .split(',')
@@ -36,11 +69,33 @@ pub(crate) async fn run_coordinator(args: CoordinatorArgs) -> Result<()> {
         .filter(|target| !target.is_empty())
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    let serving_started = Instant::now();
     let real_full_serving = if backend == glmrt_api::ApiBackend::RealGlmFull {
-        Some(load_real_full_serving(&args)?)
+        Some(load_real_full_serving(&args, || {
+            if python_capture_task.is_some() {
+                finish_python_capture_task(
+                    &mut python_capture_task,
+                    &mut python_capture,
+                    python_capture_started,
+                )?;
+            }
+            Ok(())
+        })?)
     } else {
+        if python_capture_task.is_some() {
+            finish_python_capture_task(
+                &mut python_capture_task,
+                &mut python_capture,
+                python_capture_started,
+            )?;
+        }
         None
     };
+    eprintln!(
+        "coordinator_startup_phase stage=real-full-serving elapsed_ms={:.3} total_ms={:.3}",
+        serving_started.elapsed().as_secs_f64() * 1_000.0,
+        startup_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     finish_coordinator_python_capture_startup();
     let api_config = glmrt_api::ApiConfig {
         backend,
@@ -53,11 +108,17 @@ pub(crate) async fn run_coordinator(args: CoordinatorArgs) -> Result<()> {
             .map(|serving| serving.info.clone()),
         real_full_executor: real_full_serving.map(|serving| serving.executor),
     };
+    let api_started = Instant::now();
     let kv_allocator = KvCacheAllocator::new(coordinator_kv_cache_config(&args)?);
     let kv_snapshot = kv_allocator.snapshot();
     let listener = tokio::net::TcpListener::bind(&args.listen)
         .await
         .with_context(|| format!("binding coordinator API to {}", args.listen))?;
+    eprintln!(
+        "coordinator_startup_phase stage=api-bind elapsed_ms={:.3} total_ms={:.3}",
+        api_started.elapsed().as_secs_f64() * 1_000.0,
+        startup_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     println!(
         "starting coordinator backend={} transport={} model_id={} expert_hosts={} listen={}",
         args.backend, args.transport, args.model_id, args.expert_hosts, args.listen

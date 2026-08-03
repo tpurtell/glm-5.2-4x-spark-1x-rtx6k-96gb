@@ -4,7 +4,7 @@ use glmrt_core::{
     GLM52_MTP_LAYER_ID,
 };
 use serde::Serialize;
-use std::{fs::File, path::Path, sync::Arc};
+use std::{fs::File, path::Path, sync::Arc, time::Instant};
 
 use crate::cli::ExpertDaemonArgs;
 use crate::commands::model_artifacts::{
@@ -27,7 +27,23 @@ use crate::python_graph_capture::{
     initialize_spark_python_capture_from_env,
 };
 
+fn report_expertd_startup_phase(
+    stage: &str,
+    startup_started: Instant,
+    phase_started: &mut Instant,
+) {
+    let now = Instant::now();
+    eprintln!(
+        "expertd_startup_phase stage={stage} elapsed_ms={:.3} total_ms={:.3}",
+        now.duration_since(*phase_started).as_secs_f64() * 1_000.0,
+        now.duration_since(startup_started).as_secs_f64() * 1_000.0,
+    );
+    *phase_started = now;
+}
+
 pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
+    let startup_started = Instant::now();
+    let mut phase_started = startup_started;
     if args.preflight_only {
         let report = expertd_preflight_report(&args)?;
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -55,6 +71,7 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
         }
         None => None,
     };
+    report_expertd_startup_phase("loadplan", startup_started, &mut phase_started);
     println!(
         "starting expertd synthetic_weights={} transport={} listen={} model_id={} loadplan={:?} catalog_source={:?} real_layer={:?} role={:?}",
         args.synthetic_weights,
@@ -93,6 +110,7 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
                 status.imported_modules.join(",")
             );
         }
+        report_expertd_startup_phase("python-capture", startup_started, &mut phase_started);
         let (resolved_catalog_source, catalog) = resolve_expertd_catalog(&args)?;
         if args.loadplan.is_none() {
             validate_runtime_expert_role(args.role_hostname.as_deref())?;
@@ -101,6 +119,7 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
         let intermediate_shard = spark_expert_intermediate_shard_from_env()?;
         let layer_block = spark_layer_block_from_env(intermediate_shard)?;
         let transformer_tp = spark_transformer_tp_from_env(intermediate_shard)?;
+        report_expertd_startup_phase("catalog-owner-config", startup_started, &mut phase_started);
         anyhow::ensure!(
             layer_block.is_none() || transformer_tp.is_none(),
             "Spark serial layer blocks and transformer TP cannot be enabled together"
@@ -134,6 +153,11 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
             original_catalog_tensors,
             catalog.tensors.len(),
             routed_expert_tensors
+        );
+        report_expertd_startup_phase(
+            "catalog-filter-validation",
+            startup_started,
+            &mut phase_started,
         );
         if let Some(config) = transformer_tp {
             let stats = preload_real_full_spark_transformer_tp_weights(&catalog, config)?;
@@ -190,6 +214,11 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
             );
             executor = executor.with_owner_reduction(owner_reduction)?;
         }
+        report_expertd_startup_phase(
+            "executor-configuration",
+            startup_started,
+            &mut phase_started,
+        );
         if let Some(block) = layer_block {
             let owner_endpoint = spark_layer_block_owner_endpoint_from_env()?;
             let kv_config = spark_layer_block_kv_config_from_env()?;
@@ -215,6 +244,7 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
             );
         }
         let resident_preload = executor.preload_assigned_projections()?;
+        report_expertd_startup_phase("resident-preload", startup_started, &mut phase_started);
         if !resident_preload.cuda_reference_enabled {
             anyhow::bail!(
                 "phase0 real-weight expertd CUDA resident preload was not enabled after {REAL_NVFP4_CUDA_REFERENCE_KERNELS_ENV}=1"
@@ -249,6 +279,7 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
             resident_preload.cuda_cache_hits,
         );
         let executor = Arc::new(executor);
+        report_expertd_startup_phase("service-handoff", startup_started, &mut phase_started);
         return match args.transport.as_str() {
             "tcp" => {
                 glmrt_transport::serve_protocol_v2_tcp_with_executor(&args.listen, executor).await

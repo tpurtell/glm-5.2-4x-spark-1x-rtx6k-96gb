@@ -1003,6 +1003,7 @@ impl RealNvfp4ProtocolV2Executor {
             preload_started.elapsed().as_secs_f64() * 1_000.0
         );
 
+        let cuda_residency_started = Instant::now();
         if preload_cuda {
             let mut retained_specs = Vec::new();
             let mut startup_quantized_specs = Vec::new();
@@ -1081,15 +1082,23 @@ impl RealNvfp4ProtocolV2Executor {
         stats.cuda_managed_projection_allocations_enabled =
             route_stats.cuda_managed_projection_allocations_enabled;
         eprintln!(
-            "real_nvfp4_preload_stage stage=cuda-residency projections={} elapsed_ms={:.3}",
+            "real_nvfp4_preload_stage stage=cuda-residency projections={} elapsed_ms={:.3} total_ms={:.3}",
             stats.cuda_projection_groups,
+            cuda_residency_started.elapsed().as_secs_f64() * 1_000.0,
             preload_started.elapsed().as_secs_f64() * 1_000.0
         );
+        let lane_fork_started = Instant::now();
         let active_lanes = protocol_v2_verbs_host_execution_lanes()?;
         for execution_lane in 1..active_lanes {
+            let lane_started = Instant::now();
             let auxiliary_cache = route_cache.fork_execution_lane(
                 u32::try_from(execution_lane).context("execution lane exceeds u32")?,
             )?;
+            eprintln!(
+                "real_nvfp4_execution_lane_connect execution_lane={} elapsed_ms={:.3}",
+                execution_lane,
+                lane_started.elapsed().as_secs_f64() * 1_000.0,
+            );
             let mut destination = self
                 .route_caches
                 .get(execution_lane)
@@ -1102,6 +1111,12 @@ impl RealNvfp4ProtocolV2Executor {
                 })?;
             *destination = auxiliary_cache;
         }
+        eprintln!(
+            "real_nvfp4_preload_stage stage=execution-lane-fork lanes={} elapsed_ms={:.3} total_ms={:.3}",
+            active_lanes,
+            lane_fork_started.elapsed().as_secs_f64() * 1_000.0,
+            preload_started.elapsed().as_secs_f64() * 1_000.0,
+        );
         Ok(stats)
     }
 }

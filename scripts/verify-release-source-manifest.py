@@ -26,6 +26,7 @@ IGNORED_DIRECTORY_NAMES = frozenset(
         ".glmrt-cache",
         ".glmrt-release",
         ".glmrt-release-image",
+        ".glmrt-wip",
         "dist",
     }
 )
@@ -172,13 +173,33 @@ def verify(source: Path, manifest_path: str) -> tuple[str, int]:
     return hashlib.sha256(manifest_bytes).hexdigest(), len(expected)
 
 
+def write_manifest(source: Path, output: Path) -> tuple[str, int]:
+    source = source.resolve()
+    if not source.is_dir():
+        raise SourceManifestError(f"source directory not found: {source}")
+    lines = [
+        f"{file_sha256(source / relative.removeprefix('./'))}  {relative}\n"
+        for relative in sorted(source_inventory(source))
+    ]
+    if not lines:
+        raise SourceManifestError("source inventory is empty")
+    manifest_bytes = "".join(lines).encode("utf-8")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.tmp-{os.getpid()}")
+    temporary.write_bytes(manifest_bytes)
+    temporary.replace(output)
+    return hashlib.sha256(manifest_bytes).hexdigest(), len(lines)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument(
-        "--manifest",
-        required=True,
-        help="SOURCE_SHA256SUMS path, or - to read it from stdin",
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument(
+        "--manifest", help="SOURCE_SHA256SUMS path, or - to read it from stdin"
+    )
+    action.add_argument(
+        "--write", type=Path, help="write a deterministic SOURCE_SHA256SUMS"
     )
     return parser.parse_args()
 
@@ -186,12 +207,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        manifest_sha256, file_count = verify(args.source, args.manifest)
+        if args.write is not None:
+            manifest_sha256, file_count = write_manifest(args.source, args.write)
+            action = "written"
+        else:
+            manifest_sha256, file_count = verify(args.source, args.manifest)
+            action = "verified"
     except (OSError, SourceManifestError) as error:
         print(f"release source verification failed: {error}", file=sys.stderr)
         return 2
     print(
-        "release source verified: "
+        f"release source {action}: "
         f"files={file_count} manifest_sha256={manifest_sha256}"
     )
     return 0

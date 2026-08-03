@@ -24,7 +24,7 @@ use crate::python_graph_capture::coordinator_python_capture_enabled;
 use super::constants::REAL_GLM_FULL_BLOCKER;
 use super::coordinator_kernels::{
     audit_glm_dsa_nvfp4_short_k_prefill_graph_retention,
-    clear_transient_coordinator_owned_device_buffers,
+    clear_transient_coordinator_owned_device_buffers, coordinator_owned_device_buffer_bank_scope,
     prewarm_flashinfer_cudnn_mla_suffix_graphs_for_worker,
     reset_glm_dsa_sparse_mla_transient_state, seal_coordinator_owned_device_buffer_pool,
     with_coordinator_owned_device_buffer_bank, DeviceBf16Output, GLM_DSA_PREFILL_MAX_QUERY_ROWS,
@@ -141,7 +141,12 @@ const REAL_FULL_STARTUP_PREWARM_BATCHED_DSPARK_PREFIX: &str =
     "real-full-startup-prewarm-batched-dspark-";
 const REAL_FULL_STARTUP_AUDIT_NVFP4_SHORT_K_PREFIX: &str =
     "real-full-startup-audit-nvfp4-short-k-q";
+const REAL_FULL_STARTUP_TARGET_RADIX_PUBLISH_PREFIX: &str =
+    "real-full-startup-capture-arena-radix-publish-";
+const REAL_FULL_STARTUP_TARGET_RADIX_EVICT_PREFIX: &str =
+    "real-full-startup-evict-target-radix-prefix-";
 const REAL_FULL_STARTUP_BATCHED_DSPARK_BANK_MARKER: &str = "-batched-bank-";
+const REAL_FULL_STARTUP_SCALAR_DSPARK_COHORT_MARKER: &str = "-scalar-cohort-";
 const REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_ENV: &str = "GLMRT_REAL_FULL_SERVE_PREFIX_PREFILL_PROBE";
 const REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_REPEATS_ENV: &str =
     "GLMRT_REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_REPEATS";
@@ -151,8 +156,14 @@ const REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_NEW_ROWS_ENV: &str =
     "GLMRT_REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_NEW_ROWS";
 const MAX_REAL_FULL_SERVE_PREFIX_PREFILL_PROBE_REPEATS: usize = 8;
 const REAL_FULL_SERVE_PREWARM_PROMPT_TOKEN: &str = "alpha ";
-const REAL_FULL_SERVE_PREWARM_PREFILL_ROWS: &[usize] =
-    &[4_096, 2_048, 1_008, 512, 144, 72, 36, 18, 9, 8];
+const REAL_FULL_SERVE_PREWARM_BOUNDARY_TOKEN: &str = "beta ";
+const REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_PROMPT_TOKENS: usize = 2_049;
+const REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_QUERY_ROWS: usize = 512;
+// The 512-row boundary is the canonical graph identity for this bucket. A
+// historical 1,008-row sizing request was balanced into two 504-row chunks;
+// its 99 exact-row BF16 linear captures were immediately replaced here, while
+// its retained packed-attention capture set is equally seeded by this request.
+const REAL_FULL_SERVE_PREWARM_PREFILL_ROWS: &[usize] = &[4_096, 2_048, 512, 144, 72, 36, 18, 9, 8];
 const REAL_FULL_SERVE_DSA_SELECTOR_PREWARM_QUERY_ROWS: &[usize] = &[8, 16, 32, 64, 128, 256, 512];
 // Native NVFP4 chooses K=128/512/1024/2048 from the live context only for
 // query buckets through 64. The dSpark sweep covers q1/q2/q4/q8, while the
@@ -1594,8 +1605,12 @@ impl RealFullSchedulerRequestExecutor {
         final_decode_step: bool,
     ) -> std::result::Result<(), String> {
         if final_decode_step {
-            if (!self.kv_snapshot_saves.is_empty() || state.target_radix_reservation.is_some())
-                && !real_full_internal_sequence(sequence_id)
+            let startup_radix_publish = real_full_startup_target_radix_publish_tokens(sequence_id)
+                .is_some()
+                && state.target_radix_reservation.is_some();
+            if ((!self.kv_snapshot_saves.is_empty() || state.target_radix_reservation.is_some())
+                && !real_full_internal_sequence(sequence_id))
+                || startup_radix_publish
             {
                 state.snapshot_save_ready = true;
                 self.store_scheduler_state(sequence_id, state)
@@ -2593,7 +2608,13 @@ impl RealFullSchedulerRequestExecutor {
             && !native_mtp_request
             && (!real_full_internal_sequence(&sequence_id)
                 || (real_full_capture_arena_sequence(&sequence_id)
-                    && !real_full_batched_dspark_prewarm_sequence(&sequence_id)))
+                    && !real_full_batched_dspark_prewarm_sequence(&sequence_id)
+                    // Workspace sizing requests must execute their full
+                    // physical shape even if an earlier synthetic startup
+                    // seed has populated the radix. Only the designated
+                    // publisher may bind a reservation in this namespace.
+                    && (!real_full_startup_workspace_sizing_sequence(&sequence_id)
+                        || real_full_startup_target_radix_publish_tokens(&sequence_id).is_some())))
             && self.kv_snapshot_load.is_none()
             && self.kv_snapshot_saves.is_empty()
             && persistent_scheduler_state
@@ -2612,7 +2633,7 @@ impl RealFullSchedulerRequestExecutor {
                 .target_kv_radix
                 .reserve(reusable_prompt_ids, capacity_tokens)
                 .map_err(format_error_chain)?;
-            if request.decode_budget > 1 {
+            if request.decode_budget > 1 && !request.disable_speculation {
                 if let Some(dspark) = self.dspark.as_ref() {
                     let dspark = dspark
                         .lock()
@@ -2750,6 +2771,15 @@ impl RealFullSchedulerRequestExecutor {
         let snapshot_restore_ms = persistent_state
             .as_ref()
             .map_or(0.0, |state| state.snapshot_restore_ms);
+        // A persistent scheduler state is permanently assigned to one
+        // execution lane. Use that lane's production buffer bank for scalar
+        // as well as batched execution so C=1 startup does not capture a
+        // duplicate bank-0 graph set that live lane 0 can never reuse.
+        let execution_buffer_bank = persistent_state
+            .as_ref()
+            .map_or(0, |state| state.execution_lane_id + 1);
+        let _execution_buffer_bank_scope =
+            coordinator_owned_device_buffer_bank_scope(execution_buffer_bank);
         let pending_mtp_draft_token_ids = if mtp_enabled {
             persistent_state
                 .as_mut()
@@ -2758,6 +2788,12 @@ impl RealFullSchedulerRequestExecutor {
         } else {
             Vec::new()
         };
+        let requested_startup_dspark_drafts =
+            real_full_scalar_dspark_prewarm_requested_draft_tokens(
+                &sequence_id,
+                request.request_index,
+            )
+            .or_else(|| real_full_dspark_startup_draft_tokens(&sequence_id));
         let mut pending_dspark_plan = if dspark_participating {
             self.dspark
                 .as_ref()
@@ -2774,14 +2810,14 @@ impl RealFullSchedulerRequestExecutor {
                                 .map(|token_ids| (token_ids, request.cached_prompt_tokens))
                         })
                         .flatten(),
-                    real_full_dspark_startup_draft_tokens(&sequence_id),
+                    requested_startup_dspark_drafts,
                 )
                 .map_err(format_error_chain)?
         } else {
             None
         };
         if let Some(plan) = pending_dspark_plan.as_mut() {
-            if real_full_dspark_startup_draft_tokens(&sequence_id).is_none() {
+            if requested_startup_dspark_drafts.is_none() {
                 let max_useful_drafts = request
                     .decode_budget
                     .saturating_sub(generated_tokens)
@@ -3727,6 +3763,26 @@ fn real_full_internal_sequence(sequence_id: &str) -> bool {
     sequence_id.starts_with("real-full-startup-")
 }
 
+fn real_full_startup_target_radix_publish_tokens(sequence_id: &str) -> Option<usize> {
+    sequence_id
+        .strip_prefix(REAL_FULL_STARTUP_TARGET_RADIX_PUBLISH_PREFIX)
+        .and_then(|suffix| suffix.split_once("-sequence-").map(|(tokens, _)| tokens))
+        .and_then(|tokens| tokens.parse::<usize>().ok())
+        .filter(|tokens| *tokens > 0)
+}
+
+fn real_full_startup_target_radix_evict_tokens(sequence_id: &str) -> Option<usize> {
+    sequence_id
+        .strip_prefix(REAL_FULL_STARTUP_TARGET_RADIX_EVICT_PREFIX)
+        .and_then(|suffix| suffix.split_once("-worker-").map(|(tokens, _)| tokens))
+        .and_then(|tokens| tokens.parse::<usize>().ok())
+        .filter(|tokens| *tokens > 0)
+}
+
+fn real_full_startup_workspace_sizing_sequence(sequence_id: &str) -> bool {
+    sequence_id.starts_with("real-full-startup-capture-arena-")
+}
+
 fn real_full_seal_owned_buffer_pool_sequence(sequence_id: &str) -> bool {
     sequence_id.starts_with(REAL_FULL_STARTUP_SEAL_OWNED_BUFFER_POOL_PREFIX)
 }
@@ -3785,6 +3841,32 @@ fn real_full_batched_dspark_prewarm_sequence(sequence_id: &str) -> bool {
 
 const REAL_FULL_BATCHED_DSPARK_PREWARM_WIDTH_REQUEST_BASE: u64 = 92_000;
 const REAL_FULL_BATCHED_DSPARK_PREWARM_WIDTH_REQUEST_STRIDE: u64 = 100;
+const REAL_FULL_SCALAR_DSPARK_PREWARM_WIDTH_REQUEST_BASE: u64 = 91_000;
+const REAL_FULL_SCALAR_DSPARK_PREWARM_WIDTH_REQUEST_STRIDE: u64 = 100;
+// Paired LM-head sampling has a different live-buffer lifetime than the
+// per-lane recurrent scheduler. Keeping it in a disjoint pool namespace makes
+// both sets of CUDA graph pointer identities stable without a final recapture
+// pass. Production supports at most eight execution lanes, so this range does
+// not overlap the ordinary lane banks (1..=8).
+const REAL_FULL_PAIRED_LM_HEAD_BUFFER_BANK_BASE: usize = 16;
+
+fn real_full_paired_lm_head_buffer_bank(execution_buffer_bank: usize) -> usize {
+    REAL_FULL_PAIRED_LM_HEAD_BUFFER_BANK_BASE + execution_buffer_bank
+}
+
+fn real_full_scalar_dspark_prewarm_requested_draft_tokens(
+    sequence_id: &str,
+    request_index: u64,
+) -> Option<usize> {
+    sequence_id
+        .contains(REAL_FULL_STARTUP_SCALAR_DSPARK_COHORT_MARKER)
+        .then_some(())?;
+    let encoded = request_index.checked_sub(REAL_FULL_SCALAR_DSPARK_PREWARM_WIDTH_REQUEST_BASE)?
+        / REAL_FULL_SCALAR_DSPARK_PREWARM_WIDTH_REQUEST_STRIDE;
+    usize::try_from(encoded)
+        .ok()
+        .filter(|draft_tokens| *draft_tokens <= REAL_FULL_DSPARK_MAX_VERIFY_DRAFTS)
+}
 
 fn real_full_batched_dspark_prewarm_requested_draft_tokens(
     sequence_id: &str,
@@ -3982,8 +4064,10 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
             {
                 continue;
             }
-            let samples = with_coordinator_owned_device_buffer_bank(cycle_a.buffer_bank, || {
-                let hidden_a = executions[pair_start]
+            let samples = with_coordinator_owned_device_buffer_bank(
+                real_full_paired_lm_head_buffer_bank(cycle_a.buffer_bank),
+                || {
+                    let hidden_a = executions[pair_start]
                         .final_target_device_hidden
                         .as_ref()
                         .with_context(|| {
@@ -3991,22 +4075,23 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
                                 "batched dSpark request {pair_start} has no retained target hidden rows"
                             )
                         })?;
-                let hidden_b = executions[pair_end]
-                    .final_target_device_hidden
-                    .as_ref()
-                    .with_context(|| {
-                        format!(
+                    let hidden_b = executions[pair_end]
+                        .final_target_device_hidden
+                        .as_ref()
+                        .with_context(|| {
+                            format!(
                             "batched dSpark request {pair_end} has no retained target hidden rows"
                         )
-                    })?;
-                real_full_target_token_samples_pair(
-                    &self.catalog,
-                    hidden_a,
-                    suffix_rows_a,
-                    hidden_b,
-                    suffix_rows_b,
-                )
-            });
+                        })?;
+                    real_full_target_token_samples_pair(
+                        &self.catalog,
+                        hidden_a,
+                        suffix_rows_a,
+                        hidden_b,
+                        suffix_rows_b,
+                    )
+                },
+            );
             match samples {
                 Ok((sample_a, sample_b)) => {
                     paired_target_samples[pair_start] = Some(sample_a);
@@ -4158,9 +4243,11 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
         );
 
         let prewarm_result = (|| {
-            let mut generated_token_ids = Vec::with_capacity(sequence_ids.len());
-            for (lane_index, sequence_id) in sequence_ids.iter().enumerate() {
-                let initial_cycle = self.execute_real_full_decode_cycle_inner(
+            let seed_start = Instant::now();
+            let seed_requests = sequence_ids
+                .iter()
+                .enumerate()
+                .map(|(lane_index, sequence_id)| {
                     glmrt_api::RealFullRequest::new_decode_step_for_sequence(
                         90_000 + lane_index as u64,
                         sequence_id,
@@ -4170,8 +4257,20 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
                         Vec::new(),
                         0,
                         decode_budget,
-                    ),
-                )?;
+                    )
+                })
+                .collect::<Vec<_>>();
+            let initial_cycles = self
+                .execute_real_full_decode_cycle_batch(seed_requests)
+                .into_iter()
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let reported_capture_delta = initial_cycles
+                .iter()
+                .map(|cycle| cycle.info.request_coordinator_graph_captures)
+                .max()
+                .unwrap_or(0);
+            let mut generated_token_ids = Vec::with_capacity(sequence_ids.len());
+            for (lane_index, initial_cycle) in initial_cycles.into_iter().enumerate() {
                 if initial_cycle.info.status != "ready" {
                     return Err(format!(
                         "batched dSpark startup seed for lane {lane_index} failed: status={} blocker={} failed={:?}",
@@ -4194,87 +4293,90 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
                     })?;
                 generated_token_ids.push(vec![token_id]);
             }
+            eprintln!(
+                "real_full_startup_prewarm_step_done stage=batched-dspark-seed lanes={} reported_capture_delta={} elapsed_ms={:.3} total_ms={:.3}",
+                self.max_execution_lanes,
+                reported_capture_delta,
+                elapsed_ms(seed_start),
+                elapsed_ms(start),
+            );
 
             // Each width uses the same live request/lane state, avoiding 4*C
-            // redundant seed prefills. Two passes materialize both recurrent
-            // owned-buffer rotations for every physical M=1..max.
+            // redundant seed prefills. Layer-parity fused-hidden pools keep
+            // each recurrent graph input address stable, so one pass captures
+            // the complete working set for every physical M=1..max.
             for (width_index, draft_tokens) in (0..=max_draft_tokens).rev().enumerate() {
-                for pass_index in 0..2 {
-                    let requests = sequence_ids
-                        .iter()
-                        .zip(generated_token_ids.iter())
-                        .enumerate()
-                        .map(|(lane_index, (sequence_id, generated_tokens))| {
-                            glmrt_api::RealFullRequest::new_decode_step_for_sequence(
-                                REAL_FULL_BATCHED_DSPARK_PREWARM_WIDTH_REQUEST_BASE
-                                    + (draft_tokens as u64)
-                                        * REAL_FULL_BATCHED_DSPARK_PREWARM_WIDTH_REQUEST_STRIDE
-                                    + (pass_index * 10 + lane_index) as u64,
-                                sequence_id,
-                                &prompt,
-                                prompt_tokens,
-                                1,
-                                generated_tokens.clone(),
-                                1 + width_index * 2 + pass_index,
-                                decode_budget,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let pass_start = Instant::now();
-                    let cycles = self
-                        .execute_real_full_decode_cycle_batch(requests)
-                        .into_iter()
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    let reported_capture_delta = cycles
-                        .iter()
-                        .map(|cycle| cycle.info.request_coordinator_graph_captures)
-                        .max()
-                        .unwrap_or(0);
-                    for (lane_index, cycle) in cycles.iter().enumerate() {
-                        if cycle.info.status != "ready"
-                            || cycle.info.request_mtp_verify_rows != draft_tokens
-                        {
-                            return Err(format!(
-                                "batched dSpark M={} startup pass {} lane {} failed: status={} verify_rows={} expected_rows={} blocker={} failed={:?}",
-                                draft_tokens + 1,
-                                pass_index + 1,
-                                lane_index,
-                                cycle.info.status,
-                                cycle.info.request_mtp_verify_rows,
-                                draft_tokens,
-                                cycle.info.blocker,
-                                cycle.info.failed_requirements,
-                            ));
-                        }
-                        if cycle.generated_tokens.is_empty() {
-                            return Err(format!(
-                                "batched dSpark M={} startup pass {} lane {} emitted no tokens",
-                                draft_tokens + 1,
-                                pass_index + 1,
-                                lane_index,
-                            ));
-                        }
-                    }
-                    for (generated_tokens, cycle) in
-                        generated_token_ids.iter_mut().zip(cycles.into_iter())
+                let requests = sequence_ids
+                    .iter()
+                    .zip(generated_token_ids.iter())
+                    .enumerate()
+                    .map(|(lane_index, (sequence_id, generated_tokens))| {
+                        glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+                            REAL_FULL_BATCHED_DSPARK_PREWARM_WIDTH_REQUEST_BASE
+                                + (draft_tokens as u64)
+                                    * REAL_FULL_BATCHED_DSPARK_PREWARM_WIDTH_REQUEST_STRIDE
+                                + lane_index as u64,
+                            sequence_id,
+                            &prompt,
+                            prompt_tokens,
+                            1,
+                            generated_tokens.clone(),
+                            1 + width_index,
+                            decode_budget,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let width_start = Instant::now();
+                let cycles = self
+                    .execute_real_full_decode_cycle_batch(requests)
+                    .into_iter()
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let reported_capture_delta = cycles
+                    .iter()
+                    .map(|cycle| cycle.info.request_coordinator_graph_captures)
+                    .max()
+                    .unwrap_or(0);
+                for (lane_index, cycle) in cycles.iter().enumerate() {
+                    if cycle.info.status != "ready"
+                        || cycle.info.request_mtp_verify_rows != draft_tokens
                     {
-                        generated_tokens.extend(
-                            cycle
-                                .generated_tokens
-                                .into_iter()
-                                .map(|token| token.token_id),
-                        );
+                        return Err(format!(
+                            "batched dSpark M={} startup lane {} failed: status={} verify_rows={} expected_rows={} blocker={} failed={:?}",
+                            draft_tokens + 1,
+                            lane_index,
+                            cycle.info.status,
+                            cycle.info.request_mtp_verify_rows,
+                            draft_tokens,
+                            cycle.info.blocker,
+                            cycle.info.failed_requirements,
+                        ));
                     }
-                    eprintln!(
-                        "real_full_startup_prewarm_step_done stage=batched-dspark-widths pass={} lanes={} physical_m={} reported_capture_delta={} elapsed_ms={:.3} total_ms={:.3}",
-                        pass_index + 1,
-                        self.max_execution_lanes,
-                        draft_tokens + 1,
-                        reported_capture_delta,
-                        elapsed_ms(pass_start),
-                        elapsed_ms(start),
+                    if cycle.generated_tokens.is_empty() {
+                        return Err(format!(
+                            "batched dSpark M={} startup lane {} emitted no tokens",
+                            draft_tokens + 1,
+                            lane_index,
+                        ));
+                    }
+                }
+                for (generated_tokens, cycle) in
+                    generated_token_ids.iter_mut().zip(cycles.into_iter())
+                {
+                    generated_tokens.extend(
+                        cycle
+                            .generated_tokens
+                            .into_iter()
+                            .map(|token| token.token_id),
                     );
                 }
+                eprintln!(
+                    "real_full_startup_prewarm_step_done stage=batched-dspark-widths lanes={} physical_m={} reported_capture_delta={} elapsed_ms={:.3} total_ms={:.3}",
+                    self.max_execution_lanes,
+                    draft_tokens + 1,
+                    reported_capture_delta,
+                    elapsed_ms(width_start),
+                    elapsed_ms(start),
+                );
             }
             Ok(())
         })();
@@ -4312,6 +4414,41 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
     }
 
     fn finish_real_full_sequence(&self, sequence_id: &str) -> std::result::Result<(), String> {
+        if let Some(prefix_tokens) = real_full_startup_target_radix_evict_tokens(sequence_id) {
+            let start = Instant::now();
+            let prompt = REAL_FULL_SERVE_PREWARM_PROMPT_TOKEN.repeat(prefix_tokens);
+            let encoding = self
+                .tokenizer
+                .lock()
+                .map_err(|error| format!("locking startup radix tokenizer failed: {error}"))?
+                .encode_text(&prompt, false)
+                .map_err(format_error_chain)?;
+            if encoding.token_count != prefix_tokens + 1 {
+                return Err(format!(
+                    "startup radix eviction prompt produced {} tokens for {prefix_tokens} reusable tokens",
+                    encoding.token_count
+                ));
+            }
+            let prefix_token_ids = encoding.token_ids[..prefix_tokens]
+                .iter()
+                .map(|token_id| *token_id as usize)
+                .collect::<Vec<_>>();
+            let evicted_pages = self
+                .target_kv_radix
+                .evict_exact_inactive_leaf(&prefix_token_ids)
+                .map_err(format_error_chain)?;
+            let stats = self.target_kv_radix.stats();
+            eprintln!(
+                "real_full_startup_target_kv_radix_evict prefix_tokens={} evicted_pages={} cached_pages={} free_pages={} radix_nodes={} elapsed_ms={:.3}",
+                prefix_tokens,
+                evicted_pages,
+                stats.cached_pages,
+                stats.free_pages,
+                stats.radix_nodes,
+                elapsed_ms(start),
+            );
+            return Ok(());
+        }
         if let Some((query_rows, sparse_topk)) = real_full_nvfp4_short_k_graph_audit(sequence_id) {
             return audit_glm_dsa_nvfp4_short_k_prefill_graph_retention(query_rows, sparse_topk)
                 .map_err(format_error_chain);
@@ -4332,7 +4469,7 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
                 }
             }
             let max_sampler_rows = 2 * (REAL_FULL_DSPARK_MAX_VERIFY_DRAFTS + 1);
-            for buffer_bank in 0..self.max_execution_lanes {
+            for buffer_bank in 1..=self.max_execution_lanes {
                 let start = Instant::now();
                 eprintln!(
                     "real_full_startup_prewarm_start stage=lm-head-sampler-capacity buffer_bank={} max_rows={} top_k=64",
@@ -4360,13 +4497,16 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
                     "real_full_startup_prewarm_start stage=paired-lm-head buffer_bank={} min_rows={} max_rows={}",
                     buffer_bank, min_paired_rows, max_paired_rows,
                 );
-                with_coordinator_owned_device_buffer_bank(buffer_bank, || {
-                    prewarm_real_full_paired_target_token_sample_rows(
-                        &self.catalog,
-                        min_paired_rows,
-                        max_paired_rows,
-                    )
-                })
+                with_coordinator_owned_device_buffer_bank(
+                    real_full_paired_lm_head_buffer_bank(buffer_bank),
+                    || {
+                        prewarm_real_full_paired_target_token_sample_rows(
+                            &self.catalog,
+                            min_paired_rows,
+                            max_paired_rows,
+                        )
+                    },
+                )
                 .map_err(format_error_chain)?;
                 eprintln!(
                     "real_full_startup_prewarm_step_done stage=paired-lm-head buffer_bank={} min_rows={} max_rows={} elapsed_ms={:.3}",
@@ -4464,8 +4604,9 @@ impl glmrt_api::RealFullRequestExecutor for RealFullSchedulerRequestExecutor {
                 // the final target pass because no next speculation cycle is
                 // needed. Publish only the common exact frontier so a later
                 // radix hit can restore the tail and replay that tiny suffix.
-                let committed_tokens =
-                    dspark_retained_prefix_tokens.unwrap_or(committed_token_ids.len());
+                let committed_tokens = real_full_startup_target_radix_publish_tokens(sequence_id)
+                    .or(dspark_retained_prefix_tokens)
+                    .unwrap_or(committed_token_ids.len());
                 reservation
                         .commit_prefix(&committed_token_ids, committed_tokens)
                         .map(|published| {
@@ -5648,7 +5789,26 @@ fn wait_for_real_full_expert_warmup() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRealFullServing> {
+fn report_real_full_startup_phase(
+    stage: &str,
+    startup_started: Instant,
+    phase_started: &mut Instant,
+) {
+    let now = Instant::now();
+    eprintln!(
+        "real_full_startup_phase stage={stage} elapsed_ms={:.3} total_ms={:.3}",
+        now.duration_since(*phase_started).as_secs_f64() * 1_000.0,
+        now.duration_since(startup_started).as_secs_f64() * 1_000.0,
+    );
+    *phase_started = now;
+}
+
+pub(crate) fn load_real_full_serving(
+    args: &CoordinatorArgs,
+    python_capture_barrier: impl FnOnce() -> Result<()>,
+) -> Result<LoadedRealFullServing> {
+    let startup_started = Instant::now();
+    let mut phase_started = startup_started;
     if args.backend != "cuda-reference" {
         anyhow::ensure!(
             coordinator_python_capture_enabled(),
@@ -5659,6 +5819,7 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
             "real-glm-full serving requires startup prewarm so all production CUDA graphs are captured before serving"
         );
     }
+    report_real_full_startup_phase("validation", startup_started, &mut phase_started);
     let (_catalog_path, catalog) = load_real_glm_full_catalog(args)?;
     let mut kv_config = real_full_kv_cache_config(args)?;
     if real_full_mtp_enabled() || real_full_mtp_probe_enabled() {
@@ -5669,6 +5830,7 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
         "real-glm-full MLA KV representation={}",
         kv_config.mla_representation.label()
     );
+    report_real_full_startup_phase("catalog-kv-config", startup_started, &mut phase_started);
     let sparse_dispatch_transport =
         RealFullSchedulerSparseDispatchTransport::from_label(args.transport.as_str());
     let sparse_tcp_targets = real_full_sparse_tcp_targets_from_args(args)?;
@@ -5679,6 +5841,7 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
     };
     let tokenizer = LoadedTokenizer::from_snapshot(Path::new(&catalog.snapshot_path))
         .context("loading real-full serving tokenizer")?;
+    report_real_full_startup_phase("targets-tokenizer", startup_started, &mut phase_started);
     let kv_snapshot_load_path = optional_nonempty_env_path(REAL_FULL_KV_SNAPSHOT_LOAD_ENV)?;
     let kv_snapshot_save_path = optional_nonempty_env_path(REAL_FULL_KV_SNAPSHOT_SAVE_ENV)?;
     let kv_snapshot_save_tokens =
@@ -5725,6 +5888,7 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
             save.root.display()
         );
     }
+    report_real_full_startup_phase("kv-snapshot-config", startup_started, &mut phase_started);
     let engine_commit = env::var(REAL_FULL_ENGINE_COMMIT_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -5777,10 +5941,16 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
     } else {
         None
     };
+    report_real_full_startup_phase("prewarm-prompts", startup_started, &mut phase_started);
     let preload = preload_real_full_coordinator_resident_weights(&catalog)?;
     println!(
         "real-glm-full coordinator resident preload status={} tensors={} bytes={}",
         preload.status, preload.selected_tensor_count, preload.loaded_tensor_bytes
+    );
+    report_real_full_startup_phase(
+        "coordinator-resident-preload",
+        startup_started,
+        &mut phase_started,
     );
     let max_execution_lanes = real_full_max_execution_lanes()?;
     // Draft KV is an execution lease, not queued-request or target-radix
@@ -5845,8 +6015,11 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
         dspark_load_started.elapsed().as_secs_f64() * 1_000.0,
         dspark.is_some(),
     );
+    report_real_full_startup_phase("dspark-preload", startup_started, &mut phase_started);
     wait_for_real_full_sparse_targets(sparse_tcp_targets.as_deref())?;
+    report_real_full_startup_phase("sparse-target-connect", startup_started, &mut phase_started);
     wait_for_real_full_expert_warmup()?;
+    report_real_full_startup_phase("expert-warmup", startup_started, &mut phase_started);
     let sparse_dispatch_worker_cpu = real_full_scheduler_worker_cpu()?;
     let sparse_tcp_dispatch_worker = sparse_tcp_targets
         .as_ref()
@@ -5861,6 +6034,7 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
             .map(Arc::new)
         })
         .transpose()?;
+    report_real_full_startup_phase("dispatch-worker", startup_started, &mut phase_started);
     anyhow::ensure!(
         !snapshot_enabled || sparse_tcp_dispatch_worker.is_some() || sparse_tcp_targets.is_none(),
         "packed KV/DSA snapshots require a persistent scheduler execution state"
@@ -5907,6 +6081,13 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
         dspark,
         engine_commit,
     };
+    report_real_full_startup_phase("executor-assembly", startup_started, &mut phase_started);
+    python_capture_barrier().context("waiting for coordinator Python capture initialization")?;
+    report_real_full_startup_phase(
+        "python-capture-barrier",
+        startup_started,
+        &mut phase_started,
+    );
     let executor: Arc<dyn glmrt_api::RealFullRequestExecutor> =
         if real_full_request_thread_pinned_enabled() {
             let worker_count = real_full_request_thread_pinned_workers()?;
@@ -5919,6 +6100,11 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                     &worker_cpus,
                 )
                 .context("spawning thread-pinned real-full request worker")?;
+            report_real_full_startup_phase(
+                "request-worker-spawn",
+                startup_started,
+                &mut phase_started,
+            );
             if let Some(prompts) = prewarm_prompts.as_ref() {
                 for worker_index in 0..executor.worker_count() {
                     if max_execution_lanes > 1 && real_full_dspark_enabled() {
@@ -5936,6 +6122,11 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                                 )
                             })?;
                     }
+                    report_real_full_startup_phase(
+                        "prewarm-paired-lm-head-initial",
+                        startup_started,
+                        &mut phase_started,
+                    );
                     prewarm_real_full_serving_requests(
                         |request| {
                             executor.execute_real_full_decode_cycle_on_worker(worker_index, request)
@@ -5951,6 +6142,11 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                         worker_index,
                         serving_kv_dtype,
                     )?;
+                    report_real_full_startup_phase(
+                        "prewarm-main",
+                        startup_started,
+                        &mut phase_started,
+                    );
                     if max_execution_lanes > 1 && real_full_dspark_enabled() {
                         executor
                             .finish_real_full_sequence_on_worker(
@@ -5965,35 +6161,11 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                                     "prewarming batched dSpark graphs for worker {worker_index}"
                                 )
                             })?;
-                        executor
-                            .finish_real_full_sequence_on_worker(
-                                worker_index,
-                                format!(
-                                    "{REAL_FULL_STARTUP_PREWARM_PAIRED_LM_HEAD_PREFIX}final-{worker_index}"
-                                ),
-                            )
-                            .map_err(anyhow::Error::msg)
-                            .with_context(|| {
-                                format!(
-                                    "recapturing paired LM-head graphs for worker {worker_index}"
-                                )
-                            })?;
-                        // The paired LM-head sweep borrows bank 1/3 buffers and
-                        // changes their pool order. Rebind M=16 layer-linear
-                        // identities to the final serving allocation order.
-                        executor
-                            .finish_real_full_sequence_on_worker(
-                                worker_index,
-                                format!(
-                                    "{REAL_FULL_STARTUP_PREWARM_BATCHED_DSPARK_PREFIX}final-{worker_index}"
-                                ),
-                            )
-                            .map_err(anyhow::Error::msg)
-                            .with_context(|| {
-                                format!(
-                                    "recapturing final batched dSpark graphs for worker {worker_index}"
-                                )
-                            })?;
+                        report_real_full_startup_phase(
+                            "prewarm-batched-dspark",
+                            startup_started,
+                            &mut phase_started,
+                        );
                     }
                     if serving_kv_dtype == KvCacheDType::Nvfp4 {
                         audit_real_full_nvfp4_short_k_prefill_graphs(
@@ -6021,8 +6193,18 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                         })?;
                 }
             }
+            report_real_full_startup_phase(
+                "prewarm-audit-seal",
+                startup_started,
+                &mut phase_started,
+            );
             Arc::new(executor)
         } else {
+            report_real_full_startup_phase(
+                "request-worker-inline",
+                startup_started,
+                &mut phase_started,
+            );
             if let Some(prompts) = prewarm_prompts.as_ref() {
                 if max_execution_lanes > 1 && real_full_dspark_enabled() {
                     glmrt_api::RealFullRequestExecutor::finish_real_full_sequence(
@@ -6032,6 +6214,11 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                     .map_err(anyhow::Error::msg)
                     .context("prewarming paired LM-head graphs")?;
                 }
+                report_real_full_startup_phase(
+                    "prewarm-paired-lm-head-initial",
+                    startup_started,
+                    &mut phase_started,
+                );
                 prewarm_real_full_serving_requests(
                     |request| {
                         glmrt_api::RealFullRequestExecutor::execute_real_full_decode_cycle(
@@ -6050,6 +6237,7 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                     0,
                     serving_kv_dtype,
                 )?;
+                report_real_full_startup_phase("prewarm-main", startup_started, &mut phase_started);
                 if max_execution_lanes > 1 && real_full_dspark_enabled() {
                     glmrt_api::RealFullRequestExecutor::finish_real_full_sequence(
                         &scheduler_executor,
@@ -6057,20 +6245,11 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                     )
                     .map_err(anyhow::Error::msg)
                     .context("prewarming batched dSpark graphs")?;
-                    let sequence_id =
-                        format!("{REAL_FULL_STARTUP_PREWARM_PAIRED_LM_HEAD_PREFIX}final");
-                    glmrt_api::RealFullRequestExecutor::finish_real_full_sequence(
-                        &scheduler_executor,
-                        &sequence_id,
-                    )
-                    .map_err(anyhow::Error::msg)
-                    .context("recapturing paired LM-head graphs")?;
-                    glmrt_api::RealFullRequestExecutor::finish_real_full_sequence(
-                        &scheduler_executor,
-                        &format!("{REAL_FULL_STARTUP_PREWARM_BATCHED_DSPARK_PREFIX}final"),
-                    )
-                    .map_err(anyhow::Error::msg)
-                    .context("recapturing final batched dSpark graphs")?;
+                    report_real_full_startup_phase(
+                        "prewarm-batched-dspark",
+                        startup_started,
+                        &mut phase_started,
+                    );
                 }
                 if serving_kv_dtype == KvCacheDType::Nvfp4 {
                     audit_real_full_nvfp4_short_k_prefill_graphs(
@@ -6086,8 +6265,14 @@ pub(crate) fn load_real_full_serving(args: &CoordinatorArgs) -> Result<LoadedRea
                 seal_coordinator_owned_device_buffer_pool()
                     .context("sealing coordinator owned device-buffer pool")?;
             }
+            report_real_full_startup_phase(
+                "prewarm-audit-seal",
+                startup_started,
+                &mut phase_started,
+            );
             Arc::new(scheduler_executor)
         };
+    report_real_full_startup_phase("complete", startup_started, &mut phase_started);
     Ok(LoadedRealFullServing { info, executor })
 }
 
@@ -6214,6 +6399,14 @@ fn real_full_serve_prefix_prefill_probe(
     }))
 }
 
+fn real_full_startup_workspace_is_final_capture_set(
+    prefix_prefill_probe_enabled: bool,
+    native_mtp_enabled: bool,
+    native_mtp_probe_enabled: bool,
+) -> bool {
+    !prefix_prefill_probe_enabled && !native_mtp_enabled && !native_mtp_probe_enabled
+}
+
 fn prewarm_real_full_serving_requests(
     mut execute: impl FnMut(
         glmrt_api::RealFullRequest,
@@ -6225,72 +6418,198 @@ fn prewarm_real_full_serving_requests(
     kv_dtype: KvCacheDType,
 ) -> Result<()> {
     let start = Instant::now();
+    let canonical_workspace_complete = real_full_startup_workspace_is_final_capture_set(
+        prefix_prefill_probe.is_some(),
+        real_full_mtp_enabled(),
+        real_full_mtp_probe_enabled(),
+    );
+    let dsa_selector_query_rows = REAL_FULL_SERVE_DSA_SELECTOR_PREWARM_QUERY_ROWS
+        .iter()
+        .copied()
+        .filter(|query_rows| *query_rows < real_full_request_prefill_chunk_tokens())
+        .collect::<Vec<_>>();
+    let dsa_selector_decode_budget = dsa_selector_query_rows.len() + 1;
     let mut recurrent_seed = None;
     for (prompt_index, (prompt, prompt_tokens)) in prompts.iter().enumerate() {
-        for stage in ["workspace-sizing", "initial"] {
-            let stage_start = Instant::now();
-            let sequence_id = if prompt_index == 0 && stage == "workspace-sizing" {
-                format!("real-full-startup-capture-arena-{prompt_tokens}-sequence-{worker_index}")
-            } else {
-                format!("real-full-startup-prewarm-{stage}-{prompt_tokens}-sequence-{worker_index}")
-            };
-            let decode_budget = if prompt_index == 0 && stage == "initial" {
-                REAL_FULL_SERVE_PREWARM_DECODE_BUDGET
-            } else {
-                1
-            };
-            let request = glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+        // The original prewarm ran every bucket twice: the first request grew
+        // workspaces and the second recaptured graphs against the stable
+        // pointers. The canonical-arena sweep below now performs that final
+        // capture after every other startup sizing operation, so retaining the
+        // historical middle traversal only creates graphs that are replaced.
+        // In the ordinary dSpark path, bind every sizing request to the same
+        // max-context arena used by production. With no intervening prefix or
+        // native-MTP probes, these exact packed-KV identities are already the
+        // final serving set and the historical verification sweep is pure
+        // replay. Optional probes keep the conservative two-stage layout.
+        let stage = "workspace-sizing";
+        let stage_start = Instant::now();
+        let canonical_sizing_request = canonical_workspace_complete || prompt_index == 0;
+        let startup_radix_publish_tokens = (canonical_workspace_complete
+            && prompt_index == 0
+            && !dsa_selector_query_rows.is_empty())
+        .then_some(prompt_tokens.saturating_sub(1));
+        let sequence_id = if let Some(publish_tokens) = startup_radix_publish_tokens {
+            format!(
+                "{REAL_FULL_STARTUP_TARGET_RADIX_PUBLISH_PREFIX}{publish_tokens}-sequence-{worker_index}"
+            )
+        } else if canonical_sizing_request {
+            format!("real-full-startup-capture-arena-{prompt_tokens}-sequence-{worker_index}")
+        } else {
+            format!("real-full-startup-prewarm-{stage}-{prompt_tokens}-sequence-{worker_index}")
+        };
+        let recurrent_candidate = if canonical_workspace_complete {
+            prompt_index + 1 == prompts.len()
+        } else {
+            prompt_index == 0
+        };
+        let decode_budget = if recurrent_candidate {
+            REAL_FULL_SERVE_PREWARM_DECODE_BUDGET
+        } else {
+            1
+        };
+        if canonical_workspace_complete
+            && !dsa_selector_query_rows.is_empty()
+            && *prompt_tokens == REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_PROMPT_TOKENS
+        {
+            let cached_prompt_tokens = prompt_tokens
+                .checked_sub(REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_QUERY_ROWS + 1)
+                .context("no-selector DSA boundary cached prefix underflow")?;
+            anyhow::ensure!(
+                cached_prompt_tokens % REAL_FULL_SHARED_KV_PAGE_TOKENS == 0,
+                "no-selector DSA boundary prefix {cached_prompt_tokens} is not page aligned"
+            );
+            // Branch from the long alpha radix seed at exactly the requested
+            // cached frontier. Leaving the whole prompt as alpha would match
+            // all 2,048 reusable tokens, while declaring a cached prefix on a
+            // fresh sequence would bypass radix binding and leave its
+            // processed-token frontier at zero.
+            let boundary_prompt = format!(
+                "{}{}",
+                REAL_FULL_SERVE_PREWARM_PROMPT_TOKEN.repeat(cached_prompt_tokens),
+                REAL_FULL_SERVE_PREWARM_BOUNDARY_TOKEN
+                    .repeat(REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_QUERY_ROWS),
+            );
+            let sequence_id = format!(
+                "real-full-startup-dsa-selector-seed-no-selector-boundary-{prompt_tokens}-sequence-{worker_index}"
+            );
+            let mut request = glmrt_api::RealFullRequest::new_decode_step_for_sequence(
                 0,
                 &sequence_id,
-                prompt,
+                &boundary_prompt,
                 *prompt_tokens,
                 1,
                 Vec::new(),
                 0,
-                decode_budget,
+                1,
             );
+            request.disable_speculation = true;
             eprintln!(
-                "real_full_startup_prewarm_start worker={} stage={} prompt_tokens={} max_tokens=1 decode_budget={}",
-                worker_index, stage, prompt_tokens,
-                decode_budget
+                "real_full_startup_prewarm_start worker={} stage=workspace-sizing-cached-boundary prompt_tokens={} cached_prompt_tokens={} query_rows={}",
+                worker_index,
+                prompt_tokens,
+                cached_prompt_tokens,
+                REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_QUERY_ROWS,
             );
             let cycle = execute(request)
-                .map_err(|err| anyhow::anyhow!(err))
-                .with_context(|| {
-                    format!("executing real-full serving startup {stage} prewarm request")
-                })?;
+                .map_err(anyhow::Error::msg)
+                .context("capturing the cached no-selector DSA boundary")?;
             let info = cycle.info;
+            anyhow::ensure!(
+                info.status == "ready"
+                    && info.request_prefill_tokens
+                        == REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_QUERY_ROWS
+                    && info.request_prefill_chunks == 1,
+                "cached no-selector DSA boundary failed: status={} prefill_rows={} chunks={} expected_rows={} blocker={} failed={:?}",
+                info.status,
+                info.request_prefill_tokens,
+                info.request_prefill_chunks,
+                REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_QUERY_ROWS,
+                info.blocker,
+                info.failed_requirements,
+            );
             eprintln!(
-                "real_full_startup_prewarm_step_done worker={} stage={} prompt_tokens={} elapsed_ms={:.3} total_ms={:.3} status={} sample_status={} sampled_token_id={:?} full_context_device_attention_complete={} sparse_dispatch_status={}",
-                worker_index, stage, prompt_tokens, elapsed_ms(stage_start), elapsed_ms(start),
+                "real_full_startup_prewarm_step_done worker={} stage=workspace-sizing-cached-boundary prompt_tokens={} cached_prompt_tokens={} elapsed_ms={:.3} total_ms={:.3} expert_batches={} expert_rows={} graph_captures={} captured_graphs={}",
+                worker_index,
+                prompt_tokens,
+                cached_prompt_tokens,
+                elapsed_ms(stage_start),
+                elapsed_ms(start),
+                info.sparse_expert_batches,
+                info.request_expert_batch_rows,
+                info.request_coordinator_graph_captures,
+                info.request_coordinator_graph_captured_graphs,
+            );
+            finish_sequence(&sequence_id)
+                .map_err(anyhow::Error::msg)
+                .context("finishing the cached no-selector DSA boundary sequence")?;
+            continue;
+        }
+        let request = glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+            0,
+            &sequence_id,
+            prompt,
+            *prompt_tokens,
+            1,
+            Vec::new(),
+            0,
+            decode_budget,
+        );
+        eprintln!(
+            "real_full_startup_prewarm_start worker={} stage={} prompt_tokens={} max_tokens=1 decode_budget={}",
+            worker_index, stage, prompt_tokens, decode_budget
+        );
+        let cycle = execute(request)
+            .map_err(|err| anyhow::anyhow!(err))
+            .with_context(|| {
+                format!("executing real-full serving startup {stage} prewarm request")
+            })?;
+        let info = cycle.info;
+        eprintln!(
+            "real_full_startup_prewarm_step_done worker={} stage={} prompt_tokens={} elapsed_ms={:.3} total_ms={:.3} status={} sample_status={} sampled_token_id={:?} full_context_device_attention_complete={} sparse_dispatch_status={} prefill_tokens={} prefill_chunks={} expert_batches={} expert_rows={} graph_captures={} graph_launches={} captured_graphs={}",
+            worker_index, stage, prompt_tokens, elapsed_ms(stage_start), elapsed_ms(start),
+            info.status,
+            info.scheduler_terminal_lm_head_sample_status,
+            info.scheduler_terminal_lm_head_sampled_token_id,
+            info.scheduler_full_context_device_attention_complete,
+            info.scheduler_sparse_tcp_dispatch_status,
+            info.request_prefill_tokens,
+            info.request_prefill_chunks,
+            info.sparse_expert_batches,
+            info.request_expert_batch_rows,
+            info.request_coordinator_graph_captures,
+            info.request_coordinator_graph_launches,
+            info.request_coordinator_graph_captured_graphs,
+        );
+        if info.status != "ready" {
+            anyhow::bail!(
+                "real-full serving startup {stage} prewarm did not produce a ready scheduler sample: status={} sample_status={} blocker={} failed={:?}",
                 info.status,
                 info.scheduler_terminal_lm_head_sample_status,
-                info.scheduler_terminal_lm_head_sampled_token_id,
-                info.scheduler_full_context_device_attention_complete,
-                info.scheduler_sparse_tcp_dispatch_status
+                info.blocker,
+                info.failed_requirements
             );
-            if info.status != "ready" {
-                anyhow::bail!(
-                    "real-full serving startup {stage} prewarm did not produce a ready scheduler sample: status={} sample_status={} blocker={} failed={:?}",
-                    info.status,
-                    info.scheduler_terminal_lm_head_sample_status,
-                    info.blocker,
-                    info.failed_requirements
-                );
-            }
-            if prompt_index == 0 && stage == "initial" {
-                recurrent_seed = Some((sequence_id, prompt, *prompt_tokens, info));
-            }
+        }
+        if startup_radix_publish_tokens.is_some() {
+            finish_sequence(&sequence_id)
+                .map_err(anyhow::Error::msg)
+                .context("publishing long-context startup target KV radix seed")?;
+        }
+        if recurrent_candidate {
+            anyhow::ensure!(
+                startup_radix_publish_tokens.is_none(),
+                "startup recurrent seed cannot also publish the long-context target radix seed"
+            );
+            recurrent_seed = Some((sequence_id, prompt, *prompt_tokens, info));
         }
     }
     let (sequence_id, prompt, prompt_tokens, info) = recurrent_seed
-        .context("real-full serving startup largest initial prewarm was not executed")?;
+        .context("real-full serving startup recurrent seed prewarm was not executed")?;
     let sampled_token_id = info
         .scheduler_terminal_lm_head_sampled_token_id
-        .context("real-full serving startup initial prewarm produced no sampled token")?;
+        .context("real-full serving startup recurrent seed produced no sampled token")?;
     let recurrent_start = Instant::now();
     let recurrent = glmrt_api::RealFullRequest::new_decode_step_for_sequence(
-        1,
+        u64::try_from(prompts.len()).context("recurrent prewarm prompt count exceeds u64")?,
         &sequence_id,
         prompt,
         prompt_tokens,
@@ -6697,60 +7016,65 @@ fn prewarm_real_full_serving_requests(
         );
     }
     // Every direct packed-KV attention graph captures the physical cache and
-    // query-arena addresses. Re-run the base C=1 shapes last on one canonical
-    // max-context arena so later startup sizing captures cannot leave serving
-    // pointed at an evicted identity. Run the largest prompt last. The
+    // query-arena addresses. Ordinary dSpark sizing already uses the canonical
+    // max-context arena and no later optional probe can replace those C=1
+    // identities, so a second sweep would only replay the same graphs. Prefix
+    // and native-MTP probe modes can still perturb the capture set; retain the
+    // conservative final sweep for them and run its largest prompt last. The
     // selector seed is created separately after dSpark width prewarm because
     // those graph-bound requests intentionally recycle the one max-context
     // arena; retaining a seed here would let width prewarm rebind its state
     // while the selector sweep still believed the old sequence was active.
-    let dsa_selector_query_rows = REAL_FULL_SERVE_DSA_SELECTOR_PREWARM_QUERY_ROWS
-        .iter()
-        .copied()
-        .filter(|query_rows| *query_rows < real_full_request_prefill_chunk_tokens())
-        .collect::<Vec<_>>();
-    let dsa_selector_decode_budget = dsa_selector_query_rows.len() + 1;
-    for (prompt_index, (prompt, prompt_tokens)) in prompts.iter().rev().enumerate() {
-        let sequence_id = format!(
-            "real-full-startup-capture-arena-final-{prompt_tokens}-sequence-{worker_index}"
-        );
-        let decode_budget = 1;
-        let capture_start = Instant::now();
+    if canonical_workspace_complete {
         eprintln!(
-            "real_full_startup_prewarm_start worker={} stage=canonical-capture prompt_tokens={} max_tokens=1 decode_budget={}",
-            worker_index, prompt_tokens, decode_budget
-        );
-        let capture_info = execute(glmrt_api::RealFullRequest::new_decode_step_for_sequence(
-            u64::try_from(prompt_index).context("canonical capture prompt index exceeds u64")?,
-            &sequence_id,
-            prompt,
-            *prompt_tokens,
-            1,
-            Vec::new(),
-            0,
-            decode_budget,
-        ))
-        .map_err(|err| anyhow::anyhow!(err))
-        .with_context(|| {
-            format!("executing canonical max-context capture for {prompt_tokens} prompt tokens")
-        })?
-        .info;
-        anyhow::ensure!(
-            capture_info.status == "ready",
-            "canonical max-context capture for {prompt_tokens} prompt tokens was not ready: status={} sample_status={} blocker={} failed={:?}",
-            capture_info.status,
-            capture_info.scheduler_terminal_lm_head_sample_status,
-            capture_info.blocker,
-            capture_info.failed_requirements
-        );
-        eprintln!(
-            "real_full_startup_prewarm_step_done worker={} stage=canonical-capture prompt_tokens={} elapsed_ms={:.3} total_ms={:.3} sampled_token_id={:?}",
+            "real_full_startup_prewarm_step_done worker={} stage=canonical-capture-skip reason=canonical-workspace-complete elapsed_ms=0.000 total_ms={:.3}",
             worker_index,
-            prompt_tokens,
-            elapsed_ms(capture_start),
             elapsed_ms(start),
-            capture_info.scheduler_terminal_lm_head_sampled_token_id,
         );
+    } else {
+        for (prompt_index, (prompt, prompt_tokens)) in prompts.iter().rev().enumerate() {
+            let sequence_id = format!(
+                "real-full-startup-capture-arena-final-{prompt_tokens}-sequence-{worker_index}"
+            );
+            let decode_budget = 1;
+            let capture_start = Instant::now();
+            eprintln!(
+                "real_full_startup_prewarm_start worker={} stage=canonical-capture prompt_tokens={} max_tokens=1 decode_budget={}",
+                worker_index, prompt_tokens, decode_budget
+            );
+            let capture_info = execute(glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+                u64::try_from(prompt_index)
+                    .context("canonical capture prompt index exceeds u64")?,
+                &sequence_id,
+                prompt,
+                *prompt_tokens,
+                1,
+                Vec::new(),
+                0,
+                decode_budget,
+            ))
+            .map_err(|err| anyhow::anyhow!(err))
+            .with_context(|| {
+                format!("executing canonical max-context capture for {prompt_tokens} prompt tokens")
+            })?
+            .info;
+            anyhow::ensure!(
+                capture_info.status == "ready",
+                "canonical max-context capture for {prompt_tokens} prompt tokens was not ready: status={} sample_status={} blocker={} failed={:?}",
+                capture_info.status,
+                capture_info.scheduler_terminal_lm_head_sample_status,
+                capture_info.blocker,
+                capture_info.failed_requirements
+            );
+            eprintln!(
+                "real_full_startup_prewarm_step_done worker={} stage=canonical-capture prompt_tokens={} elapsed_ms={:.3} total_ms={:.3} sampled_token_id={:?}",
+                worker_index,
+                prompt_tokens,
+                elapsed_ms(capture_start),
+                elapsed_ms(start),
+                capture_info.scheduler_terminal_lm_head_sampled_token_id,
+            );
+        }
     }
     // Grow the shared multirow workspaces before capturing long-context DSA
     // identities. The dSpark M=2..8 sweep can enlarge bucket-8 scratch; if it
@@ -6784,7 +7108,7 @@ fn prewarm_real_full_serving_requests(
             "real_full_startup_prewarm_start worker={} stage=dsa-selector-seed prompt_tokens={} decode_budget={}",
             worker_index, prompt_tokens, dsa_selector_decode_budget,
         );
-        let seed_info = execute(glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+        let mut seed_request = glmrt_api::RealFullRequest::new_decode_step_for_sequence(
             29_999,
             &sequence_id,
             prompt,
@@ -6793,10 +7117,15 @@ fn prewarm_real_full_serving_requests(
             Vec::new(),
             0,
             dsa_selector_decode_budget,
-        ))
-        .map_err(|err| anyhow::anyhow!(err))
-        .context("executing long-context DSA selector seed")?
-        .info;
+        );
+        // This pass captures target-attention selector buckets. It does not
+        // need a draft proposal, and target-only admission lets it reuse the
+        // long prefix produced by workspace sizing.
+        seed_request.disable_speculation = true;
+        let seed_info = execute(seed_request)
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("executing long-context DSA selector seed")?
+            .info;
         anyhow::ensure!(
             seed_info.status == "ready",
             "long-context DSA selector seed was not ready: status={} blocker={} failed={:?}",
@@ -6831,29 +7160,29 @@ fn prewarm_real_full_serving_requests(
                 prompt_tokens,
                 dsa_selector_decode_budget,
             );
-            let sweep_info = execute(
-                glmrt_api::RealFullRequest::new_decode_step_for_sequence(
-                    30_000_u64
-                        .checked_add(
-                            u64::try_from(step_index)
-                                .context("DSA selector prewarm step index exceeds u64")?,
-                        )
-                        .context("DSA selector prewarm request index overflow")?,
-                    &sequence_id,
-                    &prompt,
-                    prompt_tokens,
-                    1,
-                    Vec::new(),
-                    step_index + 1,
-                    dsa_selector_decode_budget,
-                )
-                .with_cached_prompt_tokens(cached_prompt_tokens),
+            let mut sweep_request = glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+                30_000_u64
+                    .checked_add(
+                        u64::try_from(step_index)
+                            .context("DSA selector prewarm step index exceeds u64")?,
+                    )
+                    .context("DSA selector prewarm request index overflow")?,
+                &sequence_id,
+                &prompt,
+                prompt_tokens,
+                1,
+                Vec::new(),
+                step_index + 1,
+                dsa_selector_decode_budget,
             )
-            .map_err(|err| anyhow::anyhow!(err))
-            .with_context(|| {
-                format!("capturing long-context DSA selector query bucket {query_rows}")
-            })?
-            .info;
+            .with_cached_prompt_tokens(cached_prompt_tokens);
+            sweep_request.disable_speculation = true;
+            let sweep_info = execute(sweep_request)
+                .map_err(|err| anyhow::anyhow!(err))
+                .with_context(|| {
+                    format!("capturing long-context DSA selector query bucket {query_rows}")
+                })?
+                .info;
             anyhow::ensure!(
                 sweep_info.status == "ready"
                     && sweep_info.request_prefill_tokens == query_rows,
@@ -6871,6 +7200,31 @@ fn prewarm_real_full_serving_requests(
                 elapsed_ms(start),
                 sweep_info.scheduler_terminal_lm_head_sampled_token_id,
             );
+        }
+        if canonical_workspace_complete {
+            let radix_prefix_tokens = prompts
+                .first()
+                .map(|(_, prompt_tokens)| prompt_tokens.saturating_sub(1))
+                .context("real-full serving radix cleanup prompt set is empty")?;
+            let boundary_prefix_tokens = REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_PROMPT_TOKENS
+                .checked_sub(REAL_FULL_SERVE_NO_SELECTOR_DSA_BOUNDARY_QUERY_ROWS + 1)
+                .context("no-selector DSA boundary cleanup prefix underflow")?;
+            // The cached no-selector pass splits the long alpha leaf at its
+            // 1,536-token branch point. Evict the suffix first and then the
+            // now-leaf branch stem so later dSpark warmup and live requests
+            // see the same short-prefix radix state as the unsplit baseline.
+            for eviction_tokens in [radix_prefix_tokens, boundary_prefix_tokens] {
+                let eviction_sequence_id = format!(
+                    "{REAL_FULL_STARTUP_TARGET_RADIX_EVICT_PREFIX}{eviction_tokens}-worker-{worker_index}"
+                );
+                finish_sequence(&eviction_sequence_id)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| {
+                        format!(
+                            "evicting {eviction_tokens}-token synthetic startup target KV radix leaf"
+                        )
+                    })?;
+            }
         }
     }
     // The canonical arena and DSA-selector passes above can grow or rebind
@@ -7159,6 +7513,152 @@ fn finish_real_full_dspark_width_prewarm_sequence(
         .with_context(|| format!("finishing dSpark M={physical_m} startup capture sequence"))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prewarm_real_full_dspark_width_cohort(
+    execute: &mut impl FnMut(
+        glmrt_api::RealFullRequest,
+    ) -> std::result::Result<glmrt_api::RealFullDecodeCycle, String>,
+    finish_sequence: &mut impl FnMut(&str) -> std::result::Result<(), String>,
+    dspark_prompt: &str,
+    dspark_prompt_tokens: usize,
+    draft_widths: &[usize],
+    worker_index: usize,
+    prewarm_start: Instant,
+) -> Result<()> {
+    let maximum_drafts = draft_widths
+        .iter()
+        .copied()
+        .max()
+        .context("dSpark scalar width cohort is empty")?;
+    let sequence_id = format!(
+        "real-full-startup-dspark-width-{maximum_drafts}{REAL_FULL_STARTUP_SCALAR_DSPARK_COHORT_MARKER}{dspark_prompt_tokens}-sequence-{worker_index}"
+    );
+    let capture_budget = draft_widths
+        .iter()
+        .try_fold(2_usize, |budget, draft_tokens| {
+            budget
+                .checked_add(draft_tokens.saturating_add(1))
+                .context("dSpark scalar width cohort decode budget overflow")
+        })?;
+    let cohort_start = Instant::now();
+    eprintln!(
+        "real_full_startup_prewarm_start worker={} stage=dspark-width-cohort prompt_tokens={} widths={:?} max_physical_m={} decode_budget={}",
+        worker_index,
+        dspark_prompt_tokens,
+        draft_widths,
+        maximum_drafts + 1,
+        capture_budget,
+    );
+    let initial_cycle = execute(glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+        REAL_FULL_SCALAR_DSPARK_PREWARM_WIDTH_REQUEST_BASE - 1,
+        &sequence_id,
+        dspark_prompt,
+        dspark_prompt_tokens,
+        1,
+        Vec::new(),
+        0,
+        capture_budget,
+    ))
+    .map_err(anyhow::Error::msg)
+    .context("seeding a reusable dSpark scalar width cohort")?;
+    anyhow::ensure!(
+        initial_cycle.info.status == "ready",
+        "dSpark scalar width cohort seed failed: status={} blocker={} failed={:?}",
+        initial_cycle.info.status,
+        initial_cycle.info.blocker,
+        initial_cycle.info.failed_requirements,
+    );
+    let mut generated_token_ids = initial_cycle
+        .generated_tokens
+        .iter()
+        .map(|token| token.token_id)
+        .collect::<Vec<_>>();
+    if generated_token_ids.is_empty() {
+        generated_token_ids.push(
+            initial_cycle
+                .info
+                .scheduler_terminal_lm_head_sampled_token_id
+                .context("dSpark scalar width cohort seed produced no token")?,
+        );
+    }
+    for (width_index, draft_tokens) in draft_widths.iter().copied().enumerate() {
+        let width_start = Instant::now();
+        let request_index = REAL_FULL_SCALAR_DSPARK_PREWARM_WIDTH_REQUEST_BASE
+            .checked_add(
+                u64::try_from(draft_tokens)
+                    .context("dSpark scalar cohort width exceeds u64")?
+                    .saturating_mul(REAL_FULL_SCALAR_DSPARK_PREWARM_WIDTH_REQUEST_STRIDE),
+            )
+            .and_then(|index| index.checked_add(u64::try_from(width_index).ok()?))
+            .context("dSpark scalar cohort request index overflow")?;
+        let decode_step_index = generated_token_ids.len();
+        let verify_cycle = execute(glmrt_api::RealFullRequest::new_decode_step_for_sequence(
+            request_index,
+            &sequence_id,
+            dspark_prompt,
+            dspark_prompt_tokens,
+            1,
+            generated_token_ids.clone(),
+            decode_step_index,
+            capture_budget,
+        ))
+        .map_err(anyhow::Error::msg)
+        .with_context(|| {
+            format!(
+                "executing dSpark M={} scalar cohort capture",
+                draft_tokens + 1
+            )
+        })?;
+        anyhow::ensure!(
+            verify_cycle.info.status == "ready"
+                && verify_cycle.info.request_mtp_verify_rows == draft_tokens,
+            "dSpark M={} scalar cohort capture failed: status={} verify_rows={} expected_rows={} blocker={} failed={:?}",
+            draft_tokens + 1,
+            verify_cycle.info.status,
+            verify_cycle.info.request_mtp_verify_rows,
+            draft_tokens,
+            verify_cycle.info.blocker,
+            verify_cycle.info.failed_requirements,
+        );
+        anyhow::ensure!(
+            !verify_cycle.generated_tokens.is_empty(),
+            "dSpark M={} scalar cohort capture emitted no continuation token",
+            draft_tokens + 1,
+        );
+        generated_token_ids.extend(
+            verify_cycle
+                .generated_tokens
+                .iter()
+                .map(|token| token.token_id),
+        );
+        eprintln!(
+            "real_full_startup_prewarm_step_done worker={} stage=dspark-width-cohort prompt_tokens={} drafts={} physical_m={} verify_rows={} generated_tokens={} elapsed_ms={:.3} total_ms={:.3}",
+            worker_index,
+            dspark_prompt_tokens,
+            draft_tokens,
+            draft_tokens + 1,
+            verify_cycle.info.request_mtp_verify_rows,
+            generated_token_ids.len(),
+            elapsed_ms(width_start),
+            elapsed_ms(prewarm_start),
+        );
+    }
+    finish_real_full_dspark_width_prewarm_sequence(
+        finish_sequence,
+        &sequence_id,
+        maximum_drafts + 1,
+    )?;
+    eprintln!(
+        "real_full_startup_prewarm_done worker={} stage=dspark-width-cohort prompt_tokens={} widths={:?} elapsed_ms={:.3} total_ms={:.3}",
+        worker_index,
+        dspark_prompt_tokens,
+        draft_widths,
+        elapsed_ms(cohort_start),
+        elapsed_ms(prewarm_start),
+    );
+    Ok(())
+}
+
 fn prewarm_real_full_dspark_widths(
     execute: &mut impl FnMut(
         glmrt_api::RealFullRequest,
@@ -7196,6 +7696,17 @@ fn prewarm_real_full_dspark_widths(
             None => (0..=dspark_active_max_verify_drafts()).rev().collect(),
         },
     };
+    if draft_widths_override.is_some() && draft_widths.len() > 1 {
+        return prewarm_real_full_dspark_width_cohort(
+            execute,
+            finish_sequence,
+            dspark_prompt,
+            *dspark_prompt_tokens,
+            &draft_widths,
+            worker_index,
+            prewarm_start,
+        );
+    }
     for draft_tokens in draft_widths {
         let request_index = 30_000 + draft_tokens as u64 * 3;
         let capture_budget = dspark_active_max_verify_drafts() + 4;
@@ -7271,59 +7782,9 @@ fn prewarm_real_full_dspark_widths(
             verify_cycle.info.blocker,
             verify_cycle.info.failed_requirements,
         );
-        // Query-projection outputs rotate through a second allocation identity
-        // on a settled verify pass. Capture it explicitly, as native MTP does,
-        // so the first real request does not add 78 per-layer graph identities.
-        let mut settled_generated_token_ids = vec![initial_token_id];
-        if verify_cycle.generated_tokens.is_empty() {
-            // Scalar M=1 reports its token through the ordinary terminal
-            // sample rather than the speculative multi-token vector.
-            settled_generated_token_ids.push(
-                verify_cycle
-                    .info
-                    .scheduler_terminal_lm_head_sampled_token_id
-                    .context("dSpark M=1 target capture produced no terminal token")?,
-            );
-        } else {
-            settled_generated_token_ids.extend(
-                verify_cycle
-                    .generated_tokens
-                    .iter()
-                    .map(|token| token.token_id),
-            );
-        }
-        let settled_verify_cycle =
-            execute(glmrt_api::RealFullRequest::new_decode_step_for_sequence(
-                request_index + 2,
-                &sequence_id,
-                dspark_prompt,
-                *dspark_prompt_tokens,
-                1,
-                settled_generated_token_ids,
-                capture_budget - 1,
-                capture_budget,
-            ))
-            .map_err(|error| anyhow::anyhow!(error))
-            .with_context(|| {
-                format!(
-                    "executing settled dSpark M={} target capture",
-                    draft_tokens + 1
-                )
-            })?;
-        anyhow::ensure!(
-            settled_verify_cycle.info.status == "ready"
-                && settled_verify_cycle.info.request_mtp_verify_rows == draft_tokens,
-            "settled dSpark M={} target capture failed: status={} verify_rows={} expected_rows={} blocker={} failed={:?}",
-            draft_tokens + 1,
-            settled_verify_cycle.info.status,
-            settled_verify_cycle.info.request_mtp_verify_rows,
-            draft_tokens,
-            settled_verify_cycle.info.blocker,
-            settled_verify_cycle.info.failed_requirements,
-        );
         // Speculative acceptance recomputes final_decode_step from the tokens
-        // actually emitted, so the synthetic terminal decode_step_index above
-        // does not guarantee that this state was recycled. End every width
+        // actually emitted, so the synthetic decode_step_index above does not
+        // guarantee that this state was recycled. End every width
         // explicitly before the next width reserves target KV: at C=1 there
         // is no spare reservation slot for arena rebind to drop the old one.
         finish_real_full_dspark_width_prewarm_sequence(
@@ -7332,12 +7793,12 @@ fn prewarm_real_full_dspark_widths(
             draft_tokens + 1,
         )?;
         eprintln!(
-            "real_full_startup_prewarm_step_done worker={} stage=dspark-width prompt_tokens={} drafts={} physical_m={} settled_verify_rows={} elapsed_ms={:.3} total_ms={:.3}",
+            "real_full_startup_prewarm_step_done worker={} stage=dspark-width prompt_tokens={} drafts={} physical_m={} verify_rows={} elapsed_ms={:.3} total_ms={:.3}",
             worker_index,
             dspark_prompt_tokens,
             draft_tokens,
             draft_tokens + 1,
-            settled_verify_cycle.info.request_mtp_verify_rows,
+            verify_cycle.info.request_mtp_verify_rows,
             elapsed_ms(width_start),
             elapsed_ms(prewarm_start),
         );
@@ -8342,16 +8803,20 @@ mod tests {
         real_full_mtp_draft_tokens_for_cycle_with_policy, real_full_mtp_physical_padding_rows,
         real_full_mtp_startup_forced_draft_tokens, real_full_native_mtp_sequence_enabled,
         real_full_nvfp4_short_k_graph_audit, real_full_nvfp4_short_k_prefill_capture_plan,
-        real_full_nvfp4_short_k_prefill_decode_budget, real_full_paired_lm_head_prewarm_range,
-        real_full_prefill_chunk_tokens_for_direct_dsa, real_full_request_mtp_rows_for_policy,
+        real_full_nvfp4_short_k_prefill_decode_budget, real_full_paired_lm_head_buffer_bank,
+        real_full_paired_lm_head_prewarm_range, real_full_prefill_chunk_tokens_for_direct_dsa,
+        real_full_request_mtp_rows_for_policy,
         real_full_request_prefill_chunk_tokens_for_shape_with, real_full_request_token_rows,
-        real_full_sequence_capacity_tokens, real_full_sparse_tcp_targets_from_args,
-        request_prompt_token_ids, retain_graph_bound_scheduler_arena, DsparkConfidenceCalibrator,
-        DsparkConfidenceResidual, DsparkRequestCacheSnapshot, RealFullContextTokenBudget,
-        RealFullContextTokenExtent, RealFullDsparkConfidencePolicy, RealFullDsparkTailCache,
-        RealFullDsparkTailEntry, RealFullDsparkTailKey, TargetKvRadixManager,
-        REAL_FULL_MAX_ACTIVE_REQUESTS, REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS,
-        REAL_FULL_SHARED_KV_PAGE_TOKENS,
+        real_full_scalar_dspark_prewarm_requested_draft_tokens, real_full_sequence_capacity_tokens,
+        real_full_sparse_tcp_targets_from_args, real_full_startup_target_radix_evict_tokens,
+        real_full_startup_target_radix_publish_tokens,
+        real_full_startup_workspace_is_final_capture_set,
+        real_full_startup_workspace_sizing_sequence, request_prompt_token_ids,
+        retain_graph_bound_scheduler_arena, DsparkConfidenceCalibrator, DsparkConfidenceResidual,
+        DsparkRequestCacheSnapshot, RealFullContextTokenBudget, RealFullContextTokenExtent,
+        RealFullDsparkConfidencePolicy, RealFullDsparkTailCache, RealFullDsparkTailEntry,
+        RealFullDsparkTailKey, TargetKvRadixManager, REAL_FULL_MAX_ACTIVE_REQUESTS,
+        REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS, REAL_FULL_SHARED_KV_PAGE_TOKENS,
     };
     use crate::cli::CoordinatorArgs;
     use crate::commands::real_full::coordinator_kernels::{
@@ -8478,6 +8943,36 @@ mod tests {
     }
 
     #[test]
+    fn startup_target_radix_control_sequences_are_strictly_parsed() {
+        let publish = "real-full-startup-capture-arena-radix-publish-8192-sequence-3";
+        assert_eq!(
+            real_full_startup_target_radix_publish_tokens(publish),
+            Some(8192)
+        );
+        assert!(real_full_startup_workspace_sizing_sequence(publish));
+        assert!(real_full_capture_arena_sequence(publish));
+
+        assert_eq!(
+            real_full_startup_target_radix_evict_tokens(
+                "real-full-startup-evict-target-radix-prefix-8192-worker-3"
+            ),
+            Some(8192)
+        );
+        assert_eq!(
+            real_full_startup_target_radix_publish_tokens(
+                "real-full-startup-capture-arena-radix-publish-0-sequence-3"
+            ),
+            None
+        );
+        assert_eq!(
+            real_full_startup_target_radix_evict_tokens(
+                "real-full-startup-evict-target-radix-prefix-nope-worker-3"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn paired_lm_head_prewarm_starts_after_the_single_request_widths() {
         assert_eq!(real_full_paired_lm_head_prewarm_range(Some(0)), None);
         assert_eq!(
@@ -8489,6 +8984,13 @@ mod tests {
             Some((9, 16))
         );
         assert_eq!(real_full_paired_lm_head_prewarm_range(None), Some((17, 32)));
+    }
+
+    #[test]
+    fn paired_lm_head_uses_disjoint_owned_buffer_banks() {
+        assert_eq!(real_full_paired_lm_head_buffer_bank(1), 17);
+        assert_eq!(real_full_paired_lm_head_buffer_bank(8), 24);
+        assert!((1..=8).all(|bank| real_full_paired_lm_head_buffer_bank(bank) > 8));
     }
 
     #[test]
@@ -8521,6 +9023,30 @@ mod tests {
         assert!(!real_full_batched_dspark_prewarm_sequence(
             "real-full-startup-dspark-width-0-batched-bank-4-sequence"
         ));
+    }
+
+    #[test]
+    fn scalar_dspark_width_cohort_decodes_each_request_width() {
+        let sequence_id = "real-full-startup-dspark-width-7-scalar-cohort-2049-sequence-0";
+        assert_eq!(
+            real_full_scalar_dspark_prewarm_requested_draft_tokens(sequence_id, 91_700),
+            Some(7)
+        );
+        assert_eq!(
+            real_full_scalar_dspark_prewarm_requested_draft_tokens(sequence_id, 91_001),
+            Some(0)
+        );
+        assert_eq!(
+            real_full_scalar_dspark_prewarm_requested_draft_tokens(sequence_id, 90_999),
+            None
+        );
+        assert_eq!(
+            real_full_scalar_dspark_prewarm_requested_draft_tokens(
+                "real-full-startup-dspark-width-7-2049-sequence-0",
+                91_700,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -8938,6 +9464,29 @@ mod tests {
             real_full_request_mtp_rows_for_policy(&first_decode_loop_step, false, false),
             0
         );
+    }
+
+    #[test]
+    fn ordinary_dspark_workspace_is_the_final_startup_capture_set() {
+        assert!(real_full_startup_workspace_is_final_capture_set(
+            false, false, false
+        ));
+    }
+
+    #[test]
+    fn optional_startup_probes_require_the_conservative_final_capture_sweep() {
+        for (prefix_prefill_probe, native_mtp, native_mtp_probe) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, true, true),
+        ] {
+            assert!(!real_full_startup_workspace_is_final_capture_set(
+                prefix_prefill_probe,
+                native_mtp,
+                native_mtp_probe,
+            ));
+        }
     }
 
     #[test]

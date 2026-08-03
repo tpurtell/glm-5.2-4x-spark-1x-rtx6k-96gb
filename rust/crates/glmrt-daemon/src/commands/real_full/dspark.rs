@@ -16,8 +16,9 @@ use glmrt_loader::{
 use serde::{Deserialize, Serialize};
 
 use super::coordinator_kernels::{
-    preload_resident_weight_from_host_staging, preloaded_resident_weight_device_buffer,
-    preloaded_resident_weight_device_buffer_view, DeviceBf16Output,
+    preload_resident_weight_from_host_staging, preload_resident_weight_from_host_staging_profiled,
+    preloaded_resident_weight_device_buffer, preloaded_resident_weight_device_buffer_view,
+    DeviceBf16Output,
 };
 use super::dspark_attention::{
     benchmark_dspark_paged_attention_graph, DsparkPagedAttentionBenchConfig,
@@ -1039,6 +1040,10 @@ fn preload_dspark_draft_owned_weights(
         .map(|binding| (binding.source_name.as_str(), binding))
         .collect::<BTreeMap<_, _>>();
     let groups = dspark_draft_resident_groups(checkpoint)?;
+    let mut device_allocation_ms = 0.0_f64;
+    let mut staging_allocation_ms = 0.0_f64;
+    let mut staging_fill_ms = 0.0_f64;
+    let mut h2d_ms = 0.0_f64;
     stats.selected_source_tensors = groups.iter().map(|group| group.source_names.len()).sum();
     stats.selected_resident_buffers = groups.len();
     stats.selected_bytes = groups.iter().map(|group| group.byte_length).sum();
@@ -1050,7 +1055,7 @@ fn preload_dspark_draft_owned_weights(
             )
         })?;
         let mut loaded = Vec::<LoadedTensorSummary>::new();
-        preload_resident_weight_from_host_staging(
+        let timing = preload_resident_weight_from_host_staging_profiled(
             &group.resident_name,
             expected_bytes,
             "startup resident dSpark draft weight pinned staging",
@@ -1088,6 +1093,10 @@ fn preload_dspark_draft_owned_weights(
             },
         )
         .with_context(|| format!("preloading dSpark resident {}", group.resident_name))?;
+        device_allocation_ms += timing.device_allocation_ms;
+        staging_allocation_ms += timing.staging_allocation_ms;
+        staging_fill_ms += timing.staging_fill_ms;
+        h2d_ms += timing.h2d_ms;
         preloaded_resident_weight_device_buffer(&group.resident_name, expected_bytes)
             .with_context(|| format!("verifying dSpark resident {}", group.resident_name))?;
         if !loaded.is_empty() {
@@ -1113,6 +1122,17 @@ fn preload_dspark_draft_owned_weights(
         stats.selected_bytes
     );
     stats.total_elapsed_micros = started.elapsed().as_micros();
+    let total_ms = stats.total_elapsed_micros as f64 / 1_000.0;
+    let source_read_ms = stats.source_read_micros as f64 / 1_000.0;
+    let unattributed_ms =
+        (total_ms - device_allocation_ms - staging_allocation_ms - staging_fill_ms - h2d_ms)
+            .max(0.0);
+    eprintln!(
+        "real_full_dspark_draft_preload_detail groups={} sources={} bytes={} total_ms={total_ms:.3} source_read_ms={source_read_ms:.3} device_allocation_ms={device_allocation_ms:.3} staging_allocation_ms={staging_allocation_ms:.3} staging_fill_ms={staging_fill_ms:.3} h2d_ms={h2d_ms:.3} unattributed_ms={unattributed_ms:.3}",
+        stats.selected_resident_buffers,
+        stats.selected_source_tensors,
+        stats.loaded_bytes,
+    );
     Ok(stats)
 }
 
@@ -2109,9 +2129,11 @@ impl DsparkRequestEngine {
         kv_capacity_tokens: usize,
         max_active_requests: usize,
     ) -> Result<Self> {
+        let load_started = Instant::now();
         let fixture = production_dspark_fixture_for_snapshot(snapshot)?;
         activate_dspark_contract(fixture)?;
         let checkpoint = DsparkCheckpoint::from_snapshot(fixture, snapshot)?;
+        let checkpoint_ms = load_started.elapsed().as_secs_f64() * 1_000.0;
         let query_rows = checkpoint.validated.query_layout.query_rows();
         anyhow::ensure!(
             kv_capacity_tokens >= query_rows + 1,
@@ -2133,9 +2155,13 @@ impl DsparkRequestEngine {
             "dSpark request cache window is empty after {page_size}-token page alignment"
         );
         checkpoint.weights.validate_target_aliases(target_catalog)?;
+        let draft_preload_started = Instant::now();
         let preload = preload_dspark_draft_owned_weights(&checkpoint)?;
+        let draft_preload_ms = draft_preload_started.elapsed().as_secs_f64() * 1_000.0;
+        let alias_preload_started = Instant::now();
         let query_alias = preload_dspark_query_embedding_alias(&checkpoint)?;
         let head_alias = preload_dspark_head_lm_alias(&checkpoint)?;
+        let alias_preload_ms = alias_preload_started.elapsed().as_secs_f64() * 1_000.0;
         eprintln!(
             "real_full_dspark_preload revision={} draft_buffers={} draft_bytes={} loaded_bytes={} query_alias_loaded={} head_alias_loaded={}",
             fixture.revision,
@@ -2151,6 +2177,10 @@ impl DsparkRequestEngine {
             body: preloaded_dspark_body_weights(&checkpoint)?,
             head: preloaded_dspark_head_weights(&checkpoint)?,
         };
+        let resident_binding_ms = load_started.elapsed().as_secs_f64() * 1_000.0
+            - checkpoint_ms
+            - draft_preload_ms
+            - alias_preload_ms;
         let pages_per_request = kv_capacity_tokens.div_ceil(page_size);
         let physical_kv_pages = pages_per_request
             .checked_mul(max_active_requests)
@@ -2175,6 +2205,7 @@ impl DsparkRequestEngine {
             kv_bytes_per_token,
             physical_kv_bytes,
         );
+        let executor_create_started = Instant::now();
         let mut executor = DsparkStaticExecutor::capture_with_physical_pages(
             weights,
             DsparkStaticBenchConfig {
@@ -2198,9 +2229,16 @@ impl DsparkRequestEngine {
             Some(physical_kv_pages),
         )
         .context("capturing the live C=1 dSpark request executor")?;
+        let executor_create_ms = executor_create_started.elapsed().as_secs_f64() * 1_000.0;
+        let batched_capture_started = Instant::now();
         executor
             .capture_batched_update_graphs(weights.update, &[2, 4, 8, 16, 32, 64, 128, 256, 512])
             .context("capturing batched dSpark prompt/decode update graphs")?;
+        let batched_capture_ms = batched_capture_started.elapsed().as_secs_f64() * 1_000.0;
+        let total_ms = load_started.elapsed().as_secs_f64() * 1_000.0;
+        eprintln!(
+            "real_full_dspark_engine_load_detail checkpoint_ms={checkpoint_ms:.3} draft_preload_ms={draft_preload_ms:.3} alias_preload_ms={alias_preload_ms:.3} resident_binding_ms={resident_binding_ms:.3} executor_create_ms={executor_create_ms:.3} batched_capture_ms={batched_capture_ms:.3} total_ms={total_ms:.3}"
+        );
         Ok(Self {
             executor,
             max_verify_drafts: fixture.max_verify_drafts,

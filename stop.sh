@@ -8,10 +8,10 @@ usage() {
   cat <<'EOF'
 Usage: ./stop.sh [--profile FILE]
 
-Gracefully stops and removes the coordinator plus GLMRT expert containers on
-the four Sparks selected by glmrt.config. Current release and exact legacy
-GLMRT expert names are covered; images, model caches, build artifacts, and
-unrelated containers are left untouched.
+Gracefully stops release and WIP GLMRT processes on the coordinator and four
+Sparks selected by glmrt.config. Release containers are removed; persistent
+WIP development containers are stopped but retained. WIP slots, build caches,
+images, model caches, and unrelated containers are left untouched.
 
 Despite the option name, --profile FILE selects an entire alternate
 configuration file.
@@ -45,8 +45,13 @@ docker info >/dev/null 2>&1 ||
   release_die "local Docker daemon is unavailable"
 
 echo "== stopping GLMRT release services =="
+wip_failed=0
+release_stop_wip_services || wip_failed=1
+release_stop_wip_containers || wip_failed=1
+((wip_failed == 0)) ||
+  release_die "one or more WIP GLMRT processes or containers could not be stopped"
 release_stop_services \
   "$RELEASE_COORDINATOR_CONTAINER_NAME" \
   "$RELEASE_SPARK_CONTAINER_PREFIX" ||
   release_die "one or more remote GLMRT services could not be stopped"
-echo "GLMRT release services are stopped."
+echo "GLMRT release and WIP services are stopped."

@@ -7,6 +7,7 @@ use std::env;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 pub(crate) const GLMRT_B12X_ENV: &str = "GLMRT_B12X";
 pub(crate) const GLMRT_B12X_SPARK_ENV: &str = "GLMRT_B12X_SPARK_PYTHON_CAPTURE";
@@ -116,12 +117,31 @@ fn initialize_python_capture(
     modules: &[&str],
     label: &str,
 ) -> Result<Option<PythonCaptureStatus>> {
+    let startup_started = Instant::now();
+    let prepare_started = Instant::now();
     pyo3::prepare_freethreaded_python();
+    eprintln!(
+        "python_capture_startup_phase component={label:?} stage=python-runtime elapsed_ms={:.3} total_ms={:.3}",
+        prepare_started.elapsed().as_secs_f64() * 1_000.0,
+        startup_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     Python::with_gil(|py| -> PyResult<Vec<String>> {
+        let path_started = Instant::now();
         add_glmrt_python_reference_path(py)?;
+        eprintln!(
+            "python_capture_startup_phase component={label:?} stage=python-path elapsed_ms={:.3} total_ms={:.3}",
+            path_started.elapsed().as_secs_f64() * 1_000.0,
+            startup_started.elapsed().as_secs_f64() * 1_000.0,
+        );
         let mut imported_modules = Vec::with_capacity(modules.len());
         for module in modules {
+            let import_started = Instant::now();
             PyModule::import_bound(py, *module)?;
+            eprintln!(
+                "python_capture_startup_phase component={label:?} stage=module-import module={module} elapsed_ms={:.3} total_ms={:.3}",
+                import_started.elapsed().as_secs_f64() * 1_000.0,
+                startup_started.elapsed().as_secs_f64() * 1_000.0,
+            );
             imported_modules.push((*module).to_owned());
         }
         Ok(imported_modules)
@@ -134,6 +154,14 @@ fn initialize_python_capture(
     })
     .map_err(|err| anyhow::anyhow!(format_python_error(err)))
     .with_context(|| format!("importing {label} Python kernel modules"))
+    .map(|status| {
+        eprintln!(
+            "python_capture_startup_phase component={label:?} stage=complete elapsed_ms={:.3} total_ms={:.3}",
+            startup_started.elapsed().as_secs_f64() * 1_000.0,
+            startup_started.elapsed().as_secs_f64() * 1_000.0,
+        );
+        status
+    })
 }
 
 pub(crate) fn coordinator_python_capture_enabled() -> bool {

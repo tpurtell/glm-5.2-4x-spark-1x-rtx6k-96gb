@@ -1788,7 +1788,7 @@ fn real_full_launch_fused_mtp_target_attention(
 
     let hidden_fuse_start = stage_timing.then(Instant::now);
     numeric_progression
-        .fuse_device_hidden_sources(&[decode, mtp])
+        .fuse_device_hidden_sources(&[decode, mtp], decode_wave.layer_id.0 as usize)
         .context("fusing resident decode/MTP hidden rows for attention")?;
 
     let fused_hidden = numeric_progression

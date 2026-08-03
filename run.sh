@@ -7,14 +7,23 @@ source "$repo_root/scripts/release-common.sh"
 usage() {
   cat <<'EOF'
 Usage: ./run.sh [--profile FILE] [--restart] [--dry-run]
+       ./run.sh --wip [--wip-slot NAME] [--profile FILE] [--restart] [--dry-run]
 
 Uses glmrt.config beside this script by default. Despite the option name,
 --profile FILE selects an entire alternate configuration file.
 
---restart  gracefully exits the current API and recreates all five containers
+--restart  gracefully restarts the selected serving stack; WIP launches retain
+           exact fingerprint-matched resident experts when safe
 --dry-run  performs configuration/image/model/resource checks without mutation
+--wip      runs a named slot inside persistent development containers
 EOF
 }
+
+for run_arg in "$@"; do
+  if [[ "$run_arg" == --wip ]]; then
+    exec "$repo_root/scripts/run-wip.sh" "$@"
+  fi
+done
 
 config="$repo_root/glmrt.config"
 restart=0
@@ -59,6 +68,11 @@ if ((restart && dry_run)); then
 fi
 
 docker info >/dev/null 2>&1 || release_die "local Docker daemon is unavailable"
+if ((restart)); then
+  # Switching back from the persistent WIP lane stops only its GLMRT
+  # processes. The development containers, build caches, and slots survive.
+  release_stop_wip_services || release_die "failed to stop one or more WIP services"
+fi
 docker image inspect "$COORDINATOR_DOCKER_INFERENCE" >/dev/null 2>&1 ||
   release_die "coordinator image is missing: $COORDINATOR_DOCKER_INFERENCE (run ./build.sh)"
 sparkinfer_commit="$(
@@ -115,12 +129,16 @@ for host in "$SPARK_0_HOST" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
   )"
   [[ "$remote_engine_commit" == "$coordinator_engine_commit" ]] ||
     release_die "$host Spark image uses GLMRT engine $remote_engine_commit; coordinator uses $coordinator_engine_commit (run ./build.sh)"
-  if ssh -o BatchMode=yes "$host" "docker ps --format '{{.Names}}' | grep -Fx '$release_container'" >/dev/null; then
+  if ssh -o BatchMode=yes "$host" "docker container inspect '$release_container' >/dev/null 2>&1"; then
     image_state="$(
       ssh -o BatchMode=yes "$host" bash -s -- \
         "$release_container" "$SPARK_EXPERT_DOCKER_INFERENCE" <<'REMOTE'
 container="$1"
 image="$2"
+if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != true ]; then
+  echo stopped
+  exit 0
+fi
 container_image="$(docker inspect -f '{{.Image}}' "$container")"
 selected_image="$(docker image inspect -f '{{.Id}}' "$image")"
 if [ "$container_image" = "$selected_image" ]; then
@@ -130,13 +148,20 @@ else
 fi
 REMOTE
     )"
-    if [[ "$image_state" == current ]]; then
-      echo "  $host: current release expert container already running ($release_container)"
-      ((running_release_sparks += 1))
-    else
-      echo "  $host: release expert container uses a stale image ($release_container)"
-      ((stale_release_sparks += 1))
-    fi
+    case "$image_state" in
+      current)
+        echo "  $host: current release expert container already running ($release_container)"
+        ((running_release_sparks += 1))
+        ;;
+      stopped)
+        echo "  $host: stopped release expert container exists ($release_container)"
+        ((stale_release_sparks += 1))
+        ;;
+      *)
+        echo "  $host: release expert container uses a stale image ($release_container)"
+        ((stale_release_sparks += 1))
+        ;;
+    esac
   else
     echo "  $host: image ready; no current release expert container"
   fi
@@ -149,15 +174,20 @@ done
 release_coordinator_running=0
 stale_release_coordinator=0
 host_api_running=0
-if docker ps --format '{{.Names}}' | grep -Fx "$coordinator_container" >/dev/null; then
-  coordinator_image="$(docker inspect -f '{{.Image}}' "$coordinator_container")"
-  selected_coordinator_image="$(docker image inspect -f '{{.Id}}' "$COORDINATOR_DOCKER_INFERENCE")"
-  if [[ "$coordinator_image" == "$selected_coordinator_image" ]]; then
-    echo "  coordinator: current release API container already running ($coordinator_container)"
-    release_coordinator_running=1
-  else
-    echo "  coordinator: release API container uses a stale image ($coordinator_container)"
+if docker container inspect "$coordinator_container" >/dev/null 2>&1; then
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$coordinator_container")" != true ]]; then
+    echo "  coordinator: stopped release API container exists ($coordinator_container)"
     stale_release_coordinator=1
+  else
+    coordinator_image="$(docker inspect -f '{{.Image}}' "$coordinator_container")"
+    selected_coordinator_image="$(docker image inspect -f '{{.Id}}' "$COORDINATOR_DOCKER_INFERENCE")"
+    if [[ "$coordinator_image" == "$selected_coordinator_image" ]]; then
+      echo "  coordinator: current release API container already running ($coordinator_container)"
+      release_coordinator_running=1
+    else
+      echo "  coordinator: release API container uses a stale image ($coordinator_container)"
+      stale_release_coordinator=1
+    fi
   fi
 fi
 if ss -ltnp "sport = :${ADDR##*:}" 2>/dev/null | grep -q glmrt &&
@@ -185,7 +215,7 @@ profile_args=(
 
 resolve_profile() {
   docker run --rm \
-    --gpus all \
+    --gpus device=0 \
     --net=host \
     -v "$repo_root:$repo_root:ro" \
     -v "$hf_home:$hf_home:ro" \
@@ -311,7 +341,9 @@ check_local_resources() {
   available_kib="$(awk '/MemAvailable:/{print $2}' /proc/meminfo)"
   ((available_kib >= 8 * 1024 * 1024)) ||
     release_die "coordinator has less than 8 GiB available system memory"
-  gpu_line="$(nvidia-smi --query-gpu=memory.total,memory.free --format=csv,noheader,nounits | head -1)"
+  # Query GPU 0 explicitly. On a multi-GPU coordinator, `nvidia-smi | head`
+  # can terminate nvidia-smi with SIGPIPE under pipefail and abort the launch.
+  gpu_line="$(nvidia-smi --id=0 --query-gpu=memory.total,memory.free --format=csv,noheader,nounits)"
   IFS=, read -r total_mib free_mib <<<"$gpu_line"
   total_mib="$(release_trim "$total_mib")"
   free_mib="$(release_trim "$free_mib")"
@@ -337,8 +369,7 @@ if ((available_kib < min_unified_kib)); then
 fi
 gpu_line="$(
   docker run --rm --gpus all "$image" \
-    nvidia-smi --query-gpu=memory.total,memory.free --format=csv,noheader,nounits |
-    head -1
+    nvidia-smi --id=0 --query-gpu=memory.total,memory.free --format=csv,noheader,nounits
 )"
 IFS=, read -r total_mib free_mib <<<"$gpu_line"
 total_mib="${total_mib//[[:space:]]/}"
@@ -405,6 +436,7 @@ spark_start_pid=$!
 
 env_file="$state_dir/coordinator.env"
 jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$env_file"
+coordinator_image_id="$(docker image inspect -f '{{.Id}}' "$COORDINATOR_DOCKER_INFERENCE")"
 {
   echo "ADDR=$ADDR"
   echo "GLMRT_REAL_FULL_SERVE_EXPERT_HOSTS=$expert_hosts_csv"
@@ -421,15 +453,17 @@ jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$en
   echo "GLMRT_NATIVE_LIB=/opt/glmrt/lib/libglmrt_native.so"
   echo "GLMRT_ENGINE_COMMIT=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$COORDINATOR_DOCKER_INFERENCE")"
   echo "GLMRT_RELEASE_CONFIG_SHA256=$deployment_fingerprint"
-  echo "FLASHINFER_WORKSPACE_BASE=/var/cache/glmrt/flashinfer"
+  echo "GLMRT_KERNEL_CACHE_BASE=/var/cache/glmrt/kernels"
+  echo "GLMRT_KERNEL_CACHE_ENVIRONMENT_ID=$coordinator_image_id"
+  echo "GLMRT_RUNTIME_CATALOG_CACHE_DIR=/var/cache/glmrt/catalogs"
 } >>"$env_file"
 
-mkdir -p "$state_dir/flashinfer"
+mkdir -p "$state_dir/kernel-cache" "$state_dir/catalog-cache"
 docker_args=(
   run -d
   --name "$coordinator_container"
   --restart unless-stopped
-  --gpus all
+  --gpus device=0
   --net=host
   --ipc=host
   --ulimit memlock=-1:-1
@@ -439,7 +473,8 @@ docker_args=(
   -v "$repo_root:$repo_root:ro"
   -v "$hf_home:$hf_home:ro"
   -v "$hf_home:/root/.cache/huggingface:ro"
-  -v "$state_dir/flashinfer:/var/cache/glmrt/flashinfer"
+  -v "$state_dir/kernel-cache:/var/cache/glmrt/kernels"
+  -v "$state_dir/catalog-cache:/var/cache/glmrt/catalogs"
   -e HF_HOME="$hf_home"
 )
 if [[ -e /dev/infiniband ]]; then
@@ -477,7 +512,7 @@ until curl -fsS "http://127.0.0.1:${ADDR##*:}/v1/models" >/dev/null 2>&1; do
     docker logs --tail 200 "$coordinator_container" >&2 || true
     release_die "API did not become ready within 900 seconds"
   }
-  sleep 2
+  sleep 0.25
 done
 
 curl -fsS "http://127.0.0.1:${ADDR##*:}/v1/models" >"$state_dir/models.json"

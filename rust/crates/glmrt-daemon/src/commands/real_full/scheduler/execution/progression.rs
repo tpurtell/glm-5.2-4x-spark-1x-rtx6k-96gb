@@ -6962,7 +6962,11 @@ impl RealFullSchedulerNumericProgression {
         }))
     }
 
-    pub(super) fn fuse_device_hidden_sources(&mut self, sources: &[&RowSource]) -> Result<()> {
+    pub(super) fn fuse_device_hidden_sources(
+        &mut self,
+        sources: &[&RowSource],
+        layer_id: usize,
+    ) -> Result<()> {
         anyhow::ensure!(
             sources.len() >= 2,
             "scheduler device hidden fusion requires at least two sources"
@@ -7012,7 +7016,19 @@ impl RealFullSchedulerNumericProgression {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            concat_device_bf16_row_batches(&batches, "scheduler fused decode/MTP hidden rows")?
+            // The owned-buffer pool key also includes the request-local
+            // execution-lane bank. Both members of a C=4 pair retain distinct
+            // allocations here; their routed expert payloads are merged later
+            // into one Spark transport job. Within one lane, parity preserves
+            // the prior layer's input until the next layer has enqueued while
+            // keeping each layer's graph input address deterministic across
+            // recurrent cycles.
+            let label = if layer_id % 2 == 0 {
+                "scheduler fused decode/MTP hidden rows even layer"
+            } else {
+                "scheduler fused decode/MTP hidden rows odd layer"
+            };
+            concat_device_bf16_row_batches(&batches, label)?
         };
         let fused_key = DeviceHiddenSegmentKey {
             byte_start: keys[0].byte_start,

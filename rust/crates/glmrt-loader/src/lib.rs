@@ -5,8 +5,8 @@ mod tensors;
 mod tokenizer;
 
 pub use catalog::{
-    build_catalog, classification_summary_markdown, read_model_facts, read_safetensors_metadata,
-    SafetensorsTensorMetadata,
+    build_catalog, build_catalog_for_snapshot, classification_summary_markdown, read_model_facts,
+    read_safetensors_metadata, SafetensorsTensorMetadata,
 };
 pub use placement::{assignments_by_owner, build_load_plan};
 pub use snapshot::{

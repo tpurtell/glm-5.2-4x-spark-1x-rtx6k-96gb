@@ -47,6 +47,10 @@ pub fn build_catalog(model_id: &str, hf_home: Option<&Path>) -> Result<TensorCat
         .snapshot_path
         .as_ref()
         .with_context(|| format!("no local snapshot found for {model_id}"))?;
+    build_catalog_for_snapshot(model_id, snapshot_path)
+}
+
+pub fn build_catalog_for_snapshot(model_id: &str, snapshot_path: &Path) -> Result<TensorCatalog> {
     let facts = read_model_facts(model_id, snapshot_path)?;
     let index_path = snapshot_path.join("model.safetensors.index.json");
     let index: SafetensorsIndex = serde_json::from_reader(

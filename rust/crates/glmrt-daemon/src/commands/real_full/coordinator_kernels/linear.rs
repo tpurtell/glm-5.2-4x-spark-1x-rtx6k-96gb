@@ -1154,6 +1154,31 @@ pub(in crate::commands::real_full) fn capture_or_update_layer_linear_bf16_graph(
     output_dim: usize,
     label: &'static str,
 ) -> Result<()> {
+    // Prefill shares one graph slot across many layer-specific weights. The
+    // cuBLAS graph identity includes the weight pointer, while M>16 deliberately
+    // retains only one identity, so the old path recaptured and updated the
+    // graph on nearly every layer at runtime. Execute the same asynchronous
+    // cuBLAS operation directly for prefill: the caller keeps the same slot
+    // stream, scratch buffers, event ordering, and synchronization boundary.
+    // M<=16 remains graph-backed because those bounded decode/2x2 identities
+    // are retained and fully prewarmed.
+    if !layer_linear_bf16_graph_replay_enabled(signature) {
+        unsafe {
+            library
+                .cuda_linear_bf16_cublas_async(
+                    input_buffer,
+                    weight_buffer,
+                    bias_buffer,
+                    output_buffer,
+                    rows,
+                    input_dim,
+                    output_dim,
+                    slot.stream_ptr(),
+                )
+                .with_context(|| format!("executing async CUDA cuBLAS {label}"))?;
+        }
+        return Ok(());
+    }
     let capture_rows = linear_bf16_cublas_graph_rows(
         signature,
         input_buffer,
@@ -1219,6 +1244,10 @@ pub(in crate::commands::real_full) fn capture_or_update_layer_linear_bf16_graph(
         signature,
         capture_identity,
     )
+}
+
+fn layer_linear_bf16_graph_replay_enabled(signature: CoordinatorCudaGraphSignature) -> bool {
+    signature.rows <= 16
 }
 
 fn linear_bf16_cublas_graph_rows(
@@ -4288,4 +4317,22 @@ pub(in crate::commands::real_full) fn is_glm52_dense_mlp_linear_weight_subpath(
     ]
     .iter()
     .any(|prefix| subpath.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod prefill_graph_policy_tests {
+    use super::{layer_linear_bf16_graph_replay_enabled, CoordinatorCudaGraphSignature};
+
+    #[test]
+    fn layer_linear_graph_replay_stops_above_retained_decode_width() {
+        assert!(layer_linear_bf16_graph_replay_enabled(
+            CoordinatorCudaGraphSignature::linear_bf16(16, 6_144, 2_048, false)
+        ));
+        assert!(!layer_linear_bf16_graph_replay_enabled(
+            CoordinatorCudaGraphSignature::linear_bf16(17, 6_144, 2_048, false)
+        ));
+        assert!(!layer_linear_bf16_graph_replay_enabled(
+            CoordinatorCudaGraphSignature::linear_bf16(2_048, 6_144, 2_048, false)
+        ));
+    }
 }

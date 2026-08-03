@@ -657,6 +657,22 @@ pub(in crate::commands::real_full) fn capture_or_update_input_embedding_lookup_b
     hidden_dim: usize,
     label: &'static str,
 ) -> Result<()> {
+    if !input_embedding_lookup_graph_replay_enabled(rows) {
+        unsafe {
+            library
+                .cuda_embedding_lookup_bf16_async(
+                    embedding_buffer,
+                    token_buffer,
+                    output_buffer,
+                    rows,
+                    vocab_size,
+                    hidden_dim,
+                    slot.stream_ptr(),
+                )
+                .with_context(|| format!("executing async CUDA {label}"))?;
+        }
+        return Ok(());
+    }
     if !slot.has_captured_graph(
         CoordinatorCudaGraphProgram::InputEmbeddingLookupBf16,
         signature,
@@ -712,6 +728,10 @@ pub(in crate::commands::real_full) fn capture_or_update_input_embedding_lookup_b
         CoordinatorCudaGraphProgram::InputEmbeddingLookupBf16,
         signature,
     )
+}
+
+fn input_embedding_lookup_graph_replay_enabled(rows: usize) -> bool {
+    rows <= 16
 }
 
 pub(in crate::commands::real_full) fn cuda_embedding_lookup_bf16_preloaded_resident_weight_device_output_graph_slot(
@@ -880,4 +900,16 @@ pub(in crate::commands::real_full) fn cuda_embedding_lookup_bf16_preloaded_resid
         values_per_row: hidden_dim,
         backend: CUDA_REFERENCE_EMBEDDING_LOOKUP_BF16_PRELOADED_RESIDENT_WEIGHT_BACKEND,
     })
+}
+
+#[cfg(test)]
+mod prefill_graph_policy_tests {
+    use super::input_embedding_lookup_graph_replay_enabled;
+
+    #[test]
+    fn embedding_graph_replay_stops_above_retained_decode_width() {
+        assert!(input_embedding_lookup_graph_replay_enabled(16));
+        assert!(!input_embedding_lookup_graph_replay_enabled(17));
+        assert!(!input_embedding_lookup_graph_replay_enabled(2_048));
+    }
 }

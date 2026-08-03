@@ -283,6 +283,31 @@ impl TargetKvRadixManager {
             evicted_pages: inner.evicted_pages,
         }
     }
+
+    /// Removes one exact, inactive leaf without disturbing any shorter cached
+    /// prefix. Startup uses this to discard a synthetic long-context seed once
+    /// its graph-capture consumers have finished.
+    pub(super) fn evict_exact_inactive_leaf(&self, token_ids: &[usize]) -> Result<usize> {
+        anyhow::ensure!(
+            !token_ids.is_empty(),
+            "cannot evict the target KV radix root"
+        );
+        let token_ids = token_ids_u32(token_ids)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|error| anyhow::anyhow!("locking target KV radix manager failed: {error}"))?;
+        let matched = match_prefix(&mut inner, &token_ids)?;
+        anyhow::ensure!(
+            matched.tokens == token_ids.len(),
+            "target KV radix exact-prefix eviction matched {} of {} tokens",
+            matched.tokens,
+            token_ids.len()
+        );
+        let evicted_pages = evict_leaf(&mut inner, matched.terminal)?;
+        debug_validate(&inner, self.total_pages);
+        Ok(evicted_pages)
+    }
 }
 
 struct PrefixMatch {
@@ -795,6 +820,24 @@ fn evict_one_leaf(inner: &mut TargetKvRadixInner) -> Result<()> {
         .min_by_key(|(node_id, node)| (node.last_access, *node_id))
         .map(|(node_id, _)| node_id)
         .context("no inactive target KV radix leaf is evictable")?;
+    evict_leaf(inner, candidate).map(|_| ())
+}
+
+fn evict_leaf(inner: &mut TargetKvRadixInner, candidate: NodeId) -> Result<usize> {
+    let candidate_node = inner.nodes.get(candidate).and_then(Option::as_ref);
+    let candidate_node = candidate_node.context("target KV radix eviction node is absent")?;
+    anyhow::ensure!(
+        candidate != ROOT_NODE_ID,
+        "cannot evict the target KV radix root"
+    );
+    anyhow::ensure!(
+        candidate_node.lock_ref == 0,
+        "target KV radix eviction leaf is active"
+    );
+    anyhow::ensure!(
+        candidate_node.children.is_empty(),
+        "target KV radix eviction prefix is not a leaf"
+    );
     let node = inner.nodes[candidate]
         .take()
         .expect("selected target KV radix leaf is live");
@@ -816,7 +859,7 @@ fn evict_one_leaf(inner: &mut TargetKvRadixInner) -> Result<()> {
         .evicted_pages
         .saturating_add(node.page_delta.pages.len() as u64);
     inner.free_node_ids.push(candidate);
-    Ok(())
+    Ok(node.page_delta.pages.len())
 }
 
 fn insert_node(inner: &mut TargetKvRadixInner, node: RadixNode) -> NodeId {
@@ -969,6 +1012,41 @@ mod tests {
         let stats = manager.stats();
         assert_eq!(stats.cached_pages, 2);
         assert_eq!(stats.free_pages, 4);
+    }
+
+    #[test]
+    fn exact_leaf_eviction_preserves_its_cached_ancestor() {
+        let manager = Arc::new(TargetKvRadixManager::new(4 * 64, 16).unwrap());
+        let long = tokens(2 * TARGET_KV_PAGE_TOKENS, 1);
+        cache(&manager, &long);
+
+        let short = &long[..TARGET_KV_PAGE_TOKENS];
+        let short_hit = manager.reserve(short, short.len()).unwrap();
+        assert_eq!(short_hit.matched_prefix_tokens(), short.len());
+        drop(short_hit);
+
+        assert_eq!(manager.evict_exact_inactive_leaf(&long).unwrap(), 1);
+        let stats = manager.stats();
+        assert_eq!(stats.cached_pages, 1);
+        assert_eq!(stats.evicted_nodes, 1);
+        assert_eq!(stats.evicted_pages, 1);
+
+        let short_hit = manager.reserve(short, short.len()).unwrap();
+        assert_eq!(short_hit.matched_prefix_tokens(), short.len());
+        drop(short_hit);
+        let long_miss = manager.reserve(&long, long.len()).unwrap();
+        assert_eq!(long_miss.matched_prefix_tokens(), short.len());
+    }
+
+    #[test]
+    fn exact_leaf_eviction_rejects_an_active_prefix() {
+        let manager = Arc::new(TargetKvRadixManager::new(2 * 64, 16).unwrap());
+        let prompt = tokens(TARGET_KV_PAGE_TOKENS, 1);
+        cache(&manager, &prompt);
+        let active = manager.reserve(&prompt, prompt.len()).unwrap();
+        assert!(manager.evict_exact_inactive_leaf(&prompt).is_err());
+        drop(active);
+        assert_eq!(manager.evict_exact_inactive_leaf(&prompt).unwrap(), 1);
     }
 
     #[test]

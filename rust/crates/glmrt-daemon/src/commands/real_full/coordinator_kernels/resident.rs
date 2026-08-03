@@ -993,18 +993,63 @@ pub(in crate::commands::real_full) fn preload_resident_weight_from_host_staging(
     label: &'static str,
     fill_staging: impl FnOnce(&mut [u8]) -> Result<()>,
 ) -> Result<()> {
+    preload_resident_weight_from_host_staging_profiled(
+        weight_name,
+        weight_bytes,
+        label,
+        fill_staging,
+    )
+    .map(|_| ())
+}
+
+pub(in crate::commands::real_full) fn preload_resident_weight_from_host_staging_profiled(
+    weight_name: &str,
+    weight_bytes: usize,
+    label: &'static str,
+    fill_staging: impl FnOnce(&mut [u8]) -> Result<()>,
+) -> Result<ResidentWeightPreloadTimings> {
     validate_resident_weight_name(weight_name)?;
+    let library_started = std::time::Instant::now();
     let library = cuda_native_library()?;
+    let library_ms = library_started.elapsed().as_secs_f64() * 1_000.0;
+    let lock_started = std::time::Instant::now();
     let mut resident_weights = lock_coordinator_cuda_resident_weights()?;
-    resident_weights
-        .resident_weight_buffer_from_host_staging(
-            library,
-            weight_name,
-            weight_bytes,
-            label,
-            fill_staging,
-        )
-        .map(|_| ())
+    let lock_ms = lock_started.elapsed().as_secs_f64() * 1_000.0;
+    let (_, mut timings) = resident_weights.resident_weight_buffer_from_host_staging_profiled(
+        library,
+        weight_name,
+        weight_bytes,
+        label,
+        fill_staging,
+    )?;
+    timings.library_ms = library_ms;
+    timings.lock_ms = lock_ms;
+    Ok(timings)
+}
+
+pub(in crate::commands::real_full) fn preload_resident_weight_from_pinned_host_profiled(
+    weight_name: &str,
+    weight_bytes: usize,
+    label: &'static str,
+    source: GlmrtHostBuffer,
+) -> Result<ResidentWeightPreloadTimings> {
+    validate_resident_weight_name(weight_name)?;
+    let library_started = std::time::Instant::now();
+    let library = cuda_native_library()?;
+    let library_ms = library_started.elapsed().as_secs_f64() * 1_000.0;
+    let lock_started = std::time::Instant::now();
+    let mut resident_weights = lock_coordinator_cuda_resident_weights()?;
+    let lock_ms = lock_started.elapsed().as_secs_f64() * 1_000.0;
+    let (_, mut timings) = resident_weights.resident_weight_buffer_from_pinned_host_profiled(
+        library,
+        weight_name,
+        weight_bytes,
+        label,
+        source,
+    )?;
+    timings.library_ms = library_ms;
+    timings.lock_ms = lock_ms;
+    Ok(timings)
 }
 
 #[cfg(test)]

@@ -11416,8 +11416,21 @@ fn preload_routed_quant_projection_cuda_cache_cooperative_tp4(
         "cooperative preload loaded {} projections, expected {expected}",
         preload.projection_groups
     );
+    let cleanup_started = Instant::now();
+    let read_pool_started = Instant::now();
     clear_route_cuda_aligned_read_pool();
+    eprintln!(
+        "real_nvfp4_cooperative_preload_cleanup stage=aligned-read-pool elapsed_ms={:.3} total_ms={:.3}",
+        read_pool_started.elapsed().as_secs_f64() * 1_000.0,
+        cleanup_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    let communicator_started = Instant::now();
     drop(cuda_cache.weight_preload_communicator.take());
+    eprintln!(
+        "real_nvfp4_cooperative_preload_cleanup stage=communicator-drop elapsed_ms={:.3} total_ms={:.3}",
+        communicator_started.elapsed().as_secs_f64() * 1_000.0,
+        cleanup_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     Ok(preload)
 }
 

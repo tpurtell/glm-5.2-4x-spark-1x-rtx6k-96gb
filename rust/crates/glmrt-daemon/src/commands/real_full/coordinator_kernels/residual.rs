@@ -1270,6 +1270,20 @@ pub(in crate::commands::real_full) fn capture_or_update_sparse_b_residual_add_bf
     count: usize,
     label: &'static str,
 ) -> Result<()> {
+    if !sparse_b_residual_add_graph_replay_enabled(signature) {
+        unsafe {
+            library
+                .cuda_residual_add_bf16_async(
+                    residual_buffer,
+                    delta_buffer,
+                    output_buffer,
+                    count,
+                    slot.stream_ptr(),
+                )
+                .with_context(|| format!("executing async CUDA {label}"))?;
+        }
+        return Ok(());
+    }
     if !slot.has_captured_graph(
         CoordinatorCudaGraphProgram::SparseBResidualAddBf16,
         signature,
@@ -1321,6 +1335,10 @@ pub(in crate::commands::real_full) fn capture_or_update_sparse_b_residual_add_bf
         CoordinatorCudaGraphProgram::SparseBResidualAddBf16,
         signature,
     )
+}
+
+fn sparse_b_residual_add_graph_replay_enabled(signature: CoordinatorCudaGraphSignature) -> bool {
+    signature.rows <= 16
 }
 
 pub(in crate::commands::real_full) fn cuda_residual_add_prefix_bf16_bytes_into_legacy(
@@ -3378,4 +3396,22 @@ fn launch_sparse_b_scatter_shared_residual_add_bf16_eager(
             .context("executing eager fused Sparse-B shared+routed hidden residual add")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod prefill_graph_policy_tests {
+    use super::{sparse_b_residual_add_graph_replay_enabled, CoordinatorCudaGraphSignature};
+
+    #[test]
+    fn sparse_b_residual_graph_replay_stops_above_retained_decode_width() {
+        assert!(sparse_b_residual_add_graph_replay_enabled(
+            CoordinatorCudaGraphSignature::residual_add_bf16(16 * 6_144 * 2)
+        ));
+        assert!(!sparse_b_residual_add_graph_replay_enabled(
+            CoordinatorCudaGraphSignature::residual_add_bf16(17 * 6_144 * 2)
+        ));
+        assert!(!sparse_b_residual_add_graph_replay_enabled(
+            CoordinatorCudaGraphSignature::residual_add_bf16(2_048 * 6_144 * 2)
+        ));
+    }
 }
