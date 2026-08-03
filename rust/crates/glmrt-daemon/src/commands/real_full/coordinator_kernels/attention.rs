@@ -1,5 +1,4 @@
 use super::*;
-use crate::commands::real_full::dspark::dspark_active_max_verify_drafts;
 use crate::python_graph_capture::{
     attention_python_capture_enabled, coordinator_python_capture_enabled,
     coordinator_python_capture_startup_open, launch_python_graph_capture,
@@ -142,11 +141,8 @@ const fn sparkinfer_glm_h64_packed_decode_candidate(query_rows: usize) -> bool {
     query_rows >= 2 && query_rows <= FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS
 }
 
-fn flashinfer_packed_fp8_mla_capture_max_query_rows(max_verify_drafts: usize) -> usize {
-    max_verify_drafts
-        .saturating_add(1)
-        .min(FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS)
-        .max(1)
+fn flashinfer_packed_fp8_mla_startup_capture_query_rows() -> std::ops::RangeInclusive<usize> {
+    2..=FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS
 }
 
 fn use_sparkinfer_glm_h64_packed_decode_query_projection(
@@ -4653,11 +4649,11 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
             }
 
             // The guaranteed recurrent startup request visits every layer with
-            // one query row. Use that pass to capture every exact batched
-            // suffix width that the active dSpark checkpoint can produce,
-            // before the Python capture bridge closes. When no checkpoint has
-            // been activated yet the dSpark contract conservatively reports
-            // the full supported width.
+            // one query row. Use that pass to capture every exact packed suffix
+            // width before the Python capture bridge closes. These widths are
+            // shared by speculative decode and short prefill suffixes, so the
+            // active dSpark checkpoint's per-sequence draft limit cannot bound
+            // the runtime query width.
             // W8 target suffixes use a stable scratch destination so startup
             // can capture M=2--8 without binding those graphs to a one-row
             // request allocation. Production copies the projected result to
@@ -4675,9 +4671,7 @@ fn flashinfer_packed_fp8_mla_decode_device_buffers(
                 hidden_projection_w4a16: None,
                 ..full_graph_buffers
             };
-            let capture_max_query_rows =
-                flashinfer_packed_fp8_mla_capture_max_query_rows(dspark_active_max_verify_drafts());
-            for capture_query_rows in 2..=capture_max_query_rows {
+            for capture_query_rows in flashinfer_packed_fp8_mla_startup_capture_query_rows() {
                 let capture_graph_buffers = FlashinferPackedFp8MlaFullGraphBuffers {
                     hidden_projection_w8a16_packed_o: (capture_query_rows >= 9)
                         .then_some(available_hidden_projection_w8a16_packed_o)
@@ -9683,7 +9677,7 @@ mod flashinfer_capture_shape_tests {
         flashinfer_direct_packed_fp8_mla_capacity_supported,
         flashinfer_glm52_attention_heads_supported,
         flashinfer_glm_dsa_sparse_mla_prefill_device_buffers, flashinfer_mla_capture_shape,
-        flashinfer_mla_graph_signature, flashinfer_packed_fp8_mla_capture_max_query_rows,
+        flashinfer_mla_graph_signature, flashinfer_packed_fp8_mla_startup_capture_query_rows,
         glm_dsa_index_source_layer, glm_dsa_sparse_mla_attention_topk,
         glm_dsa_sparse_mla_query_bucket, native_library_path, native_library_version_has_cuda,
         parse_flashinfer_cudnn_mla_suffix_query_capacity,
@@ -10393,17 +10387,12 @@ mod flashinfer_capture_shape_tests {
     }
 
     #[test]
-    fn packed_fp8_mla_capture_width_tracks_active_dspark_contract() {
-        assert_eq!(flashinfer_packed_fp8_mla_capture_max_query_rows(7), 8);
-        assert_eq!(flashinfer_packed_fp8_mla_capture_max_query_rows(15), 16);
-    }
-
-    #[test]
-    fn packed_fp8_mla_capture_width_stays_within_backend_limits() {
-        assert_eq!(flashinfer_packed_fp8_mla_capture_max_query_rows(0), 1);
-        assert_eq!(
-            flashinfer_packed_fp8_mla_capture_max_query_rows(usize::MAX),
-            16
+    fn packed_fp8_mla_startup_covers_decode_and_short_prefill_widths() {
+        let widths = flashinfer_packed_fp8_mla_startup_capture_query_rows().collect::<Vec<_>>();
+        assert_eq!(widths, (2..=16).collect::<Vec<_>>());
+        assert!(
+            widths.contains(&12),
+            "model availability probe uses short-prefill M=12"
         );
     }
 

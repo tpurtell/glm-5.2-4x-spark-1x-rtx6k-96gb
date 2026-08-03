@@ -3767,7 +3767,7 @@ async fn real_glm_full_route_streaming_stops_at_glm_chat_marker() {
 }
 
 #[tokio::test]
-async fn real_glm_full_streaming_flushes_role_before_blocking_decode_step() {
+async fn real_glm_full_streaming_waits_for_first_decode_result_before_role() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -3818,16 +3818,25 @@ async fn real_glm_full_streaming_flushes_role_before_blocking_decode_step() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body().into_data_stream();
-    let first = tokio::time::timeout(Duration::from_millis(250), body.next())
+    let first = body.next();
+    tokio::pin!(first);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut first)
+            .await
+            .is_err(),
+        "stream must not emit a progress SSE event while the first decode is still running"
+    );
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ());
+
+    release_tx.send(()).unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), &mut first)
         .await
-        .expect("streaming role frame should arrive before decode executor completes")
+        .expect("streaming role frame should arrive with the first decode result")
         .expect("stream should yield a first frame")
         .expect("first stream frame should be ok");
     let first_text = String::from_utf8(first.to_vec()).unwrap();
     assert!(first_text.contains("\"role\":\"assistant\""));
-    assert!(entered_rx.try_recv().is_err());
 
-    release_tx.send(()).unwrap();
     let remaining = tokio::time::timeout(Duration::from_secs(2), async {
         let mut text = String::new();
         while let Some(chunk) = body.next().await {
@@ -3842,7 +3851,6 @@ async fn real_glm_full_streaming_flushes_role_before_blocking_decode_step() {
     .expect("stream should finish after decode executor is released");
     assert!(remaining.contains("\"content\":\"A\""));
     assert!(remaining.contains("[DONE]"));
-    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ());
     let captured = requests.lock().unwrap();
     assert_eq!(captured.len(), 1);
     assert!(captured[0].greedy_sampling);

@@ -379,9 +379,9 @@ fn real_glm_full_decode_stream_response(
             "real_full_stream_start model={} prompt_tokens={} max_tokens={} transport={}",
             model, prompt_tokens, max_tokens, transport_backend
         );
-        yield Ok::<Event, Infallible>(chat_stream_role_event(&id, created, &model));
 
         let mut generated_token_ids = Vec::with_capacity(max_tokens);
+        let mut stream_role_sent = false;
         let mut generated_completion_tokens = 0_usize;
         let mut generated_reasoning_tokens = 0_usize;
         let mut last_full = None;
@@ -553,6 +553,16 @@ fn real_glm_full_decode_stream_response(
                 full.scheduler_terminal_lm_head_sampled_token_id,
                 cycle_tokens.len().max(1)
             );
+            if !stream_role_sent {
+                // Match the established OpenAI-compatible serving behavior:
+                // headers may be available earlier, but the first SSE event is
+                // not model progress until the first decode result is ready.
+                // Keep the role as its own event and immediately follow it with
+                // the model-derived delta below so multi-token MTP cycles remain
+                // batched exactly as produced by the executor.
+                yield Ok::<Event, Infallible>(chat_stream_role_event(&id, created, &model));
+                stream_role_sent = true;
+            }
             let Some(samples) = terminal_cycle_samples(
                 &full,
                 &cycle_tokens,
