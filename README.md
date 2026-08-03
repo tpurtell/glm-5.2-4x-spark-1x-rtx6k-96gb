@@ -85,14 +85,6 @@ The server exposes an OpenAI-compatible API at
 selected GLM-5.2 checkpoint must already be present in the Hugging Face cache
 on each host.
 
-## Startup Time
-
-The measured cold launch and resident-expert warm restart are shown below.
-Cold startup streams model snapshots from local NVMe; warm startup reuses the
-resident Spark experts and their execution lanes.
-
-[![GLMRT startup timeline](docs/startup-timeline.svg)](docs/startup-timeline.svg)
-
 ## High Level Benchmarks
 
 These results use the `balanced` profile and the hardware described above.
@@ -188,3 +180,11 @@ GLMRT is released under the [MIT License](LICENSE).
 | Balanced | 28.16 tok/s | 30.59 tok/s | 78.0% | 1,641 tok/s |
 | Long | 27.44 tok/s | 29.57 tok/s | 75.9% | 1,606 tok/s |
 | Accurate | 22.02 tok/s | 23.82 tok/s | 82.5% | 995 tok/s |
+
+## Startup Time
+
+The measured cold launch and resident-expert warm restart are shown below.
+Cold startup streams model snapshots from local NVMe; warm startup reuses the
+resident Spark experts and their execution lanes.
+
+[![GLMRT startup timeline](docs/startup-timeline.svg)](docs/startup-timeline.svg)
