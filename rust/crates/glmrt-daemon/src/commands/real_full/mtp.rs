@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use glmrt_core::{DType, TensorCatalog, TensorRole, GLM52_HIDDEN_SIZE, GLM52_MTP_LAYER_ID};
 use glmrt_ffi::GLMRT_CUDA_SAMPLE_TOPK_MAX_K;
 
+use super::constraint::RealFullConstraintMasks;
 use super::coordinator_kernels::{
     concat_device_bf16_row_batches_async, concat_device_bf16_row_features, cuda_native_library,
     device_bf16_output_from_device_template_buffer, device_buffer_byte_view,
@@ -12,6 +13,7 @@ use super::embedding::real_full_embedding_device_hidden_for_tokens;
 use super::sampling::{
     score_real_lm_head_full_vocab_for_device_hidden,
     score_real_lm_head_full_vocab_for_device_hidden_rows,
+    score_real_lm_head_full_vocab_for_device_hidden_rows_constrained,
     score_real_lm_head_full_vocab_for_device_hidden_rows_with_options,
     RealFullLmHeadSamplingOptions, RealLmHeadBatchScoreForHidden,
 };
@@ -63,6 +65,35 @@ pub(in crate::commands::real_full) fn real_full_target_token_samples_with_option
         false,
     )
     .context("scoring sampled real-full target verification rows")
+}
+
+pub(in crate::commands::real_full) fn real_full_target_token_samples_constrained(
+    catalog: &TensorCatalog,
+    target_hidden: &DeviceBf16Output,
+    suffix_rows: usize,
+    sampler_options: RealFullLmHeadSamplingOptions,
+    random_uniforms: &[f32],
+    masks: &RealFullConstraintMasks,
+) -> Result<RealLmHeadBatchScoreForHidden> {
+    anyhow::ensure!(
+        random_uniforms.len() == suffix_rows,
+        "constrained target sampler received {} random uniforms for {suffix_rows} suffix rows",
+        random_uniforms.len()
+    );
+    anyhow::ensure!(
+        masks.rows == suffix_rows,
+        "constrained target sampler received {} mask rows for {suffix_rows} suffix rows",
+        masks.rows
+    );
+    let normalized = real_full_normalized_target_suffix(target_hidden, suffix_rows)?;
+    score_real_lm_head_full_vocab_for_device_hidden_rows_constrained(
+        catalog,
+        &normalized,
+        sampler_options,
+        random_uniforms,
+        &masks.words,
+    )
+    .context("scoring constrained real-full target verification rows")
 }
 
 fn real_full_normalized_target_suffix(
@@ -220,10 +251,12 @@ pub(in crate::commands::real_full) fn real_full_target_token_samples_pair(
         suffix_rows_a + suffix_rows_b,
     );
     let top_token_ids_b = samples.top_token_ids.split_off(suffix_rows_a);
+    let top_logits_b = samples.top_logits.split_off(suffix_rows_a);
     let sampled_token_ids_b = samples.sampled_token_ids.split_off(suffix_rows_a);
     let samples_b = RealLmHeadBatchScoreForHidden {
         vocab_size: samples.vocab_size,
         top_token_ids: top_token_ids_b,
+        top_logits: top_logits_b,
         sampled_token_ids: sampled_token_ids_b,
         sample_top_k: samples.sample_top_k,
         sample_top_p: samples.sample_top_p,
@@ -417,6 +450,57 @@ pub(in crate::commands::real_full) fn real_full_mtp_draft_token(
             },
             top_logit: score.top_logit,
             logits_evaluated: score.logits_evaluated,
+            argmax_backend: score.argmax_kernel_backend,
+        },
+        normalized,
+    ))
+}
+
+pub(in crate::commands::real_full) fn real_full_mtp_draft_token_constrained(
+    catalog: &TensorCatalog,
+    layer_hidden: &DeviceBf16Output,
+    greedy_sampling: bool,
+    masks: &RealFullConstraintMasks,
+) -> Result<(RealFullMtpDraftToken, DeviceBf16Output)> {
+    anyhow::ensure!(
+        layer_hidden.rows == 1 && layer_hidden.values_per_row == GLM52_HIDDEN_SIZE,
+        "constrained real-full MTP draft scoring expects 1x{} hidden, got {}x{}",
+        GLM52_HIDDEN_SIZE,
+        layer_hidden.rows,
+        layer_hidden.values_per_row
+    );
+    anyhow::ensure!(
+        masks.rows == 1,
+        "constrained real-full MTP draft scoring requires one mask row, got {}",
+        masks.rows
+    );
+    let normalized = rmsnorm_hidden_bf16_preloaded_resident_weight_device_input_output(
+        MTP_SHARED_HEAD_NORM_WEIGHT,
+        layer_hidden.buffer(),
+        1,
+        GLM52_HIDDEN_SIZE,
+        MTP_RMSNORM_EPS,
+    )
+    .context("normalizing constrained real-full MTP shared-head hidden")?;
+    let options = RealFullLmHeadSamplingOptions::diagnostic();
+    let score = score_real_lm_head_full_vocab_for_device_hidden_rows_constrained(
+        catalog,
+        &normalized,
+        options,
+        &[options.random_uniform],
+        &masks.words,
+    )
+    .context("scoring constrained real-full MTP shared-head logits")?;
+    let token_id = if greedy_sampling {
+        score.top_token_ids[0]
+    } else {
+        score.sampled_token_ids[0]
+    };
+    Ok((
+        RealFullMtpDraftToken {
+            token_id,
+            top_logit: score.top_logits[0],
+            logits_evaluated: score.vocab_size,
             argmax_backend: score.argmax_kernel_backend,
         },
         normalized,

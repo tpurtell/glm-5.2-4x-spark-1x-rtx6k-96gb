@@ -2814,10 +2814,319 @@ type RdmaRcEndpointCopyRecvAtFn = unsafe extern "C" fn(
 ) -> GlmrtStatus;
 type RdmaRcEndpointDestroyFn = unsafe extern "C" fn(handle: *mut c_void) -> GlmrtStatus;
 
+type XGrammarCompilerCreateFn = unsafe extern "C" fn(
+    tokenizer_json_path: *const c_char,
+    vocab_size: usize,
+    stop_token_ids: *const i32,
+    stop_token_count: usize,
+    out_compiler: *mut *mut c_void,
+    error: *mut c_char,
+    error_bytes: usize,
+) -> GlmrtStatus;
+type XGrammarCompilerDestroyFn = unsafe extern "C" fn(compiler: *mut c_void) -> GlmrtStatus;
+type XGrammarCompileFn = unsafe extern "C" fn(
+    compiler: *mut c_void,
+    kind: c_int,
+    grammar_json: *const c_char,
+    strict: c_int,
+    out_grammar: *mut *mut c_void,
+    error: *mut c_char,
+    error_bytes: usize,
+) -> GlmrtStatus;
+type XGrammarGrammarDestroyFn = unsafe extern "C" fn(grammar: *mut c_void) -> GlmrtStatus;
+type XGrammarMatcherCreateFn = unsafe extern "C" fn(
+    grammar: *const c_void,
+    out_matcher: *mut *mut c_void,
+    error: *mut c_char,
+    error_bytes: usize,
+) -> GlmrtStatus;
+type XGrammarMatcherForkFn = unsafe extern "C" fn(
+    matcher: *const c_void,
+    out_matcher: *mut *mut c_void,
+    error: *mut c_char,
+    error_bytes: usize,
+) -> GlmrtStatus;
+type XGrammarMatcherDestroyFn = unsafe extern "C" fn(matcher: *mut c_void) -> GlmrtStatus;
+type XGrammarMatcherFillBitmaskFn = unsafe extern "C" fn(
+    matcher: *mut c_void,
+    bitmask: *mut u32,
+    bitmask_words: usize,
+    out_needs_mask: *mut c_int,
+    error: *mut c_char,
+    error_bytes: usize,
+) -> GlmrtStatus;
+type XGrammarMatcherAcceptTokenFn = unsafe extern "C" fn(
+    matcher: *mut c_void,
+    token_id: u32,
+    out_accepted: *mut c_int,
+    error: *mut c_char,
+    error_bytes: usize,
+) -> GlmrtStatus;
+type XGrammarMatcherIsCompletedFn = unsafe extern "C" fn(
+    matcher: *const c_void,
+    out_completed: *mut c_int,
+    error: *mut c_char,
+    error_bytes: usize,
+) -> GlmrtStatus;
+
 pub struct NativeLibrary {
     lib: Library,
     sync_h2d_staging: Mutex<SyncH2DStagingBuffer>,
     rdma_rc_endpoint_try_poll_fn: RdmaRcEndpointTryPollFn,
+}
+
+pub const GLMRT_XGRAMMAR_JSON_OBJECT: c_int = 1;
+pub const GLMRT_XGRAMMAR_JSON_SCHEMA: c_int = 2;
+pub const GLMRT_XGRAMMAR_STRUCTURAL_TAG: c_int = 3;
+
+pub struct GlmrtXGrammarCompiler<'a> {
+    handle: *mut c_void,
+    library: &'a NativeLibrary,
+}
+
+pub struct GlmrtXGrammarGrammar<'a> {
+    handle: *mut c_void,
+    library: &'a NativeLibrary,
+}
+
+pub struct GlmrtXGrammarMatcher<'a> {
+    handle: *mut c_void,
+    library: &'a NativeLibrary,
+}
+
+unsafe impl Send for GlmrtXGrammarCompiler<'_> {}
+unsafe impl Sync for GlmrtXGrammarCompiler<'_> {}
+unsafe impl Send for GlmrtXGrammarGrammar<'_> {}
+unsafe impl Sync for GlmrtXGrammarGrammar<'_> {}
+unsafe impl Send for GlmrtXGrammarMatcher<'_> {}
+
+const XGRAMMAR_ERROR_BYTES: usize = 2_048;
+
+fn xgrammar_status(
+    context: &str,
+    status: GlmrtStatus,
+    error: &[c_char; XGRAMMAR_ERROR_BYTES],
+) -> Result<()> {
+    if status == GLMRT_STATUS_OK {
+        return Ok(());
+    }
+    let detail = unsafe { CStr::from_ptr(error.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    if detail.is_empty() {
+        anyhow::bail!("{context} returned status {status}");
+    }
+    anyhow::bail!("{context} returned status {status}: {detail}")
+}
+
+impl NativeLibrary {
+    pub fn xgrammar_compiler<'a>(
+        &'a self,
+        tokenizer_json_path: &Path,
+        vocab_size: usize,
+        stop_token_ids: &[i32],
+    ) -> Result<GlmrtXGrammarCompiler<'a>> {
+        let path = CString::new(tokenizer_json_path.to_string_lossy().as_bytes())
+            .context("XGrammar tokenizer path contains a NUL byte")?;
+        let create: Symbol<XGrammarCompilerCreateFn> =
+            unsafe { self.lib.get(b"glmrt_xgrammar_compiler_create")? };
+        let mut handle = std::ptr::null_mut();
+        let mut error = [0 as c_char; XGRAMMAR_ERROR_BYTES];
+        let status = unsafe {
+            create(
+                path.as_ptr(),
+                vocab_size,
+                if stop_token_ids.is_empty() {
+                    std::ptr::null()
+                } else {
+                    stop_token_ids.as_ptr()
+                },
+                stop_token_ids.len(),
+                &mut handle,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        xgrammar_status("glmrt_xgrammar_compiler_create", status, &error)?;
+        anyhow::ensure!(!handle.is_null(), "native XGrammar compiler handle is null");
+        Ok(GlmrtXGrammarCompiler {
+            handle,
+            library: self,
+        })
+    }
+}
+
+impl<'a> GlmrtXGrammarCompiler<'a> {
+    pub fn compile(
+        &self,
+        kind: c_int,
+        grammar_json: Option<&str>,
+        strict: bool,
+    ) -> Result<GlmrtXGrammarGrammar<'a>> {
+        let grammar_json = grammar_json
+            .map(|value| {
+                CString::new(value).context("XGrammar source contains an embedded NUL byte")
+            })
+            .transpose()?;
+        let compile: Symbol<XGrammarCompileFn> =
+            unsafe { self.library.lib.get(b"glmrt_xgrammar_compile")? };
+        let mut handle = std::ptr::null_mut();
+        let mut error = [0 as c_char; XGRAMMAR_ERROR_BYTES];
+        let status = unsafe {
+            compile(
+                self.handle,
+                kind,
+                grammar_json
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                c_int::from(strict),
+                &mut handle,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        xgrammar_status("glmrt_xgrammar_compile", status, &error)?;
+        anyhow::ensure!(!handle.is_null(), "native XGrammar grammar handle is null");
+        Ok(GlmrtXGrammarGrammar {
+            handle,
+            library: self.library,
+        })
+    }
+}
+
+impl<'a> GlmrtXGrammarGrammar<'a> {
+    pub fn matcher(&self) -> Result<GlmrtXGrammarMatcher<'a>> {
+        let create: Symbol<XGrammarMatcherCreateFn> =
+            unsafe { self.library.lib.get(b"glmrt_xgrammar_matcher_create")? };
+        let mut handle = std::ptr::null_mut();
+        let mut error = [0 as c_char; XGRAMMAR_ERROR_BYTES];
+        let status = unsafe { create(self.handle, &mut handle, error.as_mut_ptr(), error.len()) };
+        xgrammar_status("glmrt_xgrammar_matcher_create", status, &error)?;
+        anyhow::ensure!(!handle.is_null(), "native XGrammar matcher handle is null");
+        Ok(GlmrtXGrammarMatcher {
+            handle,
+            library: self.library,
+        })
+    }
+}
+
+impl<'a> GlmrtXGrammarMatcher<'a> {
+    pub fn fork(&self) -> Result<Self> {
+        let fork: Symbol<XGrammarMatcherForkFn> =
+            unsafe { self.library.lib.get(b"glmrt_xgrammar_matcher_fork")? };
+        let mut handle = std::ptr::null_mut();
+        let mut error = [0 as c_char; XGRAMMAR_ERROR_BYTES];
+        let status = unsafe { fork(self.handle, &mut handle, error.as_mut_ptr(), error.len()) };
+        xgrammar_status("glmrt_xgrammar_matcher_fork", status, &error)?;
+        anyhow::ensure!(!handle.is_null(), "forked native XGrammar matcher is null");
+        Ok(Self {
+            handle,
+            library: self.library,
+        })
+    }
+
+    pub fn fill_bitmask(&mut self, bitmask: &mut [u32]) -> Result<bool> {
+        anyhow::ensure!(!bitmask.is_empty(), "XGrammar bitmask is empty");
+        let fill: Symbol<XGrammarMatcherFillBitmaskFn> = unsafe {
+            self.library
+                .lib
+                .get(b"glmrt_xgrammar_matcher_fill_bitmask")?
+        };
+        let mut needs_mask = 0;
+        let mut error = [0 as c_char; XGRAMMAR_ERROR_BYTES];
+        let status = unsafe {
+            fill(
+                self.handle,
+                bitmask.as_mut_ptr(),
+                bitmask.len(),
+                &mut needs_mask,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        xgrammar_status("glmrt_xgrammar_matcher_fill_bitmask", status, &error)?;
+        Ok(needs_mask != 0)
+    }
+
+    pub fn accept_token(&mut self, token_id: u32) -> Result<bool> {
+        let accept: Symbol<XGrammarMatcherAcceptTokenFn> = unsafe {
+            self.library
+                .lib
+                .get(b"glmrt_xgrammar_matcher_accept_token")?
+        };
+        let mut accepted = 0;
+        let mut error = [0 as c_char; XGRAMMAR_ERROR_BYTES];
+        let status = unsafe {
+            accept(
+                self.handle,
+                token_id,
+                &mut accepted,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        xgrammar_status("glmrt_xgrammar_matcher_accept_token", status, &error)?;
+        Ok(accepted != 0)
+    }
+
+    pub fn is_completed(&self) -> Result<bool> {
+        let completed: Symbol<XGrammarMatcherIsCompletedFn> = unsafe {
+            self.library
+                .lib
+                .get(b"glmrt_xgrammar_matcher_is_completed")?
+        };
+        let mut is_completed = 0;
+        let mut error = [0 as c_char; XGRAMMAR_ERROR_BYTES];
+        let status = unsafe {
+            completed(
+                self.handle,
+                &mut is_completed,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        xgrammar_status("glmrt_xgrammar_matcher_is_completed", status, &error)?;
+        Ok(is_completed != 0)
+    }
+}
+
+impl Drop for GlmrtXGrammarCompiler<'_> {
+    fn drop(&mut self) {
+        if let Ok(destroy) = unsafe {
+            self.library
+                .lib
+                .get::<XGrammarCompilerDestroyFn>(b"glmrt_xgrammar_compiler_destroy")
+        } {
+            let _ = unsafe { destroy(self.handle) };
+        }
+        self.handle = std::ptr::null_mut();
+    }
+}
+
+impl Drop for GlmrtXGrammarGrammar<'_> {
+    fn drop(&mut self) {
+        if let Ok(destroy) = unsafe {
+            self.library
+                .lib
+                .get::<XGrammarGrammarDestroyFn>(b"glmrt_xgrammar_grammar_destroy")
+        } {
+            let _ = unsafe { destroy(self.handle) };
+        }
+        self.handle = std::ptr::null_mut();
+    }
+}
+
+impl Drop for GlmrtXGrammarMatcher<'_> {
+    fn drop(&mut self) {
+        if let Ok(destroy) = unsafe {
+            self.library
+                .lib
+                .get::<XGrammarMatcherDestroyFn>(b"glmrt_xgrammar_matcher_destroy")
+        } {
+            let _ = unsafe { destroy(self.handle) };
+        }
+        self.handle = std::ptr::null_mut();
+    }
 }
 
 pub struct GlmrtNcclComm {

@@ -611,6 +611,7 @@ mod tests {
                         "exact": {"type": "boolean"}
                     }
                 })),
+                strict: None,
             },
         }
     }

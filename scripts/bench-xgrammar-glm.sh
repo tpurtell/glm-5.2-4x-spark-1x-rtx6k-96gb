@@ -3,30 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED_COMMIT="557becfb64c503ae9c04344b0047661f43f44320"
-SOURCE_DIR="${GLMRT_XGRAMMAR_SOURCE_DIR:-}"
+SOURCE_DIR="${GLMRT_XGRAMMAR_SOURCE_DIR:-$ROOT/third_party/xgrammar}"
+LOCK_FILE="${GLMRT_XGRAMMAR_LOCK_FILE:-$ROOT/third_party/xgrammar.lock.json}"
 BUILD_DIR="${GLMRT_XGRAMMAR_BUILD_DIR:-/tmp/glmrt-xgrammar-v0.2.3-build}"
 FIXTURE="$ROOT/native/tools/fixtures/glm_required_tool_calls.json"
 BENCH_SOURCE="$ROOT/native/tools/xgrammar_glm_bench.cc"
 BENCH_BINARY="$BUILD_DIR/xgrammar_glm_bench"
 
-if [[ -z "$SOURCE_DIR" ]]; then
-  echo "GLMRT_XGRAMMAR_SOURCE_DIR must point to XGrammar v0.2.3" >&2
-  exit 2
-fi
-if [[ ! -d "$SOURCE_DIR/.git" ]]; then
-  echo "XGrammar source is not a git checkout: $SOURCE_DIR" >&2
-  exit 2
-fi
-
-ACTUAL_COMMIT="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
-if [[ "$ACTUAL_COMMIT" != "$EXPECTED_COMMIT" ]]; then
-  echo "expected XGrammar $EXPECTED_COMMIT, found $ACTUAL_COMMIT" >&2
-  exit 2
-fi
-if [[ ! -f "$SOURCE_DIR/3rdparty/dlpack/include/dlpack/dlpack.h" ]]; then
-  echo "XGrammar dlpack submodule is missing; initialize 3rdparty/dlpack" >&2
-  exit 2
-fi
+python3 "$ROOT/scripts/verify-xgrammar-source.py" \
+  --source "$SOURCE_DIR" \
+  --lock "$LOCK_FILE"
+ACTUAL_COMMIT="$EXPECTED_COMMIT"
 
 mkdir -p "$BUILD_DIR"
 printf '%s\n' \

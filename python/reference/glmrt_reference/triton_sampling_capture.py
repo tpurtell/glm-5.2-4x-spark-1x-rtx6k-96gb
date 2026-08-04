@@ -124,6 +124,124 @@ def capture_lm_head_sample_topk_topp(ctx: dict[str, Any], **kwargs: Any) -> None
         )
 
 
+def capture_lm_head_constrained_sample_topk_topp(
+    ctx: dict[str, Any], **kwargs: Any
+) -> None:
+    """Launch graph-capturable BF16 LM-head sampling with token bitmasks."""
+
+    target = os.environ.get(_TARGET_ENV)
+    if target:
+        module_name, _, function_name = target.partition(":")
+        if not module_name or not function_name:
+            raise ValueError(f"{_TARGET_ENV} must be formatted as module:function")
+        getattr(import_module(module_name), function_name)(ctx, **kwargs)
+        return
+
+    import torch
+
+    rows = int(kwargs["rows"])
+    hidden_dim = int(kwargs["hidden_dim"])
+    vocab = int(kwargs["vocab"])
+    temperature = float(kwargs["temperature"])
+    top_k = int(kwargs["top_k"])
+    top_p = float(kwargs["top_p"])
+    if rows <= 0 or hidden_dim <= 0 or vocab <= 0:
+        raise ValueError(
+            "constrained Triton LM-head sampler requires positive shape, "
+            f"got rows={rows}, hidden_dim={hidden_dim}, vocab={vocab}"
+        )
+    if top_k <= 0 or top_k > vocab:
+        raise ValueError(
+            f"constrained Triton LM-head sampler invalid top_k={top_k} for vocab={vocab}"
+        )
+    if temperature <= 0.0:
+        raise ValueError(
+            "constrained Triton LM-head sampler requires positive temperature, "
+            f"got {temperature}"
+        )
+    if top_p <= 0.0 or top_p > 1.0:
+        raise ValueError(
+            f"constrained Triton LM-head sampler requires top_p in (0, 1], got {top_p}"
+        )
+
+    buffers = ctx["buffers"]
+    hidden_buffer = buffers["hidden"]
+    device_id = int(hidden_buffer["device_id"])
+    stream = torch.cuda.ExternalStream(int(ctx["cuda_stream"]), device=device_id)
+
+    with torch.cuda.device(device_id), torch.cuda.stream(stream):
+        hidden = _bf16_tensor(hidden_buffer, (rows, hidden_dim))
+        lm_head = _bf16_tensor(buffers["lm_head"], (vocab, hidden_dim))
+        random_uniforms = _f32_tensor(buffers["random_uniforms"], (rows,))
+        mask_words = triton.cdiv(vocab, 32)
+        token_bitmask = _u32_tensor(buffers["token_bitmask"], (rows, mask_words))
+        logits = _f32_tensor(buffers["logits"], (rows, vocab))
+        candidate_scores = _f32_tensor(
+            buffers["candidate_scores"],
+            (rows, triton.cdiv(vocab, _BLOCK_VOCAB), top_k),
+        )
+        candidate_indices = _u32_tensor(
+            buffers["candidate_indices"],
+            (rows, triton.cdiv(vocab, _BLOCK_VOCAB), top_k),
+        )
+        out_indices = _u32_tensor(buffers["out_indices"], (rows,))
+        out_scores = _f32_tensor(buffers["out_scores"], (rows,))
+        out_argmax_indices = _u32_tensor(
+            buffers.get("out_argmax_indices", buffers["out_indices"]), (rows,)
+        )
+        out_argmax_scores = _f32_tensor(
+            buffers.get("out_argmax_scores", buffers["out_scores"]), (rows,)
+        )
+
+        block_m = 16
+        block_n = 16
+        block_k = 64
+        num_vocab_blocks = triton.cdiv(vocab, _BLOCK_VOCAB)
+        block_candidates = triton.next_power_of_2(num_vocab_blocks * top_k)
+        top_k_block = triton.next_power_of_2(top_k)
+        logits_grid = (triton.cdiv(rows, block_m), triton.cdiv(vocab, block_n))
+        _lm_head_logits_bf16[logits_grid](
+            hidden,
+            lm_head,
+            logits,
+            ROWS=rows,
+            HIDDEN_DIM=hidden_dim,
+            VOCAB=vocab,
+            HIDDEN_STRIDE_ROW=hidden_dim,
+            LM_HEAD_STRIDE_TOKEN=hidden_dim,
+            LOGITS_STRIDE_ROW=vocab,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+        )
+        _block_topk_masked[(rows, num_vocab_blocks)](
+            logits,
+            token_bitmask,
+            candidate_scores,
+            candidate_indices,
+            VOCAB=vocab,
+            TOP_K=top_k,
+            NUM_VOCAB_BLOCKS=num_vocab_blocks,
+            MASK_WORDS=mask_words,
+            BLOCK_VOCAB=_BLOCK_VOCAB,
+        )
+        _sample_from_candidates[(rows,)](
+            candidate_scores,
+            candidate_indices,
+            random_uniforms,
+            out_argmax_indices,
+            out_argmax_scores,
+            out_indices,
+            out_scores,
+            TEMPERATURE=temperature,
+            TOP_K=top_k,
+            TOP_P=top_p,
+            NUM_VOCAB_BLOCKS=num_vocab_blocks,
+            BLOCK_CANDIDATES=block_candidates,
+            TOP_K_BLOCK=top_k_block,
+        )
+
+
 @triton.jit
 def _lm_head_logits_bf16(
     hidden,
@@ -180,6 +298,46 @@ def _block_topk(
     offsets = block * BLOCK_VOCAB + tl.arange(0, BLOCK_VOCAB)
     valid = offsets < VOCAB
     values = tl.load(logits + row * VOCAB + offsets, mask=valid, other=-float("inf"))
+    selected = tl.full((BLOCK_VOCAB,), False, tl.int1)
+    out_base = (row * NUM_VOCAB_BLOCKS + block) * TOP_K
+
+    for rank in range(0, TOP_K):
+        candidates = tl.where(selected, -float("inf"), values)
+        best_score = tl.max(candidates, axis=0)
+        best_mask = candidates == best_score
+        best_token = tl.min(tl.where(best_mask, offsets, VOCAB), axis=0)
+        tl.store(candidate_scores + out_base + rank, best_score)
+        tl.store(candidate_indices + out_base + rank, best_token)
+        selected = selected | (offsets == best_token)
+
+
+@triton.jit
+def _block_topk_masked(
+    logits,
+    token_bitmask,
+    candidate_scores,
+    candidate_indices,
+    VOCAB: tl.constexpr,
+    TOP_K: tl.constexpr,
+    NUM_VOCAB_BLOCKS: tl.constexpr,
+    MASK_WORDS: tl.constexpr,
+    BLOCK_VOCAB: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    block = tl.program_id(1)
+    offsets = block * BLOCK_VOCAB + tl.arange(0, BLOCK_VOCAB)
+    valid = offsets < VOCAB
+    mask_word = tl.load(
+        token_bitmask + row * MASK_WORDS + offsets // 32,
+        mask=valid,
+        other=0,
+    )
+    allowed = ((mask_word >> (offsets % 32)) & 1) != 0
+    values = tl.load(
+        logits + row * VOCAB + offsets,
+        mask=valid & allowed,
+        other=-float("inf"),
+    )
     selected = tl.full((BLOCK_VOCAB,), False, tl.int1)
     out_base = (row * NUM_VOCAB_BLOCKS + block) * TOP_K
 

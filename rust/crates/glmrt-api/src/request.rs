@@ -7,10 +7,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::{invalid_request, ApiError};
 use crate::tooling::{glm_tool_schema_json, render_glm_tool_call};
 use crate::{
-    ChatCompletionRequest, ChatMessage, ChatTool, RealFullSamplingParams, StopSpec, ToolChoice,
+    ChatCompletionRequest, ChatMessage, ChatTool, RealFullSamplingParams, ResponseFormat, StopSpec,
+    ToolChoice,
 };
 
 const REAL_FULL_ENABLE_THINKING_ENV: &str = "GLMRT_REAL_FULL_ENABLE_THINKING";
+const MAX_CONSTRAINT_SCHEMA_BYTES: usize = 1024 * 1024;
+const MAX_TOOL_SCHEMA_BYTES: usize = 4 * MAX_CONSTRAINT_SCHEMA_BYTES;
+const MAX_STRICT_SCHEMA_DEPTH: usize = 64;
+const MAX_STRICT_SCHEMA_NODES: usize = 4096;
 
 pub(crate) fn validate_request(request: &ChatCompletionRequest) -> Result<(), ApiError> {
     if request.model.trim().is_empty() {
@@ -141,8 +146,50 @@ pub(crate) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
             Some("top_k"),
         ));
     }
+    if let Some(response_format) = request.response_format.as_ref() {
+        match response_format {
+            ResponseFormat::Text | ResponseFormat::JsonObject => {}
+            ResponseFormat::JsonSchema { json_schema } => {
+                validate_identifier(
+                    &json_schema.name,
+                    "response_format JSON Schema name",
+                    "response_format.json_schema.name",
+                )?;
+                if !json_schema.schema.is_object() {
+                    return Err(invalid_request(
+                        "response_format JSON Schema must be an object",
+                        Some("response_format.json_schema.schema"),
+                    ));
+                }
+                validate_constraint_schema_size(
+                    &json_schema.schema,
+                    "response_format.json_schema.schema",
+                    MAX_CONSTRAINT_SCHEMA_BYTES,
+                )?;
+                if json_schema.strict.unwrap_or(false) {
+                    validate_strict_json_schema(
+                        &json_schema.schema,
+                        "response_format.json_schema.schema",
+                    )?;
+                }
+            }
+        }
+        if !matches!(response_format, ResponseFormat::Text) && tool_calls_enabled(request) {
+            return Err(invalid_request(
+                "non-text response_format cannot be combined with enabled tools",
+                Some("response_format"),
+            ));
+        }
+    }
     if let Some(tools) = &request.tools {
+        if tools.len() > 128 {
+            return Err(invalid_request(
+                "tools must contain at most 128 functions",
+                Some("tools"),
+            ));
+        }
         let mut tool_names = HashSet::new();
+        let mut total_schema_bytes = 0_usize;
         for (idx, tool) in tools.iter().enumerate() {
             if tool.tool_type != "function" {
                 return Err(invalid_request(
@@ -150,12 +197,11 @@ pub(crate) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
                     Some(format!("tools[{idx}].type")),
                 ));
             }
-            if tool.function.name.trim().is_empty() {
-                return Err(invalid_request(
-                    "function tool name must not be empty",
-                    Some(format!("tools[{idx}].function.name")),
-                ));
-            }
+            validate_identifier(
+                &tool.function.name,
+                "function tool name",
+                format!("tools[{idx}].function.name"),
+            )?;
             if !tool_names.insert(tool.function.name.as_str()) {
                 return Err(invalid_request(
                     format!("duplicate function tool name {}", tool.function.name),
@@ -172,6 +218,35 @@ pub(crate) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
                     "function tool parameters must be a JSON Schema object",
                     Some(format!("tools[{idx}].function.parameters")),
                 ));
+            }
+            if let Some(parameters) = tool.function.parameters.as_ref() {
+                let parameter = format!("tools[{idx}].function.parameters");
+                let schema_bytes = validate_constraint_schema_size(
+                    parameters,
+                    &parameter,
+                    MAX_CONSTRAINT_SCHEMA_BYTES,
+                )?;
+                total_schema_bytes = total_schema_bytes
+                    .checked_add(schema_bytes)
+                    .ok_or_else(|| invalid_request("tool schemas are too large", Some("tools")))?;
+                if total_schema_bytes > MAX_TOOL_SCHEMA_BYTES {
+                    return Err(invalid_request(
+                        format!("tool schemas must total at most {MAX_TOOL_SCHEMA_BYTES} bytes"),
+                        Some("tools"),
+                    ));
+                }
+            }
+            if tool.function.strict.unwrap_or(false) {
+                let parameters = tool
+                    .function
+                    .parameters
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(crate::constrained::empty_parameters);
+                validate_strict_json_schema(
+                    &parameters,
+                    format!("tools[{idx}].function.parameters"),
+                )?;
             }
         }
     }
@@ -212,6 +287,172 @@ pub(crate) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
         None => {}
     }
     Ok(())
+}
+
+fn validate_constraint_schema_size(
+    schema: &Value,
+    parameter: impl Into<String>,
+    max_bytes: usize,
+) -> Result<usize, ApiError> {
+    let parameter = parameter.into();
+    let bytes = serde_json::to_vec(schema)
+        .map_err(|error| {
+            invalid_request(
+                format!("JSON Schema cannot be serialized: {error}"),
+                Some(parameter.clone()),
+            )
+        })?
+        .len();
+    if bytes > max_bytes {
+        return Err(invalid_request(
+            format!("JSON Schema must be at most {max_bytes} bytes"),
+            Some(parameter),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate_identifier(
+    value: &str,
+    label: &str,
+    parameter: impl Into<String>,
+) -> Result<(), ApiError> {
+    let parameter = parameter.into();
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(invalid_request(
+            format!("{label} must be 1-64 characters containing only letters, numbers, underscores, or hyphens"),
+            Some(parameter),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_strict_json_schema(
+    schema: &Value,
+    parameter: impl Into<String>,
+) -> Result<(), ApiError> {
+    fn visit(
+        schema: &Value,
+        path: &str,
+        depth: usize,
+        visited_nodes: &mut usize,
+    ) -> Result<(), String> {
+        if depth > MAX_STRICT_SCHEMA_DEPTH {
+            return Err(format!(
+                "{path} exceeds the strict JSON Schema nesting limit of {MAX_STRICT_SCHEMA_DEPTH}"
+            ));
+        }
+        *visited_nodes = visited_nodes
+            .checked_add(1)
+            .ok_or_else(|| format!("{path} has too many schema nodes"))?;
+        if *visited_nodes > MAX_STRICT_SCHEMA_NODES {
+            return Err(format!(
+                "{path} exceeds the strict JSON Schema node limit of {MAX_STRICT_SCHEMA_NODES}"
+            ));
+        }
+        let Some(object) = schema.as_object() else {
+            return Err(format!("{path} must be a JSON Schema object"));
+        };
+        let is_object = object.get("type").is_some_and(|kind| {
+            kind == "object"
+                || kind
+                    .as_array()
+                    .is_some_and(|kinds| kinds.iter().any(|candidate| candidate == "object"))
+        }) || object.contains_key("properties");
+        if is_object {
+            let properties = object
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{path}.properties must be an object in strict mode"))?;
+            if object.get("additionalProperties") != Some(&Value::Bool(false)) {
+                return Err(format!(
+                    "{path}.additionalProperties must be false in strict mode"
+                ));
+            }
+            let required = object
+                .get("required")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!("{path}.required must list every property in strict mode")
+                })?;
+            let required = required
+                .iter()
+                .map(|name| {
+                    name.as_str()
+                        .ok_or_else(|| format!("{path}.required entries must be strings"))
+                })
+                .collect::<Result<HashSet<_>, _>>()?;
+            if required.len() != properties.len()
+                || properties
+                    .keys()
+                    .any(|name| !required.contains(name.as_str()))
+            {
+                return Err(format!(
+                    "{path}.required must contain every property exactly once in strict mode"
+                ));
+            }
+            for (name, property) in properties {
+                visit(
+                    property,
+                    &format!("{path}.properties.{name}"),
+                    depth + 1,
+                    visited_nodes,
+                )?;
+            }
+        }
+        if let Some(items) = object.get("items") {
+            visit(items, &format!("{path}.items"), depth + 1, visited_nodes)?;
+        }
+        for keyword in ["anyOf", "oneOf", "allOf"] {
+            if let Some(variants) = object.get(keyword).and_then(Value::as_array) {
+                for (index, variant) in variants.iter().enumerate() {
+                    visit(
+                        variant,
+                        &format!("{path}.{keyword}[{index}]"),
+                        depth + 1,
+                        visited_nodes,
+                    )?;
+                }
+            }
+        }
+        for keyword in ["$defs", "definitions"] {
+            if let Some(definitions) = object.get(keyword).and_then(Value::as_object) {
+                for (name, definition) in definitions {
+                    visit(
+                        definition,
+                        &format!("{path}.{keyword}.{name}"),
+                        depth + 1,
+                        visited_nodes,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let parameter = parameter.into();
+    let root = schema.as_object().ok_or_else(|| {
+        invalid_request(
+            "strict JSON Schema root must be an object",
+            Some(parameter.clone()),
+        )
+    })?;
+    let root_is_object =
+        root.get("type").is_some_and(|kind| kind == "object") || root.contains_key("properties");
+    if !root_is_object {
+        return Err(invalid_request(
+            "strict JSON Schema root type must be object",
+            Some(parameter),
+        ));
+    }
+    let mut visited_nodes = 0;
+    visit(schema, &parameter, 0, &mut visited_nodes)
+        .map_err(|message| invalid_request(message, Some(parameter)))
 }
 
 pub(crate) fn request_uses_greedy_sampling(request: &ChatCompletionRequest) -> bool {
@@ -281,7 +522,7 @@ pub(crate) fn prompt_text(messages: &[ChatMessage]) -> String {
 
 #[cfg(test)]
 pub(crate) fn real_glm_full_prompt_text(messages: &[ChatMessage]) -> String {
-    render_real_glm_full_prompt(messages, &[], None, None)
+    render_real_glm_full_prompt(messages, &[], None, None, None)
 }
 
 pub(crate) fn real_glm_full_request_prompt_text(request: &ChatCompletionRequest) -> String {
@@ -300,7 +541,30 @@ pub(crate) fn real_glm_full_request_prompt_text(request: &ChatCompletionRequest)
         &tools,
         instruction.as_deref(),
         request_reasoning_effort_label(request),
+        response_format_instruction(request).as_deref(),
     )
+}
+
+fn response_format_instruction(request: &ChatCompletionRequest) -> Option<String> {
+    match request.response_format.as_ref()? {
+        ResponseFormat::Text => None,
+        ResponseFormat::JsonObject => Some(
+            "Return only one valid JSON object with no surrounding prose or markdown.".to_owned(),
+        ),
+        ResponseFormat::JsonSchema { json_schema } => {
+            let schema = serde_json::to_string(&json_schema.schema)
+                .expect("validated response JSON Schema is serializable");
+            let mut instruction = format!(
+                "Return only one valid JSON object matching the JSON Schema named {}: {}",
+                json_schema.name, schema
+            );
+            if let Some(description) = json_schema.description.as_deref() {
+                instruction.push_str("\nSchema purpose: ");
+                instruction.push_str(description);
+            }
+            Some(instruction)
+        }
+    }
 }
 
 fn prompt_tools(request: &ChatCompletionRequest) -> Vec<&ChatTool> {
@@ -329,12 +593,17 @@ fn render_real_glm_full_prompt(
     tools: &[&ChatTool],
     tool_choice_instruction: Option<&str>,
     reasoning_effort: Option<&str>,
+    response_format_instruction: Option<&str>,
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str("[gMASK]<sop>");
     if let Some(reasoning_effort) = reasoning_effort {
         prompt.push_str("<|system|>Reasoning Effort: ");
         prompt.push_str(reasoning_effort);
+    }
+    if let Some(instruction) = response_format_instruction {
+        prompt.push_str("<|system|>");
+        prompt.push_str(instruction);
     }
     if !tools.is_empty() {
         prompt.push_str(
@@ -462,7 +731,8 @@ fn request_reasoning_effort_label(request: &ChatCompletionRequest) -> Option<&'s
 mod tests {
     use super::{
         assistant_visible_content, real_glm_full_request_prompt_text, request_image_sources,
-        ChatCompletionRequest,
+        validate_request, ChatCompletionRequest, MAX_CONSTRAINT_SCHEMA_BYTES,
+        MAX_STRICT_SCHEMA_DEPTH,
     };
 
     #[test]
@@ -516,6 +786,50 @@ mod tests {
             request_image_sources(&request).unwrap(),
             vec!["data:image/png;base64,AA=="]
         );
+    }
+
+    #[test]
+    fn constrained_schema_limits_bound_compile_input_and_validation_depth() {
+        let oversized: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "oversized",
+                    "schema": {
+                        "type": "object",
+                        "description": "x".repeat(MAX_CONSTRAINT_SCHEMA_BYTES)
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(validate_request(&oversized).is_err());
+
+        let mut nested = serde_json::json!({"type": "string"});
+        for _ in 0..=MAX_STRICT_SCHEMA_DEPTH {
+            nested = serde_json::json!({"type": "array", "items": nested});
+        }
+        let too_deep: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "too_deep",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"value": nested},
+                        "required": ["value"],
+                        "additionalProperties": false
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(validate_request(&too_deep).is_err());
     }
 }
 

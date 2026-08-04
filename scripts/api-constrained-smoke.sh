@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+url="${1:-${URL:-http://127.0.0.1:8000}}"
+model="${2:-${MODEL:-lukealonso/GLM-5.2-NVFP4}}"
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "required command not found: $1" >&2
+    exit 2
+  }
+}
+
+need curl
+need jq
+need grep
+need mktemp
+need sed
+
+smoke_tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf -- "$smoke_tmp"
+}
+trap cleanup EXIT
+
+schema_payload="$(
+  jq -cn --arg model "$model" '{
+    model: $model,
+    messages: [{role: "user", content: "Return Taipei, 27, and sunny."}],
+    temperature: 0,
+    max_tokens: 96,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "weather",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            city: {type: "string", enum: ["Taipei"]},
+            temperature: {type: "integer", enum: [27]},
+            condition: {type: "string", enum: ["sunny"]}
+          },
+          required: ["city", "temperature", "condition"],
+          additionalProperties: false
+        }
+      }
+    }
+  }'
+)"
+curl -fsS --max-time 300 "$url/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "$schema_payload" >"$smoke_tmp/schema.json"
+jq -e '
+  .choices[0].finish_reason == "stop" and
+  (.choices[0].message.content | fromjson) == {
+    city: "Taipei", temperature: 27, condition: "sunny"
+  }
+' "$smoke_tmp/schema.json" >/dev/null
+
+tool_payload="$(
+  jq -cn --arg model "$model" '{
+    model: $model,
+    messages: [{role: "user", content: "Call lookup_weather for Taipei in metric units."}],
+    temperature: 0,
+    max_tokens: 96,
+    stream: true,
+    response_format: {type: "text"},
+    tools: [{
+      type: "function",
+      function: {
+        name: "lookup_weather",
+        description: "Look up weather",
+        strict: true,
+        parameters: {
+          type: "object",
+          properties: {
+            city: {type: "string"},
+            units: {type: "string", enum: ["metric", "imperial"]}
+          },
+          required: ["city", "units"],
+          additionalProperties: false
+        }
+      }
+    }],
+    tool_choice: {type: "function", function: {name: "lookup_weather"}},
+    parallel_tool_calls: false
+  }'
+)"
+curl -fsS -N --no-buffer --max-time 300 "$url/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "$tool_payload" >"$smoke_tmp/tool.sse"
+grep -q '^data: \[DONE\]$' "$smoke_tmp/tool.sse"
+sed -n 's/^data: //p' "$smoke_tmp/tool.sse" |
+  grep -v '^\[DONE\]$' |
+  jq -s -e '
+    ([.[] | .choices[0].delta.tool_calls[0].function.arguments? // empty]
+      | join("") | fromjson) as $arguments |
+    $arguments == {city: "Taipei", units: "metric"} and
+    (.[-1].choices[0].finish_reason == "tool_calls")
+  ' >/dev/null
+
+invalid_payload="$(
+  jq -cn --arg model "$model" '{
+    model: $model,
+    messages: [{role: "user", content: "Return x."}],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "invalid_strict_schema",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {x: {type: "string"}},
+          additionalProperties: false
+        }
+      }
+    }
+  }'
+)"
+invalid_status="$(
+  curl -sS --max-time 30 -o "$smoke_tmp/invalid.json" -w '%{http_code}' \
+    "$url/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "$invalid_payload"
+)"
+[[ "$invalid_status" == 400 ]]
+jq -e '
+  .error.type == "invalid_request_error" and
+  .error.param == "response_format.json_schema.schema"
+' "$smoke_tmp/invalid.json" >/dev/null
+
+echo "api_constrained_smoke json_schema=true strict_tool_stream=true validation=true model=$model"

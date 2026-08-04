@@ -44,6 +44,35 @@ release_need sha256sum
 release_need python3
 release_need install
 
+prepare_pinned_source_dependencies() {
+  local git_root=""
+  if command -v git >/dev/null 2>&1; then
+    git_root="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$git_root" &&
+    "$(cd "$git_root" && pwd -P)" == "$(cd "$repo_root" && pwd -P)" ]]; then
+    echo "== preparing pinned source dependencies =="
+    git -C "$repo_root" submodule sync -- \
+      third_party/sparkinfer third_party/xgrammar
+    git -C "$repo_root" submodule update --init --checkout -- \
+      third_party/sparkinfer third_party/xgrammar
+    git -C "$repo_root/third_party/xgrammar" submodule sync -- \
+      3rdparty/dlpack
+    git -C "$repo_root/third_party/xgrammar" submodule update --init --checkout -- \
+      3rdparty/dlpack
+  fi
+
+  [[ -f "$repo_root/third_party/sparkinfer/sparkinfer/__init__.py" ]] ||
+    release_die "SparkInfer source is missing; initialize third_party/sparkinfer"
+  [[ -f "$repo_root/third_party/xgrammar/include/xgrammar/compiler.h" ]] ||
+    release_die "XGrammar source is missing; initialize third_party/xgrammar"
+  [[ -f "$repo_root/third_party/xgrammar/3rdparty/dlpack/include/dlpack/dlpack.h" ]] ||
+    release_die "XGrammar DLPack source is missing; initialize third_party/xgrammar/3rdparty/dlpack"
+}
+
+prepare_pinned_source_dependencies
+
 docker info >/dev/null 2>&1 || release_die "local Docker daemon is unavailable"
 source_manifest="${GLMRT_RELEASE_SOURCE_MANIFEST:-}"
 source_manifest_sha256=""
@@ -94,6 +123,9 @@ sparkinfer_commit="$(
     --lock "$repo_root/third_party/sparkinfer.lock.json" \
     --print-revision
 )"
+python3 "$repo_root/scripts/verify-xgrammar-source.py" \
+  --source "$repo_root/third_party/xgrammar" \
+  --lock "$repo_root/third_party/xgrammar.lock.json"
 detected_engine_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)"
 engine_revision_override="${GLMRT_RELEASE_ENGINE_REVISION:-}"
 engine_source_dirty=0
@@ -241,6 +273,13 @@ release_sync --delete --delete-excluded \
   --exclude '*.pyo' \
   "$repo_root/third_party/sparkinfer/" \
   "$seed_host:$remote_dir/third_party/sparkinfer/"
+release_sync --delete --delete-excluded \
+  --exclude '.git' \
+  --exclude '__pycache__/' \
+  --exclude '*.pyc' \
+  --exclude '*.pyo' \
+  "$repo_root/third_party/xgrammar/" \
+  "$seed_host:$remote_dir/third_party/xgrammar/"
 verify_remote_source_manifest
 
 echo "== building Spark development and inference images natively on $seed_host =="
@@ -312,6 +351,15 @@ docker cp \
 docker cp \
   "$coordinator_container:/opt/glmrt/share/SPARKINFER_SHA256SUMS" \
   "$repo_root/dist/coordinator/SPARKINFER_SHA256SUMS"
+docker cp \
+  "$coordinator_container:/opt/glmrt/share/XGRAMMAR_PROVENANCE.json" \
+  "$repo_root/dist/coordinator/XGRAMMAR_PROVENANCE.json"
+docker cp \
+  "$coordinator_container:/opt/glmrt/share/licenses/xgrammar/LICENSE" \
+  "$repo_root/dist/coordinator/XGRAMMAR_LICENSE"
+docker cp \
+  "$coordinator_container:/opt/glmrt/share/XGRAMMAR_SHA256SUMS" \
+  "$repo_root/dist/coordinator/XGRAMMAR_SHA256SUMS"
 docker rm "$coordinator_container" >/dev/null
 trap - EXIT
 
@@ -338,6 +386,15 @@ docker cp \
 docker cp \
   "$container:/opt/glmrt/share/SPARKINFER_SHA256SUMS" \
   "$destination/SPARKINFER_SHA256SUMS"
+docker cp \
+  "$container:/opt/glmrt/share/XGRAMMAR_PROVENANCE.json" \
+  "$destination/XGRAMMAR_PROVENANCE.json"
+docker cp \
+  "$container:/opt/glmrt/share/licenses/xgrammar/LICENSE" \
+  "$destination/XGRAMMAR_LICENSE"
+docker cp \
+  "$container:/opt/glmrt/share/XGRAMMAR_SHA256SUMS" \
+  "$destination/XGRAMMAR_SHA256SUMS"
 docker rm "$container" >/dev/null
 trap - EXIT
 REMOTE
@@ -359,6 +416,7 @@ for role in coordinator spark-expert; do
   (
     cd "$repo_root/dist/$role"
     sha256sum -c SPARKINFER_SHA256SUMS
+    sha256sum -c XGRAMMAR_SHA256SUMS
   )
 done
 (
@@ -369,11 +427,17 @@ done
     coordinator/SPARKINFER_PROVENANCE.json \
     coordinator/SPARKINFER_LICENSE \
     coordinator/SPARKINFER_SHA256SUMS \
+    coordinator/XGRAMMAR_PROVENANCE.json \
+    coordinator/XGRAMMAR_LICENSE \
+    coordinator/XGRAMMAR_SHA256SUMS \
     spark-expert/glmrt spark-expert/libglmrt_native.so \
     spark-expert/THIRD_PARTY_NOTICES.md \
     spark-expert/SPARKINFER_PROVENANCE.json \
     spark-expert/SPARKINFER_LICENSE \
     spark-expert/SPARKINFER_SHA256SUMS \
+    spark-expert/XGRAMMAR_PROVENANCE.json \
+    spark-expert/XGRAMMAR_LICENSE \
+    spark-expert/XGRAMMAR_SHA256SUMS \
     "${dist_source_manifest[@]}" >SHA256SUMS
   sha256sum -c SHA256SUMS
 )

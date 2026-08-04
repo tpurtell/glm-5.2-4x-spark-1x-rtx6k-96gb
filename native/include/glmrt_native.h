@@ -19,6 +19,33 @@ typedef enum glmrt_status_t {
   GLMRT_STATUS_NCCL_UNAVAILABLE = 8,
 } glmrt_status_t;
 
+typedef enum glmrt_xgrammar_kind_t {
+  GLMRT_XGRAMMAR_JSON_OBJECT = 1,
+  GLMRT_XGRAMMAR_JSON_SCHEMA = 2,
+  GLMRT_XGRAMMAR_STRUCTURAL_TAG = 3,
+} glmrt_xgrammar_kind_t;
+
+glmrt_status_t glmrt_xgrammar_compiler_create(
+    const char* tokenizer_json_path, size_t vocab_size, const int32_t* stop_token_ids,
+    size_t stop_token_count, void** out_compiler, char* error, size_t error_bytes);
+glmrt_status_t glmrt_xgrammar_compiler_destroy(void* compiler);
+glmrt_status_t glmrt_xgrammar_compile(
+    void* compiler, glmrt_xgrammar_kind_t kind, const char* grammar_json, int strict,
+    void** out_grammar, char* error, size_t error_bytes);
+glmrt_status_t glmrt_xgrammar_grammar_destroy(void* grammar);
+glmrt_status_t glmrt_xgrammar_matcher_create(
+    const void* grammar, void** out_matcher, char* error, size_t error_bytes);
+glmrt_status_t glmrt_xgrammar_matcher_fork(
+    const void* matcher, void** out_matcher, char* error, size_t error_bytes);
+glmrt_status_t glmrt_xgrammar_matcher_destroy(void* matcher);
+glmrt_status_t glmrt_xgrammar_matcher_fill_bitmask(
+    void* matcher, uint32_t* bitmask, size_t bitmask_words, int* out_needs_mask,
+    char* error, size_t error_bytes);
+glmrt_status_t glmrt_xgrammar_matcher_accept_token(
+    void* matcher, uint32_t token_id, int* out_accepted, char* error, size_t error_bytes);
+glmrt_status_t glmrt_xgrammar_matcher_is_completed(
+    const void* matcher, int* out_completed, char* error, size_t error_bytes);
+
 typedef enum glmrt_device_buffer_flags_t {
   GLMRT_DEVICE_BUFFER_FLAG_NONE = 0,
   GLMRT_DEVICE_BUFFER_FLAG_HOST_FALLBACK = 1,

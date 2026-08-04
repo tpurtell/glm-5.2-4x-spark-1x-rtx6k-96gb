@@ -51,6 +51,8 @@ pub(in crate::commands::real_full) const CUDA_REFERENCE_LM_HEAD_SAMPLE_TOPK_TOPP
     &str = "cuda-reference-lm-head-sample-topk-topp-bf16-preloaded-resident-weight";
 pub(in crate::commands::real_full) const TRITON_LM_HEAD_SAMPLE_TOPK_TOPP_BF16_PRELOADED_RESIDENT_WEIGHT_BACKEND:
     &str = "triton-lm-head-sample-topk-topp-bf16-preloaded-resident-weight";
+pub(in crate::commands::real_full) const TRITON_CONSTRAINED_LM_HEAD_SAMPLE_TOPK_TOPP_BF16_PRELOADED_RESIDENT_WEIGHT_BACKEND:
+    &str = "triton-constrained-lm-head-sample-topk-topp-bf16-preloaded-resident-weight";
 const CUDA_LOGITS_SAMPLE_TOPK_TOPP_CUB_TEMP_STORAGE_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -429,6 +431,57 @@ pub(in crate::commands::real_full) fn lm_head_argmax_sample_topk_topp_bf16_prelo
         top_p,
         view,
         true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::commands::real_full) fn lm_head_constrained_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_input(
+    lm_head_name: &str,
+    hidden: &DeviceBf16Output,
+    random_uniforms: &[f32],
+    token_bitmasks: &[u32],
+    full_vocab: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+) -> Result<LogitsArgmaxSampleTopKToppOutput> {
+    validate_resident_weight_name(lm_head_name)?;
+    let view = validate_lm_head_preloaded_bf16_device_input(hidden, full_vocab, 0, full_vocab)?;
+    validate_lm_head_sampler_options(
+        random_uniforms,
+        hidden.rows,
+        full_vocab,
+        temperature,
+        top_k,
+        top_p,
+    )?;
+    let mask_words = full_vocab.div_ceil(u32::BITS as usize);
+    anyhow::ensure!(
+        token_bitmasks.len() == hidden.rows * mask_words,
+        "constrained lm_head token bitmask has {} words; expected {} rows * {} words",
+        token_bitmasks.len(),
+        hidden.rows,
+        mask_words,
+    );
+    anyhow::ensure!(
+        cuda_reference_kernels_enabled(),
+        "constrained preloaded resident BF16 lm_head sampler requires {REAL_FULL_CUDA_REFERENCE_KERNELS_ENV}=1"
+    );
+    let graph_key = coord_terminal_lm_head_graph_key(hidden.rows)?
+        .context("constrained lm_head sampling requires a terminal CUDA graph shape")?;
+    cuda_lm_head_constrained_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_input_triton_graph_slot(
+        &graph_key,
+        lm_head_name,
+        hidden.buffer(),
+        random_uniforms,
+        token_bitmasks,
+        hidden.rows,
+        hidden.values_per_row,
+        full_vocab,
+        temperature,
+        top_k,
+        top_p,
+        view,
     )
 }
 
@@ -1860,6 +1913,207 @@ fn launch_triton_lm_head_sample_topk_topp_bf16_graph_capture(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn capture_or_update_terminal_triton_constrained_lm_head_sample_topk_topp_bf16_graph(
+    library: &'static NativeLibrary,
+    slot: &mut CoordinatorCudaGraphWorkspaceSlot,
+    signature: CoordinatorCudaGraphSignature,
+    hidden_buffer: GlmrtDeviceBuffer,
+    lm_head_buffer: GlmrtDeviceBuffer,
+    random_buffer: GlmrtDeviceBuffer,
+    token_bitmask_buffer: GlmrtDeviceBuffer,
+    logits_buffer: GlmrtDeviceBuffer,
+    candidate_score_buffer: GlmrtDeviceBuffer,
+    candidate_index_buffer: GlmrtDeviceBuffer,
+    argmax_index_buffer: GlmrtDeviceBuffer,
+    argmax_score_buffer: GlmrtDeviceBuffer,
+    index_buffer: GlmrtDeviceBuffer,
+    score_buffer: GlmrtDeviceBuffer,
+    rows: usize,
+    hidden_dim: usize,
+    vocab: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    label: &'static str,
+) -> Result<()> {
+    let program = CoordinatorCudaGraphProgram::TerminalTritonConstrainedLmHeadSampleTopKToppBf16;
+    if !slot.has_captured_graph(program, signature) {
+        slot.stream_synchronize()
+            .with_context(|| format!("synchronizing {label} inputs before Triton warmup"))?;
+        launch_triton_constrained_lm_head_sample_topk_topp_bf16_graph_capture(
+            slot.stream_ptr(),
+            hidden_buffer,
+            lm_head_buffer,
+            random_buffer,
+            token_bitmask_buffer,
+            logits_buffer,
+            candidate_score_buffer,
+            candidate_index_buffer,
+            argmax_index_buffer,
+            argmax_score_buffer,
+            index_buffer,
+            score_buffer,
+            rows,
+            hidden_dim,
+            vocab,
+            temperature,
+            top_k,
+            top_p,
+        )
+        .with_context(|| format!("warming Triton {label} graph capture"))?;
+        slot.stream_synchronize()
+            .with_context(|| format!("synchronizing {label} Triton warmup"))?;
+        slot.capture_graph(
+            library,
+            program,
+            signature,
+            |_library, cuda_stream, _workspace| {
+                launch_triton_constrained_lm_head_sample_topk_topp_bf16_graph_capture(
+                    cuda_stream,
+                    hidden_buffer,
+                    lm_head_buffer,
+                    random_buffer,
+                    token_bitmask_buffer,
+                    logits_buffer,
+                    candidate_score_buffer,
+                    candidate_index_buffer,
+                    argmax_index_buffer,
+                    argmax_score_buffer,
+                    index_buffer,
+                    score_buffer,
+                    rows,
+                    hidden_dim,
+                    vocab,
+                    temperature,
+                    top_k,
+                    top_p,
+                )
+                .with_context(|| format!("capturing Triton {label}"))?;
+                Ok(())
+            },
+        )?;
+    }
+    slot.launch_captured_graph(library, program, signature)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_triton_constrained_lm_head_sample_topk_topp_bf16_graph_capture(
+    cuda_stream: *mut c_void,
+    hidden_buffer: GlmrtDeviceBuffer,
+    lm_head_buffer: GlmrtDeviceBuffer,
+    random_buffer: GlmrtDeviceBuffer,
+    token_bitmask_buffer: GlmrtDeviceBuffer,
+    logits_buffer: GlmrtDeviceBuffer,
+    candidate_score_buffer: GlmrtDeviceBuffer,
+    candidate_index_buffer: GlmrtDeviceBuffer,
+    argmax_index_buffer: GlmrtDeviceBuffer,
+    argmax_score_buffer: GlmrtDeviceBuffer,
+    index_buffer: GlmrtDeviceBuffer,
+    score_buffer: GlmrtDeviceBuffer,
+    rows: usize,
+    hidden_dim: usize,
+    vocab: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+) -> Result<()> {
+    let buffers = [
+        PythonDeviceBufferArg {
+            name: "hidden",
+            ptr: hidden_buffer.ptr,
+            bytes: hidden_buffer.bytes,
+            device_id: hidden_buffer.device_id,
+            flags: hidden_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "lm_head",
+            ptr: lm_head_buffer.ptr,
+            bytes: lm_head_buffer.bytes,
+            device_id: lm_head_buffer.device_id,
+            flags: lm_head_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "random_uniforms",
+            ptr: random_buffer.ptr,
+            bytes: random_buffer.bytes,
+            device_id: random_buffer.device_id,
+            flags: random_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "token_bitmask",
+            ptr: token_bitmask_buffer.ptr,
+            bytes: token_bitmask_buffer.bytes,
+            device_id: token_bitmask_buffer.device_id,
+            flags: token_bitmask_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "logits",
+            ptr: logits_buffer.ptr,
+            bytes: logits_buffer.bytes,
+            device_id: logits_buffer.device_id,
+            flags: logits_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "candidate_scores",
+            ptr: candidate_score_buffer.ptr,
+            bytes: candidate_score_buffer.bytes,
+            device_id: candidate_score_buffer.device_id,
+            flags: candidate_score_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "candidate_indices",
+            ptr: candidate_index_buffer.ptr,
+            bytes: candidate_index_buffer.bytes,
+            device_id: candidate_index_buffer.device_id,
+            flags: candidate_index_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "out_argmax_indices",
+            ptr: argmax_index_buffer.ptr,
+            bytes: argmax_index_buffer.bytes,
+            device_id: argmax_index_buffer.device_id,
+            flags: argmax_index_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "out_argmax_scores",
+            ptr: argmax_score_buffer.ptr,
+            bytes: argmax_score_buffer.bytes,
+            device_id: argmax_score_buffer.device_id,
+            flags: argmax_score_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "out_indices",
+            ptr: index_buffer.ptr,
+            bytes: index_buffer.bytes,
+            device_id: index_buffer.device_id,
+            flags: index_buffer.flags,
+        },
+        PythonDeviceBufferArg {
+            name: "out_scores",
+            ptr: score_buffer.ptr,
+            bytes: score_buffer.bytes,
+            device_id: score_buffer.device_id,
+            flags: score_buffer.flags,
+        },
+    ];
+    let kwargs = [
+        ("rows", PythonKernelArg::Usize(rows)),
+        ("hidden_dim", PythonKernelArg::Usize(hidden_dim)),
+        ("vocab", PythonKernelArg::Usize(vocab)),
+        ("temperature", PythonKernelArg::F64(temperature as f64)),
+        ("top_k", PythonKernelArg::Usize(top_k)),
+        ("top_p", PythonKernelArg::F64(top_p as f64)),
+    ];
+    launch_python_kernel(PythonGraphCaptureLaunch {
+        module: "triton_sampling_capture",
+        function: "capture_lm_head_constrained_sample_topk_topp",
+        cuda_stream,
+        buffers: &buffers,
+        kwargs: &kwargs,
+    })
+}
+
 pub(in crate::commands::real_full) fn lm_head_output_bytes(
     rows: usize,
     context: &str,
@@ -1989,6 +2243,27 @@ fn triton_lm_head_sampler_buffer_identity(
                 ^ ((buffer.device_id as usize) << 1)
         },
     )
+}
+
+fn triton_constrained_lm_head_sampler_buffer_identity(
+    hidden_buffer: GlmrtDeviceBuffer,
+    lm_head_buffer: GlmrtDeviceBuffer,
+    random_buffer: GlmrtDeviceBuffer,
+    token_bitmask_buffer: GlmrtDeviceBuffer,
+) -> usize {
+    [
+        hidden_buffer,
+        lm_head_buffer,
+        random_buffer,
+        token_bitmask_buffer,
+    ]
+    .iter()
+    .fold(0xa076_1d64_78bd_642f_usize, |acc, buffer| {
+        acc.rotate_left(9)
+            ^ (buffer.ptr as usize)
+            ^ buffer.bytes.rotate_left(6)
+            ^ ((buffer.device_id as usize) << 1)
+    })
 }
 
 fn device_buffer_slice(
@@ -3030,6 +3305,322 @@ fn cuda_lm_head_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_in
                         .collect(),
                     scores: f32_vec_from_bytes(&scratch.sample_score)?,
                     backend: TRITON_LM_HEAD_SAMPLE_TOPK_TOPP_BF16_PRELOADED_RESIDENT_WEIGHT_BACKEND,
+                },
+            })
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cuda_lm_head_constrained_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_input_triton_graph_slot(
+    graph_key: &CoordinatorGraphKey,
+    lm_head_name: &str,
+    hidden_buffer: GlmrtDeviceBuffer,
+    random_uniforms: &[f32],
+    token_bitmasks: &[u32],
+    rows: usize,
+    hidden_dim: usize,
+    vocab: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    view: LmHeadResidentView,
+) -> Result<LogitsArgmaxSampleTopKToppOutput> {
+    anyhow::ensure!(
+        triton_lm_head_sampler_supported(graph_key, rows, hidden_dim, vocab, top_k),
+        "constrained Triton combined lm_head graph does not support the requested shape"
+    );
+    let mask_words = vocab.div_ceil(u32::BITS as usize);
+    anyhow::ensure!(
+        token_bitmasks.len() == rows * mask_words,
+        "constrained Triton lm_head received {} mask words for {rows}x{mask_words}",
+        token_bitmasks.len(),
+    );
+    for (row, mask) in token_bitmasks.chunks_exact(mask_words).enumerate() {
+        anyhow::ensure!(
+            mask.iter().any(|word| *word != 0),
+            "constrained Triton lm_head token bitmask row {row} permits no tokens"
+        );
+    }
+    let execution_rows = triton_lm_head_execution_rows(rows);
+    anyhow::ensure!(
+        execution_rows <= graph_key.row_bucket.row_capacity,
+        "constrained Triton lm_head execution rows {execution_rows} exceed graph capacity {}",
+        graph_key.row_bucket.row_capacity
+    );
+    let mut padded_random_uniforms = [0.0_f32; TRITON_LM_HEAD_MTP_EXECUTION_ROWS];
+    let execution_random_uniforms = if execution_rows == rows {
+        random_uniforms
+    } else {
+        padded_random_uniforms.fill(random_uniforms.last().copied().unwrap_or(0.5));
+        padded_random_uniforms[..rows].copy_from_slice(random_uniforms);
+        &padded_random_uniforms[..execution_rows]
+    };
+    let mut padded_token_bitmasks = Vec::new();
+    let execution_token_bitmasks = if execution_rows == rows {
+        token_bitmasks
+    } else {
+        padded_token_bitmasks.reserve(execution_rows * mask_words);
+        padded_token_bitmasks.extend_from_slice(token_bitmasks);
+        let last_row = &token_bitmasks[(rows - 1) * mask_words..rows * mask_words];
+        for _ in rows..execution_rows {
+            padded_token_bitmasks.extend_from_slice(last_row);
+        }
+        padded_token_bitmasks.as_slice()
+    };
+    let random_bytes = std::mem::size_of_val(execution_random_uniforms);
+    let graph_random_bytes = graph_key
+        .row_bucket
+        .row_capacity
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("constrained Triton lm_head random bytes overflow usize")?;
+    anyhow::ensure!(
+        random_bytes <= graph_random_bytes,
+        "constrained Triton lm_head random bytes exceed graph capacity"
+    );
+    let graph_mask_bytes = graph_key
+        .row_bucket
+        .row_capacity
+        .checked_mul(mask_words)
+        .and_then(|words| words.checked_mul(std::mem::size_of::<u32>()))
+        .context("constrained Triton lm_head token bitmask bytes overflow usize")?;
+    anyhow::ensure!(
+        std::mem::size_of_val(execution_token_bitmasks) <= graph_mask_bytes,
+        "constrained Triton lm_head mask exceeds graph capacity"
+    );
+    let (index_bytes, score_bytes) =
+        lm_head_output_bytes(rows, "constrained Triton combined lm_head argmax+sampler")?;
+    let (graph_index_bytes, graph_score_bytes) = lm_head_graph_output_bytes(
+        graph_key,
+        "constrained Triton combined lm_head argmax+sampler",
+    )?;
+    let graph_argmax_bytes = graph_index_bytes
+        .checked_add(graph_score_bytes)
+        .context("constrained Triton combined lm_head argmax output bytes overflow usize")?;
+    let lm_head_buffer = preloaded_resident_weight_device_buffer_view(
+        lm_head_name,
+        view.full_bytes,
+        view.offset_bytes,
+        view.view_bytes,
+    )?;
+    anyhow::ensure!(
+        hidden_buffer.device_id == lm_head_buffer.device_id,
+        "constrained Triton lm_head buffers are on different devices: hidden={} lm_head={}",
+        hidden_buffer.device_id,
+        lm_head_buffer.device_id
+    );
+    let active_hidden_bytes = rows
+        .checked_mul(hidden_dim)
+        .and_then(|values| values.checked_mul(std::mem::size_of::<u16>()))
+        .context("constrained Triton lm_head active hidden bytes overflow usize")?;
+    let graph_hidden_bytes = graph_key
+        .row_bucket
+        .row_capacity
+        .checked_mul(hidden_dim)
+        .and_then(|values| values.checked_mul(std::mem::size_of::<u16>()))
+        .context("constrained Triton lm_head staged hidden bytes overflow usize")?;
+
+    with_coordinator_cuda_graph_slot(graph_key, |library, slot| {
+        let cuda_stream = slot.stream_ptr();
+        let staged_hidden_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::A,
+            graph_hidden_bytes,
+            "constrained Triton combined lm_head staged hidden",
+        )?;
+        let random_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::C,
+            graph_random_bytes,
+            "constrained Triton combined lm_head random uniforms",
+        )?;
+        let sample_index_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::D,
+            graph_index_bytes,
+            "constrained Triton combined lm_head sample indices",
+        )?;
+        let sample_score_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::E,
+            graph_score_bytes,
+            "constrained Triton combined lm_head sample scores",
+        )?;
+        let logits_bytes = triton_lm_head_sampler_logits_bytes(
+            graph_key,
+            vocab,
+            "constrained Triton combined lm_head argmax+sampler",
+        )?;
+        let (_vocab_blocks, candidate_score_bytes, candidate_index_bytes, candidate_bytes) =
+            triton_lm_head_sampler_candidate_layout(
+                graph_key,
+                vocab,
+                top_k,
+                "constrained Triton combined lm_head argmax+sampler",
+            )?;
+        let logits_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::B,
+            logits_bytes,
+            "constrained Triton combined lm_head logits",
+        )?;
+        let candidate_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::F,
+            candidate_bytes,
+            "constrained Triton combined lm_head candidates",
+        )?;
+        let candidate_score_buffer = device_buffer_slice(
+            candidate_buffer,
+            0,
+            candidate_score_bytes,
+            "constrained Triton combined lm_head candidate scores",
+        )?;
+        let candidate_index_buffer = device_buffer_slice(
+            candidate_buffer,
+            candidate_score_bytes,
+            candidate_index_bytes,
+            "constrained Triton combined lm_head candidate indices",
+        )?;
+        let argmax_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::G,
+            graph_argmax_bytes,
+            "constrained Triton combined lm_head argmax outputs",
+        )?;
+        let argmax_index_buffer = device_buffer_slice(
+            argmax_buffer,
+            0,
+            graph_index_bytes,
+            "constrained Triton combined lm_head argmax indices",
+        )?;
+        let argmax_score_buffer = device_buffer_slice(
+            argmax_buffer,
+            graph_index_bytes,
+            graph_score_bytes,
+            "constrained Triton combined lm_head argmax scores",
+        )?;
+        let token_bitmask_buffer = slot.buffer(
+            library,
+            CoordinatorCudaScratchSlot::H,
+            graph_mask_bytes,
+            "constrained Triton combined lm_head token bitmasks",
+        )?;
+
+        unsafe {
+            library
+                .copy_d2d_async(
+                    staged_hidden_buffer,
+                    hidden_buffer,
+                    active_hidden_bytes,
+                    cuda_stream,
+                )
+                .context("staging constrained Triton combined lm_head hidden rows")?;
+        }
+        slot.workspace
+            .copy_h2d_to_slot_async(
+                library,
+                CoordinatorCudaScratchSlot::C,
+                f32_bytes(execution_random_uniforms),
+                "constrained Triton combined lm_head random uniforms",
+                cuda_stream,
+            )
+            .context("copying constrained Triton combined lm_head random uniforms")?;
+        slot.workspace
+            .copy_h2d_to_slot_async(
+                library,
+                CoordinatorCudaScratchSlot::H,
+                u32_bytes(execution_token_bitmasks),
+                "constrained Triton combined lm_head token bitmasks",
+                cuda_stream,
+            )
+            .context("copying constrained Triton combined lm_head token bitmasks")?;
+
+        let signature = CoordinatorCudaGraphSignature::triton_lm_head_sample_topk_topp_bf16(
+            execution_rows,
+            hidden_dim,
+            vocab,
+            temperature,
+            top_k,
+            top_p,
+            triton_constrained_lm_head_sampler_buffer_identity(
+                staged_hidden_buffer,
+                lm_head_buffer,
+                random_buffer,
+                token_bitmask_buffer,
+            ),
+        );
+        capture_or_update_terminal_triton_constrained_lm_head_sample_topk_topp_bf16_graph(
+            library,
+            slot,
+            signature,
+            staged_hidden_buffer,
+            lm_head_buffer,
+            random_buffer,
+            token_bitmask_buffer,
+            logits_buffer,
+            candidate_score_buffer,
+            candidate_index_buffer,
+            argmax_index_buffer,
+            argmax_score_buffer,
+            sample_index_buffer,
+            sample_score_buffer,
+            execution_rows,
+            hidden_dim,
+            vocab,
+            temperature,
+            top_k,
+            top_p,
+            "constrained Triton combined lm_head argmax+top-k/top-p sampler",
+        )?;
+
+        COORDINATOR_LM_HEAD_READBACK_SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.argmax_index.resize(index_bytes, 0);
+            scratch.argmax_score.resize(score_bytes, 0);
+            scratch.sample_index.resize(index_bytes, 0);
+            scratch.sample_score.resize(score_bytes, 0);
+            unsafe {
+                library.copy_d2h_async(
+                    &mut scratch.argmax_index,
+                    argmax_index_buffer,
+                    cuda_stream,
+                )?;
+                library.copy_d2h_async(
+                    &mut scratch.argmax_score,
+                    argmax_score_buffer,
+                    cuda_stream,
+                )?;
+                library.copy_d2h_async(
+                    &mut scratch.sample_index,
+                    sample_index_buffer,
+                    cuda_stream,
+                )?;
+                library.copy_d2h_async(
+                    &mut scratch.sample_score,
+                    sample_score_buffer,
+                    cuda_stream,
+                )?;
+                library
+                    .cuda_stream_synchronize(cuda_stream)
+                    .context("synchronizing constrained Triton combined lm_head sampler")?;
+            }
+            Ok(LogitsArgmaxSampleTopKToppOutput {
+                argmax: LogitsArgmaxOutput {
+                    indices: u32_vec_from_bytes(&scratch.argmax_index)?
+                        .into_iter()
+                        .map(|value| value as usize)
+                        .collect(),
+                    scores: f32_vec_from_bytes(&scratch.argmax_score)?,
+                    backend: TRITON_CONSTRAINED_LM_HEAD_SAMPLE_TOPK_TOPP_BF16_PRELOADED_RESIDENT_WEIGHT_BACKEND,
+                },
+                sampler: LogitsSampleTopKToppOutput {
+                    indices: u32_vec_from_bytes(&scratch.sample_index)?
+                        .into_iter()
+                        .map(|value| value as usize)
+                        .collect(),
+                    scores: f32_vec_from_bytes(&scratch.sample_score)?,
+                    backend: TRITON_CONSTRAINED_LM_HEAD_SAMPLE_TOPK_TOPP_BF16_PRELOADED_RESIDENT_WEIGHT_BACKEND,
                 },
             })
         })

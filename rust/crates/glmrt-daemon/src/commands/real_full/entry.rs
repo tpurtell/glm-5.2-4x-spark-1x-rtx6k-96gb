@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use glmrt_core::{
     coordinator_graph_bucket_for_active_rows, KvCacheConfig, KvCacheDType,
-    MlaKvCacheRepresentation, TensorCatalog, COORDINATOR_GRAPH_PREFILL_BUCKET_ROWS, EXPERT_HOSTS,
-    GLM52_NUM_HIDDEN_LAYERS,
+    MlaKvCacheRepresentation, TensorCatalog, TensorRole, COORDINATOR_GRAPH_PREFILL_BUCKET_ROWS,
+    EXPERT_HOSTS, GLM52_NUM_HIDDEN_LAYERS,
 };
 use glmrt_loader::{decode_tokenizer_ids, LoadedTokenizer};
 use glmrt_transport::{expert_protocol_v2_compact_id, TcpProtocolV2HostBatchTarget};
@@ -22,6 +22,9 @@ use crate::commands::model_artifacts::{read_expert_owner_lookup, ExpertOwnerLook
 use crate::python_graph_capture::coordinator_python_capture_enabled;
 
 use super::constants::REAL_GLM_FULL_BLOCKER;
+use super::constraint::{
+    RealFullConstraintBranch, RealFullConstraintCompiler, RealFullConstraintState,
+};
 use super::coordinator_kernels::{
     audit_glm_dsa_nvfp4_short_k_prefill_graph_retention,
     clear_transient_coordinator_owned_device_buffers, coordinator_owned_device_buffer_bank_scope,
@@ -44,8 +47,9 @@ use super::layer_blocks::SparkLayerBlock;
 use super::mtp::{
     prewarm_real_full_paired_target_token_sample_rows, prewarm_real_full_target_sampler_capacity,
     real_full_device_hidden_row, real_full_device_hidden_rows, real_full_mtp_draft_token,
-    real_full_mtp_envelope_device_hidden, real_full_mtp_shifted_input_token_ids,
-    real_full_target_hidden_for_mtp, real_full_target_token_samples,
+    real_full_mtp_draft_token_constrained, real_full_mtp_envelope_device_hidden,
+    real_full_mtp_shifted_input_token_ids, real_full_target_hidden_for_mtp,
+    real_full_target_token_samples, real_full_target_token_samples_constrained,
     real_full_target_token_samples_pair, real_full_target_token_samples_with_options,
     RealFullMtpDraftToken,
 };
@@ -116,6 +120,42 @@ fn request_sampling_uniforms(
                 .random_uniform(start_decode_step.saturating_add(row))
         })
         .collect()
+}
+
+fn real_full_constraint_target_samples(
+    catalog: &TensorCatalog,
+    state: &BudgetedRealFullSchedulerExecutionState,
+    request: &glmrt_api::RealFullRequest,
+    target_hidden: &DeviceBf16Output,
+    suffix_rows: usize,
+    draft_token_ids: &[usize],
+) -> Result<Option<RealLmHeadBatchScoreForHidden>> {
+    let Some(constraint) = state.constraint.as_ref() else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        suffix_rows == draft_token_ids.len() + 1,
+        "constrained target suffix has {suffix_rows} rows for {} speculative drafts",
+        draft_token_ids.len()
+    );
+    let masks = constraint
+        .masks_for_draft(draft_token_ids)
+        .context("building constrained target sampling masks")?;
+    let options = request_lm_head_sampling_options_at(request, request.decode_step_index);
+    let random_uniforms = if request.greedy_sampling {
+        vec![options.random_uniform; suffix_rows]
+    } else {
+        request_sampling_uniforms(request, request.decode_step_index, suffix_rows)
+    };
+    real_full_target_token_samples_constrained(
+        catalog,
+        target_hidden,
+        suffix_rows,
+        options,
+        &random_uniforms,
+        &masks,
+    )
+    .map(Some)
 }
 const DEFAULT_REAL_FULL_REQUEST_LONG_PREFIX_TAIL_MERGE_NUMERATOR: usize = 7;
 const DEFAULT_REAL_FULL_REQUEST_LONG_PREFIX_TAIL_MERGE_DENOMINATOR: usize = 4;
@@ -331,6 +371,7 @@ struct RealFullSchedulerRequestExecutor {
     target_kv_radix: Arc<TargetKvRadixManager>,
     sampled_token_text_cache: Mutex<HashMap<usize, String>>,
     tokenizer: Mutex<LoadedTokenizer>,
+    constraint_compiler: RealFullConstraintCompiler,
     kv_snapshot_load: Option<Arc<RealFullKvSnapshot>>,
     kv_snapshot_saves: Vec<RealFullKvSnapshotSave>,
     kv_snapshot_saved: AtomicBool,
@@ -1158,6 +1199,7 @@ struct BudgetedRealFullSchedulerExecutionState {
     graph_bound_arena: bool,
     snapshot_save_ready: bool,
     snapshot_restore_ms: f64,
+    constraint: Option<RealFullConstraintState>,
 }
 
 impl Deref for BudgetedRealFullSchedulerExecutionState {
@@ -1315,6 +1357,21 @@ struct RealFullMtpAcceptance {
     full_match_bonus: bool,
 }
 
+fn constrain_dspark_plan(
+    plan: &mut DsparkDraftPlan,
+    constraint: &RealFullConstraintState,
+) -> Result<()> {
+    let valid = constraint
+        .valid_draft_prefix(&plan.proposal_token_ids)
+        .context("validating dSpark proposal against the active output grammar")?;
+    plan.proposal_token_ids.truncate(valid);
+    plan.conditional_confidence.truncate(valid);
+    plan.selected_drafts = valid;
+    plan.minimum_drafts = plan.minimum_drafts.min(valid);
+    plan.target_batch_rows = valid + 1;
+    Ok(())
+}
+
 impl RealFullSchedulerRequestExecutor {
     fn take_scheduler_state(
         &self,
@@ -1332,6 +1389,16 @@ impl RealFullSchedulerRequestExecutor {
                 return Err(format!(
                     "active real-full sequence {sequence_id} received a second target KV radix reservation"
                 ));
+            }
+            match (state.constraint.as_ref(), request.constraint.as_ref()) {
+                (None, None) => {}
+                (Some(active), Some(requested)) if active.matches_spec(requested) => {}
+                _ => {
+                    states.insert(sequence_id.to_owned(), state);
+                    return Err(format!(
+                        "active real-full sequence {sequence_id} changed its constrained-decoding specification"
+                    ));
+                }
             }
             drop(states);
             let materialization_tokens = request
@@ -1520,9 +1587,16 @@ impl RealFullSchedulerRequestExecutor {
                     graph_bound_arena: canonical_capture_arena,
                     snapshot_save_ready: false,
                     snapshot_restore_ms: 0.0,
+                    constraint: None,
                 }
             }
         };
+        state.constraint = request
+            .constraint
+            .as_ref()
+            .map(|spec| self.constraint_compiler.matcher(Arc::clone(spec)))
+            .transpose()
+            .map_err(format_error_chain)?;
         state._context_reservation = context_reservation;
         state.target_radix_reservation = None;
         state.bound_target_pages = 0;
@@ -1657,6 +1731,7 @@ impl RealFullSchedulerRequestExecutor {
         target_hidden: super::coordinator_kernels::DeviceBf16Output,
         greedy_sampling: bool,
         dispatch_worker: Arc<RealFullSchedulerSparseTcpDispatchWorker>,
+        constraint_branch: Option<&mut RealFullConstraintBranch>,
         state: &mut RealFullSchedulerExecutionState,
     ) -> Result<(
         RealFullMtpDraftToken,
@@ -1686,9 +1761,25 @@ impl RealFullSchedulerRequestExecutor {
         .context("executing real-full MTP draft layer 78")?;
         let layer_ms = elapsed_ms(layer_start);
         let score_start = Instant::now();
-        let (draft, recycle_hidden) =
+        let (draft, recycle_hidden) = if let Some(constraint_branch) = constraint_branch {
+            let masks = constraint_branch
+                .next_mask()
+                .context("building native MTP draft grammar mask")?;
+            let scored = real_full_mtp_draft_token_constrained(
+                &self.catalog,
+                &layer_hidden,
+                greedy_sampling,
+                &masks,
+            )
+            .context("scoring constrained real-full MTP draft token")?;
+            constraint_branch
+                .accept(std::slice::from_ref(&scored.0.token_id))
+                .context("advancing native MTP draft grammar state")?;
+            scored
+        } else {
             real_full_mtp_draft_token(&self.catalog, &layer_hidden, greedy_sampling)
-                .context("scoring real-full MTP draft token")?;
+                .context("scoring real-full MTP draft token")?
+        };
         let score_ms = elapsed_ms(score_start);
         if real_full_request_timing_enabled() || real_full_mtp_probe_enabled() {
             eprintln!(
@@ -1771,12 +1862,21 @@ impl RealFullSchedulerRequestExecutor {
         draft_tokens: usize,
         greedy_sampling: bool,
         dispatch_worker: Arc<RealFullSchedulerSparseTcpDispatchWorker>,
+        mut constraint_branch: Option<&mut RealFullConstraintBranch>,
         state: &mut RealFullSchedulerExecutionState,
     ) -> Result<Vec<RealFullMtpDraftToken>> {
         anyhow::ensure!(
             draft_tokens > 0 && !initial_mtp_input_token_ids.is_empty(),
             "real-full MTP chain requires non-empty input and a positive draft count"
         );
+        if constraint_branch
+            .as_deref()
+            .map(RealFullConstraintBranch::is_completed)
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Ok(Vec::new());
+        }
         let start = Instant::now();
         let initial_rows = initial_mtp_input_token_ids.len();
         // The target model exposes its final-norm hidden state to MTP. Recurrent
@@ -1819,11 +1919,20 @@ impl RealFullSchedulerRequestExecutor {
             final_initial_hidden,
             greedy_sampling,
             Arc::clone(&dispatch_worker),
+            constraint_branch.as_deref_mut(),
             state,
         )?;
         let mut drafts = Vec::with_capacity(draft_tokens);
         let first_token_id = first.token_id;
         drafts.push(first);
+        if constraint_branch
+            .as_deref()
+            .map(RealFullConstraintBranch::is_completed)
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Ok(drafts);
+        }
         if draft_tokens > 1 {
             drafts.extend(self.execute_mtp_recurrent_chain(
                 source_request_id,
@@ -1835,6 +1944,7 @@ impl RealFullSchedulerRequestExecutor {
                 1,
                 greedy_sampling,
                 Arc::clone(&dispatch_worker),
+                constraint_branch.as_deref_mut(),
                 state,
             )?);
         }
@@ -1863,12 +1973,21 @@ impl RealFullSchedulerRequestExecutor {
         draft_tokens: usize,
         greedy_sampling: bool,
         dispatch_worker: Arc<RealFullSchedulerSparseTcpDispatchWorker>,
+        mut constraint_branch: Option<&mut RealFullConstraintBranch>,
         state: &mut RealFullSchedulerExecutionState,
     ) -> Result<Vec<RealFullMtpDraftToken>> {
         anyhow::ensure!(
             draft_tokens > 0 && target_hidden.rows == 1,
             "real-full MTP bridge requires one target-hidden row and a positive draft count"
         );
+        if constraint_branch
+            .as_deref()
+            .map(RealFullConstraintBranch::is_completed)
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Ok(Vec::new());
+        }
         let start = Instant::now();
         let target_hidden = real_full_target_hidden_for_mtp(&target_hidden)
             .context("normalizing target hidden for real-full MTP bridge")?;
@@ -1880,6 +1999,7 @@ impl RealFullSchedulerRequestExecutor {
             target_hidden,
             greedy_sampling,
             Arc::clone(&dispatch_worker),
+            None,
             state,
         )?;
         let drafts = self.execute_mtp_recurrent_chain(
@@ -1892,6 +2012,7 @@ impl RealFullSchedulerRequestExecutor {
             1,
             greedy_sampling,
             dispatch_worker,
+            constraint_branch.as_deref_mut(),
             state,
         )?;
         if real_full_request_timing_enabled() || real_full_mtp_probe_enabled() {
@@ -1920,6 +2041,7 @@ impl RealFullSchedulerRequestExecutor {
         request_step_start: usize,
         greedy_sampling: bool,
         dispatch_worker: Arc<RealFullSchedulerSparseTcpDispatchWorker>,
+        mut constraint_branch: Option<&mut RealFullConstraintBranch>,
         state: &mut RealFullSchedulerExecutionState,
     ) -> Result<Vec<RealFullMtpDraftToken>> {
         let mut drafts = Vec::with_capacity(draft_tokens);
@@ -1939,11 +2061,20 @@ impl RealFullSchedulerRequestExecutor {
                 previous_hidden,
                 greedy_sampling,
                 Arc::clone(&dispatch_worker),
+                constraint_branch.as_deref_mut(),
                 state,
             )?;
             previous_token_id = draft.token_id;
             previous_hidden = layer_hidden;
             drafts.push(draft);
+            if constraint_branch
+                .as_deref()
+                .map(RealFullConstraintBranch::is_completed)
+                .transpose()?
+                .unwrap_or(false)
+            {
+                break;
+            }
         }
         Ok(drafts)
     }
@@ -1963,6 +2094,7 @@ impl RealFullSchedulerRequestExecutor {
                 request.generated_token_ids.is_empty()
                     || !request.greedy_sampling
                     || request.disable_speculation
+                    || request.constraint.is_some()
                     || (real_full_internal_sequence(&request.sequence_id)
                         && !batched_startup_prewarm)
             })
@@ -2531,6 +2663,11 @@ impl RealFullSchedulerRequestExecutor {
         &self,
         mut request: glmrt_api::RealFullRequest,
     ) -> std::result::Result<glmrt_api::RealFullDecodeCycle, String> {
+        if request.constraint.is_some() && self.sparse_tcp_dispatch_worker.is_none() {
+            return Err(
+                "constrained decoding requires the shared sparse TCP dispatch worker".to_owned(),
+            );
+        }
         prewarm_flashinfer_cudnn_mla_suffix_graphs_for_worker().map_err(format_error_chain)?;
         let request_start = Instant::now();
         let request_id = request.request_id.clone();
@@ -2780,7 +2917,7 @@ impl RealFullSchedulerRequestExecutor {
             .map_or(0, |state| state.execution_lane_id + 1);
         let _execution_buffer_bank_scope =
             coordinator_owned_device_buffer_bank_scope(execution_buffer_bank);
-        let pending_mtp_draft_token_ids = if mtp_enabled {
+        let mut pending_mtp_draft_token_ids = if mtp_enabled {
             persistent_state
                 .as_mut()
                 .expect("live sparse MTP has persistent scheduler state")
@@ -2788,6 +2925,15 @@ impl RealFullSchedulerRequestExecutor {
         } else {
             Vec::new()
         };
+        if let Some(constraint) = persistent_state
+            .as_ref()
+            .and_then(|state| state.constraint.as_ref())
+        {
+            let valid = constraint
+                .valid_draft_prefix(&pending_mtp_draft_token_ids)
+                .map_err(format_error_chain)?;
+            pending_mtp_draft_token_ids.truncate(valid);
+        }
         let requested_startup_dspark_drafts =
             real_full_scalar_dspark_prewarm_requested_draft_tokens(
                 &sequence_id,
@@ -2824,6 +2970,12 @@ impl RealFullSchedulerRequestExecutor {
                     .saturating_sub(1);
                 plan.proposal_token_ids.truncate(max_useful_drafts);
             }
+            if let Some(constraint) = persistent_state
+                .as_ref()
+                .and_then(|state| state.constraint.as_ref())
+            {
+                constrain_dspark_plan(plan, constraint).map_err(format_error_chain)?;
+            }
             plan.selected_drafts = plan.proposal_token_ids.len();
             plan.target_batch_rows = plan.selected_drafts + 1;
         }
@@ -2844,7 +2996,11 @@ impl RealFullSchedulerRequestExecutor {
         } else {
             real_full_request_mtp_rows(&request, stateful_decode_step)
         };
-        let mtp_physical_padding_rows = if mtp_enabled {
+        let mtp_physical_padding_rows = if mtp_enabled
+            && persistent_state
+                .as_ref()
+                .is_none_or(|state| state.constraint.is_none())
+        {
             real_full_mtp_physical_padding_rows(
                 pending_mtp_draft_token_ids.len(),
                 real_full_mtp_physical_m2_enabled(),
@@ -2892,7 +3048,10 @@ impl RealFullSchedulerRequestExecutor {
             // still seed the next proposal window. Otherwise one low-confidence
             // decision permanently disables drafting and the recovery probe
             // can never run.
-            || dspark_active;
+            || dspark_active
+            || persistent_state
+                .as_ref()
+                .is_some_and(|state| state.constraint.is_some());
         let dspark_target_hidden_tap_rows =
             if dspark_participating && request.decode_budget.saturating_sub(generated_tokens) > 1 {
                 if generated_tokens == 0
@@ -2996,6 +3155,7 @@ impl RealFullSchedulerRequestExecutor {
             let mut state = persistent_state
                 .take()
                 .expect("shared sparse dispatch has persistent scheduler state");
+            let constrained_sampling = state.constraint.is_some();
             let execution =
                     real_full_scheduler_execution_for_shape_with_shared_sparse_tcp_and_state_device_hidden(
                         self.kv_config.clone(),
@@ -3006,6 +3166,7 @@ impl RealFullSchedulerRequestExecutor {
                         &mut state,
                         retain_target_hidden,
                         run_mtp_probe || initial_mtp_drafts > 0,
+                        constrained_sampling,
                         dspark_target_hidden_tap_rows,
                     );
             let execution = match execution {
@@ -3033,6 +3194,56 @@ impl RealFullSchedulerRequestExecutor {
             let mut cycle_token_ids = Vec::new();
             let mut mtp_terminal_sample = None;
             let mut dspark_cache_update = None;
+            if state.constraint.is_some()
+                && pending_mtp_draft_token_ids.is_empty()
+                && pending_dspark_draft_token_ids.is_empty()
+            {
+                let constrained_hidden = target_hidden
+                    .as_ref()
+                    .context("constrained scalar decode has no retained target hidden row")
+                    .map_err(format_error_chain)?;
+                let constrained_samples = real_full_constraint_target_samples(
+                    &self.catalog,
+                    &state,
+                    &request,
+                    constrained_hidden,
+                    1,
+                    &[],
+                )
+                .map_err(format_error_chain)?
+                .expect("active constraint produces target samples");
+                let sampled_token_id = if request.greedy_sampling {
+                    constrained_samples.top_token_ids[0]
+                } else {
+                    constrained_samples.sampled_token_ids[0]
+                };
+                apply_speculative_terminal_sample_to_report(
+                    &mut report,
+                    &RealFullSpeculativeTerminalSample {
+                        vocab_size: constrained_samples.vocab_size,
+                        top_token_id: constrained_samples.top_token_ids[0],
+                        sampled_token_id,
+                        sample_top_k: if request.greedy_sampling {
+                            1
+                        } else {
+                            constrained_samples.sample_top_k
+                        },
+                        sample_top_p: if request.greedy_sampling {
+                            1.0
+                        } else {
+                            constrained_samples.sample_top_p
+                        },
+                        argmax_backend: constrained_samples.argmax_kernel_backend,
+                        sampler_backend: if request.greedy_sampling {
+                            constrained_samples.argmax_kernel_backend
+                        } else {
+                            constrained_samples.sampler_kernel_backend
+                        },
+                        accepted_draft_tokens: 0,
+                        report_mtp_acceptance: false,
+                    },
+                );
+            }
             if mtp_enabled {
                 if pending_mtp_draft_token_ids.is_empty() {
                     let sampled_token_id = match if request.greedy_sampling {
@@ -3069,6 +3280,12 @@ impl RealFullSchedulerRequestExecutor {
                             sampled_token_id,
                         )
                         .map_err(format_error_chain)?;
+                        let mut draft_constraint = state
+                            .constraint
+                            .as_ref()
+                            .map(|constraint| constraint.draft_branch(&cycle_token_ids))
+                            .transpose()
+                            .map_err(format_error_chain)?;
                         let drafts = self
                             .execute_mtp_chain(
                                 request.request_index,
@@ -3079,7 +3296,8 @@ impl RealFullSchedulerRequestExecutor {
                                 draft_tokens,
                                 request.greedy_sampling,
                                 Arc::clone(dispatch_worker),
-                                &mut state,
+                                draft_constraint.as_mut(),
+                                &mut state.state,
                             )
                             .map_err(format_error_chain)?;
                         state.set_pending_mtp_draft_token_ids(
@@ -3102,9 +3320,24 @@ impl RealFullSchedulerRequestExecutor {
                     };
                     let suffix_rows = decode_rows + mtp_rows;
                     let target_sampling_start = Instant::now();
-                    let target_samples =
-                        real_full_target_token_samples(&self.catalog, &target_hidden, suffix_rows)
-                            .map_err(format_error_chain)?;
+                    let target_samples = match real_full_constraint_target_samples(
+                        &self.catalog,
+                        &state,
+                        &request,
+                        &target_hidden,
+                        suffix_rows,
+                        &pending_mtp_draft_token_ids,
+                    )
+                    .map_err(format_error_chain)?
+                    {
+                        Some(samples) => samples,
+                        None => real_full_target_token_samples(
+                            &self.catalog,
+                            &target_hidden,
+                            suffix_rows,
+                        )
+                        .map_err(format_error_chain)?,
+                    };
                     if request_timing {
                         eprintln!(
                             "real_full_mtp_target_sampling_timing request_id={} rows={} elapsed_ms={:.3}",
@@ -3196,6 +3429,12 @@ impl RealFullSchedulerRequestExecutor {
                             target_suffix_start + boundary_target_index,
                         )
                         .map_err(format_error_chain)?;
+                        let mut draft_constraint = state
+                            .constraint
+                            .as_ref()
+                            .map(|constraint| constraint.draft_branch(&cycle_token_ids))
+                            .transpose()
+                            .map_err(format_error_chain)?;
                         let drafts = if acceptance.full_match_bonus {
                             self.execute_mtp_bridge_chain(
                                 request.request_index,
@@ -3207,7 +3446,8 @@ impl RealFullSchedulerRequestExecutor {
                                 draft_tokens,
                                 request.greedy_sampling,
                                 Arc::clone(dispatch_worker),
-                                &mut state,
+                                draft_constraint.as_mut(),
+                                &mut state.state,
                             )
                         } else {
                             self.execute_mtp_chain(
@@ -3219,7 +3459,8 @@ impl RealFullSchedulerRequestExecutor {
                                 draft_tokens,
                                 request.greedy_sampling,
                                 Arc::clone(dispatch_worker),
-                                &mut state,
+                                draft_constraint.as_mut(),
+                                &mut state.state,
                             )
                         }
                         .map_err(format_error_chain)?;
@@ -3307,22 +3548,37 @@ impl RealFullSchedulerRequestExecutor {
                     let sampled_uniforms = (!request.greedy_sampling).then(|| {
                         request_sampling_uniforms(&request, request.decode_step_index, suffix_rows)
                     });
-                    let target_samples = if let Some(random_uniforms) = sampled_uniforms.as_deref()
+                    let target_samples = match real_full_constraint_target_samples(
+                        &self.catalog,
+                        &state,
+                        &request,
+                        &target_hidden,
+                        suffix_rows,
+                        &pending_dspark_draft_token_ids,
+                    )
+                    .map_err(format_error_chain)?
                     {
-                        real_full_target_token_samples_with_options(
-                            &self.catalog,
-                            &target_hidden,
-                            suffix_rows,
-                            request_lm_head_sampling_options_at(
-                                &request,
-                                request.decode_step_index,
-                            ),
-                            random_uniforms,
-                        )
-                    } else {
-                        real_full_target_token_samples(&self.catalog, &target_hidden, suffix_rows)
-                    }
-                    .map_err(format_error_chain)?;
+                        Some(samples) => samples,
+                        None => if let Some(random_uniforms) = sampled_uniforms.as_deref() {
+                            real_full_target_token_samples_with_options(
+                                &self.catalog,
+                                &target_hidden,
+                                suffix_rows,
+                                request_lm_head_sampling_options_at(
+                                    &request,
+                                    request.decode_step_index,
+                                ),
+                                random_uniforms,
+                            )
+                        } else {
+                            real_full_target_token_samples(
+                                &self.catalog,
+                                &target_hidden,
+                                suffix_rows,
+                            )
+                        }
+                        .map_err(format_error_chain)?,
+                    };
                     let target_token_ids = if request.greedy_sampling {
                         target_samples.top_token_ids.as_slice()
                     } else {
@@ -3447,7 +3703,8 @@ impl RealFullSchedulerRequestExecutor {
                     1,
                     request.greedy_sampling,
                     Arc::clone(dispatch_worker),
-                    &mut state,
+                    None,
+                    &mut state.state,
                 )
                 .map_err(format_error_chain)?;
             }
@@ -3582,6 +3839,22 @@ impl RealFullSchedulerRequestExecutor {
                             step.conditional_confidence,
                         );
                     }
+                }
+            }
+            if let Some(constraint) = state.constraint.as_mut() {
+                if cycle_token_ids.is_empty() {
+                    let emitted_token = report
+                        .terminal_lm_head_sample
+                        .sampled_token_id
+                        .context("constrained decode produced no emitted token")
+                        .map_err(format_error_chain)?;
+                    constraint
+                        .commit(std::slice::from_ref(&emitted_token))
+                        .map_err(format_error_chain)?;
+                } else {
+                    constraint
+                        .commit(&cycle_token_ids)
+                        .map_err(format_error_chain)?;
                 }
             }
             state
@@ -5841,6 +6114,17 @@ pub(crate) fn load_real_full_serving(
     };
     let tokenizer = LoadedTokenizer::from_snapshot(Path::new(&catalog.snapshot_path))
         .context("loading real-full serving tokenizer")?;
+    let constraint_vocab_size = catalog
+        .tensors
+        .iter()
+        .find(|tensor| tensor.role == TensorRole::LmHead)
+        .and_then(|tensor| tensor.shape.first().copied())
+        .context("real-full constrained decoding requires a 2D lm_head tensor")?;
+    let constraint_compiler = RealFullConstraintCompiler::new(
+        Path::new(&catalog.snapshot_path).join("tokenizer.json"),
+        constraint_vocab_size,
+    )
+    .context("configuring lazy real-full constrained decoding")?;
     report_real_full_startup_phase("targets-tokenizer", startup_started, &mut phase_started);
     let kv_snapshot_load_path = optional_nonempty_env_path(REAL_FULL_KV_SNAPSHOT_LOAD_ENV)?;
     let kv_snapshot_save_path = optional_nonempty_env_path(REAL_FULL_KV_SNAPSHOT_SAVE_ENV)?;
@@ -6075,6 +6359,7 @@ pub(crate) fn load_real_full_serving(
         ),
         sampled_token_text_cache: Mutex::new(HashMap::new()),
         tokenizer: Mutex::new(tokenizer),
+        constraint_compiler,
         kv_snapshot_load,
         kv_snapshot_saves,
         kv_snapshot_saved: AtomicBool::new(false),

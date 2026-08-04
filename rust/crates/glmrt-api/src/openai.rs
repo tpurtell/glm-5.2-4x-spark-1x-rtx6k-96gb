@@ -47,9 +47,13 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stop: Option<StopSpec>,
     #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
+    #[serde(default)]
     pub tools: Option<Vec<ChatTool>>,
     #[serde(default)]
     pub tool_choice: Option<ToolChoice>,
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
     #[serde(default)]
@@ -95,6 +99,24 @@ pub enum StopSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    Text,
+    JsonObject,
+    JsonSchema { json_schema: JsonSchemaFormat },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JsonSchemaFormat {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub schema: Value,
+    #[serde(default)]
+    pub strict: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ChatTool {
     #[serde(rename = "type")]
     pub tool_type: String,
@@ -108,6 +130,8 @@ pub struct ChatFunction {
     pub description: Option<String>,
     #[serde(default)]
     pub parameters: Option<Value>,
+    #[serde(default)]
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

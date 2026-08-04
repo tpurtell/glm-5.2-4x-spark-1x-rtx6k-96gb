@@ -1,5 +1,23 @@
 # Third-Party Notices
 
+## XGrammar
+
+GLMRT statically links a pinned XGrammar release for JSON Schema and strict
+tool-call constrained decoding: <https://github.com/mlc-ai/xgrammar>. The
+exact revision, nested DLPack revision, and source-tree digest are recorded in
+`third_party/xgrammar.lock.json` and distributed as
+`XGRAMMAR_PROVENANCE.json`.
+
+Copyright (c) the XGrammar authors and other per-file copyright holders.
+
+SPDX-License-Identifier: Apache-2.0
+
+XGrammar is distributed under the Apache License, Version 2.0. The complete
+root license text is distributed as `XGRAMMAR_LICENSE` in standalone
+artifacts and as `/opt/glmrt/share/licenses/xgrammar/LICENSE` in inference
+images. XGrammar's vendored DLPack headers retain their own Apache-2.0
+copyright and license notices in the pinned source tree.
+
 ## NVIDIA / FlashInfer SM120 sparse MLA decode
 
 `native/cuda/kernels/packed_fp8_mla_exact.cu` is adapted from the NVIDIA

@@ -999,7 +999,7 @@ pub(in crate::commands::real_full) fn real_full_scheduler_execution_for_shape(
     shape: RealFullSchedulerExecutionShape,
 ) -> Result<RealFullSchedulerExecutionDryRun> {
     Ok(real_full_scheduler_execution_for_shape_inner(
-        kv_config, catalog, shape, None, None, false, false, 0,
+        kv_config, catalog, shape, None, None, false, false, false, 0,
     )?
     .0)
 }
@@ -1016,6 +1016,7 @@ pub(in crate::commands::real_full) fn real_full_scheduler_execution_for_shape_wi
         shape,
         None,
         Some(state),
+        false,
         false,
         false,
         0,
@@ -1057,6 +1058,7 @@ pub(in crate::commands::real_full) fn real_full_scheduler_execution_for_shape_wi
     state: &mut RealFullSchedulerExecutionState,
     retain_final_target_device_hidden: bool,
     retain_full_target_device_hidden: bool,
+    defer_terminal_lm_head_sample: bool,
     target_device_hidden_tap_rows: usize,
 ) -> Result<RealFullSchedulerDeviceExecution> {
     validate_scheduler_execution_shape(&shape)?;
@@ -1076,6 +1078,7 @@ pub(in crate::commands::real_full) fn real_full_scheduler_execution_for_shape_wi
             Some(state),
             retain_final_target_device_hidden,
             retain_full_target_device_hidden,
+            defer_terminal_lm_head_sample,
             target_device_hidden_tap_rows,
         )?;
     Ok(RealFullSchedulerDeviceExecution {
@@ -2187,6 +2190,7 @@ fn real_full_scheduler_execution_for_shape_with_sparse_tcp_context(
         shape,
         Some(context),
         state,
+        false,
         false,
         false,
         0,
@@ -3559,6 +3563,7 @@ fn real_full_scheduler_execution_for_shape_inner(
     state: Option<&mut RealFullSchedulerExecutionState>,
     retain_final_target_device_hidden: bool,
     retain_full_target_device_hidden: bool,
+    defer_terminal_lm_head_sample: bool,
     target_device_hidden_tap_rows: usize,
 ) -> Result<(
     RealFullSchedulerExecutionDryRun,
@@ -4067,6 +4072,7 @@ fn real_full_scheduler_execution_for_shape_inner(
     let terminal_lm_head_sample = if scheduler_should_defer_target_lm_head_sample(
         retain_final_target_device_hidden,
         shape.mtp_rows,
+        defer_terminal_lm_head_sample,
     ) {
         scheduler_deferred_target_lm_head_sample(
             numeric_progression_finish
@@ -4298,6 +4304,7 @@ fn finish_stateful_scheduler_execution(
     let terminal_lm_head_sample = if scheduler_should_defer_target_lm_head_sample(
         retain_final_target_device_hidden,
         shape.mtp_rows,
+        false,
     ) {
         scheduler_deferred_target_lm_head_sample(
             numeric_progression_finish
@@ -4859,8 +4866,9 @@ fn scheduler_deferred_target_lm_head_sample(
 fn scheduler_should_defer_target_lm_head_sample(
     retain_final_target_device_hidden: bool,
     mtp_rows: usize,
+    defer_terminal_lm_head_sample: bool,
 ) -> bool {
-    retain_final_target_device_hidden && mtp_rows > 0
+    retain_final_target_device_hidden && (mtp_rows > 0 || defer_terminal_lm_head_sample)
 }
 
 fn scheduler_final_norm_device_hidden(
@@ -5622,10 +5630,17 @@ mod tests {
 
     #[test]
     fn scheduler_defers_only_retained_speculative_target_sampling() {
-        assert!(scheduler_should_defer_target_lm_head_sample(true, 1));
-        assert!(scheduler_should_defer_target_lm_head_sample(true, 15));
-        assert!(!scheduler_should_defer_target_lm_head_sample(true, 0));
-        assert!(!scheduler_should_defer_target_lm_head_sample(false, 15));
+        assert!(scheduler_should_defer_target_lm_head_sample(true, 1, false));
+        assert!(scheduler_should_defer_target_lm_head_sample(
+            true, 15, false
+        ));
+        assert!(!scheduler_should_defer_target_lm_head_sample(
+            true, 0, false
+        ));
+        assert!(scheduler_should_defer_target_lm_head_sample(true, 0, true));
+        assert!(!scheduler_should_defer_target_lm_head_sample(
+            false, 15, true
+        ));
     }
 
     #[test]

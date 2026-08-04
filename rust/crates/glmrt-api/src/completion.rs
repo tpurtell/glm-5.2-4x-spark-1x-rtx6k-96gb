@@ -7,6 +7,7 @@ use crate::backends::{
     real_glm_full_completion, real_glm_slice_completion, synthetic_glm_layer_completion,
     tiny_backend_completion,
 };
+use crate::constrained::request_constraint;
 use crate::metrics::CompletionMetrics;
 use crate::request::{
     prompt_text, real_glm_full_request_prompt_text, request_image_sources, request_max_tokens,
@@ -67,6 +68,13 @@ pub(crate) async fn build_completion(
     let created = unix_timestamp();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let backend = selected_backend(state, &request);
+    let constraint = request_constraint(&request)?;
+    if constraint.is_some() && backend != ApiBackend::RealGlmFull {
+        return Err(crate::invalid_request(
+            "constrained response formats and strict tools require the real GLM full backend",
+            Some("model"),
+        ));
+    }
     let prompt = if backend == ApiBackend::RealGlmFull {
         real_glm_full_request_prompt_text(&request)
     } else {
@@ -116,6 +124,7 @@ pub(crate) async fn build_completion(
                 max_tokens,
                 request_sampling_params(&request),
                 tools_enabled,
+                constraint,
             )
             .await?
         }

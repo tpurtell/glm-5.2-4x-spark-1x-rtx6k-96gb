@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/mlc-ai/xgrammar.git",
+  "revision": "557becfb64c503ae9c04344b0047661f43f44320",
+  "dlpack_revision": "bbd2f4d32427e548797929af08cfe2a9cbb3cf12",
+  "source_tree_sha256": "7fa7462fa24c26e6f51ea20ae4faf4c1a416448d2795f7f588ddd8a39c4185b8"
+}

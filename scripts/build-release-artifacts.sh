@@ -18,12 +18,14 @@ case "$role" in
     coordinator_aot=ON
     w8a16_aot=ON
     nccl=OFF
+    xgrammar=ON
     ;;
   expert)
     sparkinfer_aot=ON
     coordinator_aot=OFF
     w8a16_aot=OFF
     nccl=ON
+    xgrammar=OFF
     ;;
   *)
     echo "ROLE must be coordinator or expert" >&2
@@ -45,6 +47,11 @@ esac
 python3 "$source_dir/scripts/verify-sparkinfer-source.py" \
   --source "$source_dir/third_party/sparkinfer" \
   --lock "$source_dir/third_party/sparkinfer.lock.json"
+if [[ "$xgrammar" == ON ]]; then
+  python3 "$source_dir/scripts/verify-xgrammar-source.py" \
+    --source "$source_dir/third_party/xgrammar" \
+    --lock "$source_dir/third_party/xgrammar.lock.json"
+fi
 
 build_root="$(mktemp -d /tmp/glmrt-release-build.XXXXXX)"
 trap 'rm -rf "$build_root"' EXIT
@@ -78,6 +85,11 @@ python3 "$build_root/source/scripts/verify-sparkinfer-source.py" \
   --source "$build_root/source/third_party/sparkinfer" \
   --lock "$build_root/source/third_party/sparkinfer.lock.json" \
   --require-no-python-cache
+if [[ "$xgrammar" == ON ]]; then
+  python3 "$build_root/source/scripts/verify-xgrammar-source.py" \
+    --source "$build_root/source/third_party/xgrammar" \
+    --lock "$build_root/source/third_party/xgrammar.lock.json"
+fi
 
 export PYO3_PYTHON=python3
 cargo build \
@@ -97,6 +109,9 @@ cmake \
   -DGLMRT_SPARKINFER_SOURCE_DIR="$build_root/source/third_party/sparkinfer" \
   -DGLMRT_SPARKINFER_LOCK_FILE="$build_root/source/third_party/sparkinfer.lock.json" \
   -DGLMRT_ENABLE_NCCL="$nccl" \
+  -DGLMRT_ENABLE_XGRAMMAR="$xgrammar" \
+  -DGLMRT_XGRAMMAR_SOURCE_DIR="$build_root/source/third_party/xgrammar" \
+  -DGLMRT_XGRAMMAR_LOCK_FILE="$build_root/source/third_party/xgrammar.lock.json" \
   -DPython3_EXECUTABLE="$(command -v python3)" \
   -DGLMRT_CUDA_ARCHITECTURES="$cuda_arch"
 cmake --build "$build_root/native"
@@ -110,6 +125,12 @@ install -m 0644 \
 install -m 0644 \
   "$build_root/source/third_party/sparkinfer/LICENSE" \
   "$output_dir/SPARKINFER_LICENSE"
+install -m 0644 \
+  "$build_root/source/third_party/xgrammar/LICENSE" \
+  "$output_dir/XGRAMMAR_LICENSE"
+install -m 0644 \
+  "$build_root/source/third_party/xgrammar.lock.json" \
+  "$output_dir/XGRAMMAR_PROVENANCE.json"
 python3 "$build_root/source/scripts/sparkinfer-release-provenance.py" \
   --source "$build_root/source/third_party/sparkinfer" \
   --lock "$build_root/source/third_party/sparkinfer.lock.json" \
@@ -123,6 +144,11 @@ python3 "$build_root/source/scripts/sparkinfer-release-provenance.py" \
     SPARKINFER_PROVENANCE.json \
     SPARKINFER_LICENSE >SPARKINFER_SHA256SUMS
   sha256sum -c SPARKINFER_SHA256SUMS
+  sha256sum \
+    THIRD_PARTY_NOTICES.md \
+    XGRAMMAR_PROVENANCE.json \
+    XGRAMMAR_LICENSE >XGRAMMAR_SHA256SUMS
+  sha256sum -c XGRAMMAR_SHA256SUMS
 )
 test -x "$output_dir/glmrt"
 test -s "$output_dir/libglmrt_native.so"
@@ -130,3 +156,6 @@ test -s "$output_dir/THIRD_PARTY_NOTICES.md"
 test -s "$output_dir/SPARKINFER_PROVENANCE.json"
 test -s "$output_dir/SPARKINFER_LICENSE"
 test -s "$output_dir/SPARKINFER_SHA256SUMS"
+test -s "$output_dir/XGRAMMAR_PROVENANCE.json"
+test -s "$output_dir/XGRAMMAR_LICENSE"
+test -s "$output_dir/XGRAMMAR_SHA256SUMS"

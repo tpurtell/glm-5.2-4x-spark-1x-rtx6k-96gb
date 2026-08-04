@@ -19,12 +19,14 @@ case "$role" in
     coordinator_aot=ON
     w8a16_aot=ON
     nccl=OFF
+    xgrammar=ON
     ;;
   expert)
     sparkinfer_aot=ON
     coordinator_aot=OFF
     w8a16_aot=OFF
     nccl=ON
+    xgrammar=OFF
     ;;
   *)
     echo "ROLE must be coordinator or expert" >&2
@@ -43,6 +45,11 @@ esac
 python3 "$source_dir/scripts/verify-sparkinfer-source.py" \
   --source "$source_dir/third_party/sparkinfer" \
   --lock "$source_dir/third_party/sparkinfer.lock.json"
+if [[ "$xgrammar" == ON ]]; then
+  python3 "$source_dir/scripts/verify-xgrammar-source.py" \
+    --source "$source_dir/third_party/xgrammar" \
+    --lock "$source_dir/third_party/xgrammar.lock.json"
+fi
 
 mkdir -p "$build_dir" "$output_dir"
 export PYO3_PYTHON=python3
@@ -67,6 +74,9 @@ cmake \
   -DGLMRT_SPARKINFER_SOURCE_DIR="$source_dir/third_party/sparkinfer" \
   -DGLMRT_SPARKINFER_LOCK_FILE="$source_dir/third_party/sparkinfer.lock.json" \
   -DGLMRT_ENABLE_NCCL="$nccl" \
+  -DGLMRT_ENABLE_XGRAMMAR="$xgrammar" \
+  -DGLMRT_XGRAMMAR_SOURCE_DIR="$source_dir/third_party/xgrammar" \
+  -DGLMRT_XGRAMMAR_LOCK_FILE="$source_dir/third_party/xgrammar.lock.json" \
   -DPython3_EXECUTABLE="$(command -v python3)" \
   -DGLMRT_CUDA_ARCHITECTURES="$cuda_arch"
 cmake --build "$build_dir/native"

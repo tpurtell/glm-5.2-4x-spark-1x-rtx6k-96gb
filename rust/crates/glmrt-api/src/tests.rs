@@ -809,8 +809,10 @@ fn base_request(content: &str) -> ChatCompletionRequest {
         top_k: None,
         seed: None,
         stop: None,
+        response_format: None,
         tools: None,
         tool_choice: None,
+        parallel_tool_calls: None,
         thinking: None,
         enable_thinking: None,
         reasoning_effort: None,
@@ -863,6 +865,83 @@ fn request_accepts_openai_max_completion_tokens() {
 }
 
 #[test]
+fn request_validates_openai_json_schema_strict_subset() {
+    let valid: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "answer"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer_1",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "string"},
+                        "details": {
+                            "type": "object",
+                            "properties": {"score": {"type": "number"}},
+                            "required": ["score"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["answer", "details"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    }))
+    .unwrap();
+    validate_request(&valid).unwrap();
+    let prompt = real_glm_full_request_prompt_text(&valid);
+    assert!(prompt.contains("JSON Schema named answer_1"));
+    assert!(prompt.contains("\"additionalProperties\":false"));
+
+    let mut missing_required = valid.clone();
+    let Some(ResponseFormat::JsonSchema { json_schema }) =
+        missing_required.response_format.as_mut()
+    else {
+        panic!("test request has JSON Schema response format")
+    };
+    json_schema.schema["required"] = json!(["answer"]);
+    let error = validate_request(&missing_required).unwrap_err();
+    assert!(error
+        .message
+        .contains("required must contain every property"));
+}
+
+#[test]
+fn request_rejects_competing_response_and_tool_contracts() {
+    let mut request = base_request("answer or call");
+    request.response_format = Some(ResponseFormat::JsonObject);
+    request.tools = Some(vec![lookup_tool()]);
+    let error = validate_request(&request).unwrap_err();
+    assert!(error.message.contains("response_format cannot be combined"));
+
+    request.tool_choice = Some(ToolChoice::Mode("none".to_owned()));
+    validate_request(&request).unwrap();
+}
+
+#[test]
+fn strict_zero_argument_tool_accepts_omitted_parameters() {
+    let mut request = base_request("ping");
+    request.tools = Some(vec![ChatTool {
+        tool_type: "function".to_owned(),
+        function: ChatFunction {
+            name: "ping".to_owned(),
+            description: None,
+            parameters: None,
+            strict: Some(true),
+        },
+    }]);
+    request.tool_choice = Some(ToolChoice::Mode("required".to_owned()));
+    validate_request(&request).unwrap();
+    assert!(crate::constrained::request_constraint(&request)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn historical_zero_argument_tool_calls_accept_omitted_null_or_object_arguments() {
     for arguments in [None, Some(Value::Null), Some(json!({"query": "bird"}))] {
         let mut function = json!({"name": "lookup"});
@@ -907,6 +986,7 @@ fn lookup_tool() -> ChatTool {
                 },
                 "required": ["query"]
             })),
+            strict: None,
         },
     }
 }

@@ -9,6 +9,7 @@ use lm_head::{real_lm_head_default_chunk_probe, real_lm_head_full_vocab_probe};
 pub(in crate::commands::real_full) use lm_head::{
     score_real_lm_head_chunk_for_hidden, score_real_lm_head_full_vocab_for_device_hidden,
     score_real_lm_head_full_vocab_for_device_hidden_rows,
+    score_real_lm_head_full_vocab_for_device_hidden_rows_constrained,
     score_real_lm_head_full_vocab_for_device_hidden_rows_with_options,
     score_real_lm_head_full_vocab_for_device_hidden_with_options,
     score_real_lm_head_full_vocab_for_hidden, RealFullLmHeadSamplingOptions,

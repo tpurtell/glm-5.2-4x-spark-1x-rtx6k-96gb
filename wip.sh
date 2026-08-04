@@ -86,7 +86,7 @@ mkdir -p "$state_dir" "$hf_home"
 
 snapshot_args=(
   -a --delete --delete-excluded
-  --exclude .git/ --exclude .venv/ --exclude .mypy_cache/
+  --exclude .git --exclude .venv/ --exclude .mypy_cache/
   --exclude .pytest_cache/ --exclude .ruff_cache/ --exclude __pycache__/
   --exclude '*.pyc' --exclude '*.pyo' --exclude .glmrt-cache/
   --exclude .glmrt-release/ --exclude .glmrt-release-image/
@@ -103,6 +103,9 @@ install -m 0644 "$RELEASE_CONFIG" "$staging_dir/glmrt.config"
 python3 "$staging_dir/scripts/verify-sparkinfer-source.py" \
   --source "$staging_dir/third_party/sparkinfer" \
   --lock "$staging_dir/third_party/sparkinfer.lock.json"
+python3 "$staging_dir/scripts/verify-xgrammar-source.py" \
+  --source "$staging_dir/third_party/xgrammar" \
+  --lock "$staging_dir/third_party/xgrammar.lock.json"
 
 ensure_local_image() {
   docker image inspect "$COORDINATOR_DOCKER_DEV" >/dev/null 2>&1 ||

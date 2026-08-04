@@ -14,6 +14,7 @@ option(GLMRT_ENABLE_W8A16_AOT "Build coordinator row-major W8A16 Triton AOT kern
 option(GLMRT_ENABLE_FLASHINFER_PACKED_MLA
   "Build the exact grouped-split SM120 packed-FP8 MLA kernel" OFF)
 option(GLMRT_ENABLE_NCCL "Build multi-node NCCL helper components" OFF)
+option(GLMRT_ENABLE_XGRAMMAR "Build constrained-decoding grammar support" ON)
 set(GLMRT_CUDA_ARCHITECTURES "120" CACHE STRING "CUDA architectures for native kernels")
 set(GLMRT_SPARKINFER_SOURCE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/sparkinfer"
@@ -21,6 +22,12 @@ set(GLMRT_SPARKINFER_SOURCE_DIR
 set(GLMRT_SPARKINFER_LOCK_FILE
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/sparkinfer.lock.json"
   CACHE FILEPATH "Provenance lock for GLMRT_SPARKINFER_SOURCE_DIR")
+set(GLMRT_XGRAMMAR_SOURCE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xgrammar"
+  CACHE PATH "Pinned XGrammar source tree")
+set(GLMRT_XGRAMMAR_LOCK_FILE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xgrammar.lock.json"
+  CACHE FILEPATH "Provenance lock for GLMRT_XGRAMMAR_SOURCE_DIR")
 
 if(GLMRT_ENABLE_B12X_AOT)
   message(DEPRECATION
@@ -39,6 +46,57 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(GLMRT_NATIVE_SOURCES src/glmrt_native.cc)
+
+if(GLMRT_ENABLE_XGRAMMAR)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  if(NOT EXISTS "${GLMRT_XGRAMMAR_SOURCE_DIR}/include/xgrammar/compiler.h" OR
+     NOT EXISTS "${GLMRT_XGRAMMAR_SOURCE_DIR}/3rdparty/dlpack/include/dlpack/dlpack.h" OR
+     NOT EXISTS "${GLMRT_XGRAMMAR_SOURCE_DIR}/3rdparty/picojson/picojson.h")
+    message(FATAL_ERROR
+      "Pinned XGrammar source is incomplete under ${GLMRT_XGRAMMAR_SOURCE_DIR}; "
+      "initialize third_party/xgrammar and its nested submodules")
+  endif()
+  set(GLMRT_XGRAMMAR_VERIFY_SCRIPT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/verify-xgrammar-source.py")
+  if(NOT EXISTS "${GLMRT_XGRAMMAR_VERIFY_SCRIPT}")
+    message(FATAL_ERROR
+      "XGrammar source verifier was not found: ${GLMRT_XGRAMMAR_VERIFY_SCRIPT}")
+  endif()
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${GLMRT_XGRAMMAR_VERIFY_SCRIPT}"
+      --source "${GLMRT_XGRAMMAR_SOURCE_DIR}"
+      --lock "${GLMRT_XGRAMMAR_LOCK_FILE}"
+    RESULT_VARIABLE GLMRT_XGRAMMAR_VERIFY_RESULT
+    OUTPUT_VARIABLE GLMRT_XGRAMMAR_VERIFY_OUTPUT
+    ERROR_VARIABLE GLMRT_XGRAMMAR_VERIFY_ERROR
+  )
+  if(NOT GLMRT_XGRAMMAR_VERIFY_RESULT EQUAL 0)
+    message(FATAL_ERROR
+      "XGrammar source verification failed:\n${GLMRT_XGRAMMAR_VERIFY_ERROR}")
+  endif()
+  string(STRIP "${GLMRT_XGRAMMAR_VERIFY_OUTPUT}" GLMRT_XGRAMMAR_VERIFY_OUTPUT)
+  message(STATUS "${GLMRT_XGRAMMAR_VERIFY_OUTPUT}")
+  file(GLOB_RECURSE GLMRT_XGRAMMAR_SOURCES
+    CONFIGURE_DEPENDS
+    "${GLMRT_XGRAMMAR_SOURCE_DIR}/cpp/*.cc"
+  )
+  list(FILTER GLMRT_XGRAMMAR_SOURCES EXCLUDE REGEX "/cpp/tvm_ffi/.*\\.cc$")
+  add_library(glmrt_xgrammar STATIC ${GLMRT_XGRAMMAR_SOURCES})
+  target_include_directories(glmrt_xgrammar
+    PUBLIC "${GLMRT_XGRAMMAR_SOURCE_DIR}/include"
+  )
+  target_include_directories(glmrt_xgrammar SYSTEM PUBLIC
+    "${GLMRT_XGRAMMAR_SOURCE_DIR}/3rdparty/dlpack/include"
+    "${GLMRT_XGRAMMAR_SOURCE_DIR}/3rdparty/picojson"
+  )
+  target_compile_definitions(glmrt_xgrammar PUBLIC
+    XGRAMMAR_ENABLE_CPPTRACE=0
+    XGRAMMAR_ENABLE_INTERNAL_CHECK=0
+  )
+  find_package(Threads REQUIRED)
+  target_link_libraries(glmrt_xgrammar PUBLIC Threads::Threads)
+  list(APPEND GLMRT_NATIVE_SOURCES src/xgrammar_adapter.cc)
+endif()
 
 set(GLMRT_BUILD_SPARKINFER_AOT OFF)
 if(GLMRT_ENABLE_SPARKINFER_AOT OR GLMRT_ENABLE_SPARKINFER_COORDINATOR_AOT OR GLMRT_ENABLE_W8A16_AOT)
@@ -480,6 +538,12 @@ add_library(glmrt_native SHARED ${GLMRT_NATIVE_SOURCES})
 target_include_directories(glmrt_native PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+if(GLMRT_ENABLE_XGRAMMAR)
+  target_link_libraries(glmrt_native PRIVATE glmrt_xgrammar)
+  target_compile_definitions(glmrt_native PRIVATE GLMRT_NATIVE_ENABLE_XGRAMMAR=1)
+else()
+  target_compile_definitions(glmrt_native PRIVATE GLMRT_NATIVE_ENABLE_XGRAMMAR=0)
+endif()
 if(GLMRT_ENABLE_CUDA)
   target_compile_definitions(glmrt_native PRIVATE GLMRT_NATIVE_ENABLE_CUDA=1)
   target_link_libraries(glmrt_native PUBLIC CUDA::cudart CUDA::cublas CUDA::cuda_driver)
@@ -562,6 +626,20 @@ endif()
 
 enable_testing()
 add_test(NAME glmrt_native_selftest COMMAND glmrt_native_selftest)
+
+if(GLMRT_ENABLE_XGRAMMAR)
+  add_executable(glmrt_xgrammar_selftest tests/xgrammar_selftest.cc)
+  target_link_libraries(glmrt_xgrammar_selftest PRIVATE glmrt_native)
+  target_compile_definitions(glmrt_xgrammar_selftest PRIVATE
+    "GLMRT_XGRAMMAR_TEST_TOKENIZER=\"${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/xgrammar_tiny_tokenizer.json\""
+  )
+  if(MSVC)
+    target_compile_options(glmrt_xgrammar_selftest PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(glmrt_xgrammar_selftest PRIVATE -UNDEBUG)
+  endif()
+  add_test(NAME glmrt_xgrammar_selftest COMMAND glmrt_xgrammar_selftest)
+endif()
 
 if(GLMRT_ENABLE_CUDA)
   add_executable(glmrt_cuda_selftest tests/cuda_selftest.cc)

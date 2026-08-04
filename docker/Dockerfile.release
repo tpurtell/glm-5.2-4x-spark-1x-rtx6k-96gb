@@ -91,6 +91,9 @@ COPY .glmrt-release-image/THIRD_PARTY_NOTICES.md /opt/glmrt/share/THIRD_PARTY_NO
 COPY .glmrt-release-image/SPARKINFER_PROVENANCE.json /opt/glmrt/share/SPARKINFER_PROVENANCE.json
 COPY .glmrt-release-image/SPARKINFER_LICENSE /opt/glmrt/share/SPARKINFER_LICENSE
 COPY .glmrt-release-image/SPARKINFER_SHA256SUMS /opt/glmrt/share/SPARKINFER_SHA256SUMS
+COPY .glmrt-release-image/XGRAMMAR_PROVENANCE.json /opt/glmrt/share/XGRAMMAR_PROVENANCE.json
+COPY .glmrt-release-image/XGRAMMAR_LICENSE /opt/glmrt/share/XGRAMMAR_LICENSE
+COPY .glmrt-release-image/XGRAMMAR_SHA256SUMS /opt/glmrt/share/XGRAMMAR_SHA256SUMS
 COPY python /opt/glmrt/python
 COPY scripts/real-full-tcp-serve.sh /opt/glmrt/scripts/real-full-tcp-serve.sh
 COPY scripts/kernel-cache-identity.py /opt/glmrt/scripts/kernel-cache-identity.py
@@ -100,6 +103,7 @@ RUN cmp -s \
       /opt/glmrt/third_party/sparkinfer/LICENSE \
       /opt/glmrt/share/SPARKINFER_LICENSE && \
     (cd /opt/glmrt/share && sha256sum -c SPARKINFER_SHA256SUMS) && \
+    (cd /opt/glmrt/share && sha256sum -c XGRAMMAR_SHA256SUMS) && \
     python3 /opt/glmrt/scripts/sparkinfer-release-provenance.py \
       --source /opt/glmrt/third_party/sparkinfer \
       --lock /opt/glmrt/third_party/sparkinfer.lock.json \
@@ -109,6 +113,9 @@ RUN cmp -s \
     install -D -m 0644 \
       /opt/glmrt/share/SPARKINFER_LICENSE \
       /opt/glmrt/share/licenses/sparkinfer/LICENSE && \
+    install -D -m 0644 \
+      /opt/glmrt/share/XGRAMMAR_LICENSE \
+      /opt/glmrt/share/licenses/xgrammar/LICENSE && \
     chmod +x \
       /opt/glmrt/bin/glmrt \
       /opt/glmrt/scripts/real-full-tcp-serve.sh \

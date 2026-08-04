@@ -73,6 +73,18 @@ impl Default for RealFullSamplingParams {
     }
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum RealFullConstraintGrammar {
+    Json,
+    JsonSchema { schema_json: String, strict: bool },
+    StructuralTag { structural_tag_json: String },
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct RealFullConstraint {
+    pub grammar: RealFullConstraintGrammar,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealFullRequest {
     pub request_index: u64,
@@ -90,6 +102,7 @@ pub struct RealFullRequest {
     pub decode_budget: usize,
     pub greedy_sampling: bool,
     pub sampling: RealFullSamplingParams,
+    pub constraint: Option<Arc<RealFullConstraint>>,
 }
 
 impl RealFullRequest {
@@ -159,6 +172,7 @@ impl RealFullRequest {
             decode_budget,
             greedy_sampling: true,
             sampling: RealFullSamplingParams::greedy(),
+            constraint: None,
         }
     }
 
@@ -175,6 +189,11 @@ impl RealFullRequest {
     pub fn with_sampling(mut self, sampling: RealFullSamplingParams) -> Self {
         self.greedy_sampling = sampling.is_greedy();
         self.sampling = sampling;
+        self
+    }
+
+    pub fn with_constraint(mut self, constraint: Option<Arc<RealFullConstraint>>) -> Self {
+        self.constraint = constraint;
         self
     }
 

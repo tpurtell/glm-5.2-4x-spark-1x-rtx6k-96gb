@@ -1,5 +1,6 @@
 mod attention;
 mod constants;
+mod constraint;
 mod coordinator_kernels;
 mod coverage;
 mod dense;

@@ -17,7 +17,9 @@ mod scorer;
 
 use execution::{run_real_lm_head_default_chunk_probe, run_real_lm_head_full_vocab_probe};
 use scorer::{
-    lm_head_full_resident_available, score_bf16_lm_head_full_resident_sample,
+    lm_head_full_resident_available,
+    score_bf16_lm_head_full_resident_constrained_sample_device_inputs_with_uniforms,
+    score_bf16_lm_head_full_resident_sample,
     score_bf16_lm_head_full_resident_sample_device_input_with_options,
     score_bf16_lm_head_full_resident_sample_device_inputs_with_uniforms, score_bf16_lm_head_rows,
     score_bf16_lm_head_staged_resident_rows, LmHeadChunkScore,
@@ -72,6 +74,7 @@ pub(in crate::commands::real_full) struct RealLmHeadChunkScoreForHidden {
 pub(in crate::commands::real_full) struct RealLmHeadBatchScoreForHidden {
     pub(in crate::commands::real_full) vocab_size: usize,
     pub(in crate::commands::real_full) top_token_ids: Vec<usize>,
+    pub(in crate::commands::real_full) top_logits: Vec<f32>,
     pub(in crate::commands::real_full) sampled_token_ids: Vec<usize>,
     pub(in crate::commands::real_full) sample_top_k: usize,
     pub(in crate::commands::real_full) sample_top_p: f32,
@@ -436,6 +439,54 @@ pub(in crate::commands::real_full) fn score_real_lm_head_full_vocab_for_device_h
     Ok(RealLmHeadBatchScoreForHidden {
         vocab_size,
         top_token_ids: score.top_token_ids,
+        top_logits: score.top_logits,
+        sampled_token_ids: score.sampled_token_ids,
+        sample_top_k: score.sample_top_k,
+        sample_top_p: score.sample_top_p,
+        argmax_kernel_backend: score.argmax_kernel_backend,
+        sampler_kernel_backend: score.sampler_kernel_backend,
+    })
+}
+
+pub(in crate::commands::real_full) fn score_real_lm_head_full_vocab_for_device_hidden_rows_constrained(
+    catalog: &TensorCatalog,
+    hidden: &DeviceBf16Output,
+    sampler_options: RealFullLmHeadSamplingOptions,
+    random_uniforms: &[f32],
+    token_bitmasks: &[u32],
+) -> Result<RealLmHeadBatchScoreForHidden> {
+    let lm_head = catalog
+        .tensors
+        .iter()
+        .find(|tensor| tensor.role == TensorRole::LmHead)
+        .context("constrained batch lm_head scoring requires lm_head.weight in the catalog")?;
+    anyhow::ensure!(
+        lm_head.dtype == DType::Bf16 && lm_head.shape.len() == 2,
+        "constrained batch lm_head scoring expects a 2D BF16 lm_head, got dtype={:?} shape={:?}",
+        lm_head.dtype,
+        lm_head.shape
+    );
+    let vocab_size = lm_head.shape[0];
+    let hidden_dim = lm_head.shape[1];
+    anyhow::ensure!(
+        hidden.rows > 0 && hidden.values_per_row == hidden_dim,
+        "constrained batch lm_head hidden shape must be Nx{}, got {}x{}",
+        hidden_dim,
+        hidden.rows,
+        hidden.values_per_row
+    );
+    let score = score_bf16_lm_head_full_resident_constrained_sample_device_inputs_with_uniforms(
+        &lm_head.name,
+        hidden,
+        vocab_size,
+        sampler_options,
+        random_uniforms,
+        token_bitmasks,
+    )?;
+    Ok(RealLmHeadBatchScoreForHidden {
+        vocab_size,
+        top_token_ids: score.top_token_ids,
+        top_logits: score.top_logits,
         sampled_token_ids: score.sampled_token_ids,
         sample_top_k: score.sample_top_k,
         sample_top_p: score.sample_top_p,

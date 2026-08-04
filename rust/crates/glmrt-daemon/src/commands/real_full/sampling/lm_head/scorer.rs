@@ -7,6 +7,7 @@ use crate::commands::real_full::coordinator_kernels::{
     lm_head_argmax_bf16_resident_weight, lm_head_argmax_bf16_staged_resident_weight,
     lm_head_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_input,
     lm_head_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_input_without_graph,
+    lm_head_constrained_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_input,
     lm_head_sample_topk_topp_bf16_preloaded_resident_weight,
     lm_head_sample_topk_topp_bf16_preloaded_resident_weight_device_input,
     lm_head_sample_topk_topp_bf16_resident_weight,
@@ -439,6 +440,91 @@ pub(super) fn score_bf16_lm_head_full_resident_sample_device_inputs_with_uniform
         sample_top_p: sampler_options.top_p,
         argmax_kernel_backend: argmax_backend,
         sampler_kernel_backend: sampler.backend,
+    })
+}
+
+pub(super) fn score_bf16_lm_head_full_resident_constrained_sample_device_inputs_with_uniforms(
+    lm_head_name: &str,
+    hidden: &DeviceBf16Output,
+    full_vocab_size: usize,
+    sampler_options: RealFullLmHeadSamplingOptions,
+    random_uniforms: &[f32],
+    token_bitmasks: &[u32],
+) -> Result<LmHeadBatchScore> {
+    anyhow::ensure!(
+        hidden.rows > 0 && hidden.values_per_row > 0,
+        "constrained real lm_head sampler expected non-empty hidden rows, got {}x{}",
+        hidden.rows,
+        hidden.values_per_row
+    );
+    anyhow::ensure!(
+        full_vocab_size > 0,
+        "constrained real lm_head sampler requires non-empty vocabulary"
+    );
+    anyhow::ensure!(
+        lm_head_full_resident_available(lm_head_name, full_vocab_size, hidden.values_per_row),
+        "constrained real lm_head sampler requires preloaded full lm_head.weight"
+    );
+    anyhow::ensure!(
+        random_uniforms.len() == hidden.rows,
+        "constrained real lm_head sampler received {} random uniforms for {} rows",
+        random_uniforms.len(),
+        hidden.rows
+    );
+    let mask_words = full_vocab_size.div_ceil(u32::BITS as usize);
+    anyhow::ensure!(
+        token_bitmasks.len() == hidden.rows * mask_words,
+        "constrained real lm_head sampler received {} mask words for {}x{}",
+        token_bitmasks.len(),
+        hidden.rows,
+        mask_words
+    );
+    let sampler_options = RealFullLmHeadSamplingOptions {
+        top_k: sampler_options.top_k.min(full_vocab_size),
+        ..sampler_options
+    };
+    let combined =
+        lm_head_constrained_argmax_sample_topk_topp_bf16_preloaded_resident_weight_device_input(
+            lm_head_name,
+            hidden,
+            random_uniforms,
+            token_bitmasks,
+            full_vocab_size,
+            sampler_options.temperature,
+            sampler_options.top_k,
+            sampler_options.top_p,
+        )?;
+    anyhow::ensure!(
+        combined.argmax.indices.len() == hidden.rows
+            && combined.argmax.scores.len() == hidden.rows
+            && combined.sampler.indices.len() == hidden.rows
+            && combined.sampler.scores.len() == hidden.rows,
+        "constrained real lm_head sampler output lengths do not match {} rows",
+        hidden.rows
+    );
+    anyhow::ensure!(
+        combined.argmax.scores.iter().all(|score| score.is_finite())
+            && combined
+                .sampler
+                .scores
+                .iter()
+                .copied()
+                .all(valid_sampled_score),
+        "constrained real lm_head sampler produced invalid scores: argmax_backend={} sampler_backend={}",
+        combined.argmax.backend,
+        combined.sampler.backend
+    );
+    Ok(LmHeadBatchScore {
+        top_token_ids: combined.argmax.indices,
+        top_logits: combined.argmax.scores,
+        sampled_token_ids: combined.sampler.indices,
+        sampled_scores: combined.sampler.scores,
+        sample_random_uniform: random_uniforms[0],
+        sample_temperature: sampler_options.temperature,
+        sample_top_k: sampler_options.top_k,
+        sample_top_p: sampler_options.top_p,
+        argmax_kernel_backend: combined.argmax.backend,
+        sampler_kernel_backend: combined.sampler.backend,
     })
 }
 

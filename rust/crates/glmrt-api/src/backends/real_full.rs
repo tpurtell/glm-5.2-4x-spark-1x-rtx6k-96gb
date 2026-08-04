@@ -2,6 +2,7 @@ use crate::completion::{
     backend_name, completion_token_count, prompt_token_count, prompt_token_ids, selected_backend,
     transport_name,
 };
+use crate::constrained::request_constraint;
 use crate::metrics::{BackendMetrics, CompletionMetrics, RealFullDiagnosticMetrics};
 use crate::request::{
     real_glm_full_request_prompt_text, request_image_sources, request_max_tokens,
@@ -17,7 +18,7 @@ use crate::tooling::{
 };
 use crate::{
     invalid_request, runtime_error, ApiBackend, ApiError, ApiState, BackendCompletion,
-    ChatCompletionRequest, ChatTool, RealFullGeneratedToken, RealFullRequest,
+    ChatCompletionRequest, ChatTool, RealFullConstraint, RealFullGeneratedToken, RealFullRequest,
     RealFullRequestExecutor, RealFullSamplingParams, RealFullSequenceRequest,
     RealFullVisionEmbedding,
 };
@@ -312,6 +313,7 @@ pub(crate) fn try_real_glm_full_streaming_response(
     let prompt = real_glm_full_request_prompt_text(request);
     let max_tokens = request_max_tokens(request);
     let sampling = request_sampling_params(request);
+    let constraint = request_constraint(request)?;
     let image_sources = request_image_sources(request)?;
     let (resolved_prompt_token_ids, vision_embeddings) = if image_sources.is_empty() {
         (
@@ -353,6 +355,7 @@ pub(crate) fn try_real_glm_full_streaming_response(
         model,
         transport_backend,
         tools,
+        constraint,
         include_usage,
     )))
 }
@@ -372,6 +375,7 @@ fn real_glm_full_decode_stream_response(
     model: String,
     transport_backend: &'static str,
     tools: Option<Vec<ChatTool>>,
+    constraint: Option<Arc<RealFullConstraint>>,
     include_usage: bool,
 ) -> Response {
     let stream = stream! {
@@ -415,7 +419,8 @@ fn real_glm_full_decode_stream_response(
             0,
             max_tokens,
         )
-        .with_sampling(sampling);
+        .with_sampling(sampling)
+        .with_constraint(constraint.clone());
         if let Some(prompt_token_ids) = prompt_token_ids.as_ref() {
             initial_request =
                 initial_request.with_prompt_token_ids(Arc::clone(prompt_token_ids));
@@ -470,7 +475,8 @@ fn real_glm_full_decode_stream_response(
                     decode_step_index,
                     max_tokens,
                 )
-                .with_sampling(sampling);
+                .with_sampling(sampling)
+                .with_constraint(constraint.clone());
                 eprintln!(
                     "real_full_stream_decode_step_start request_id={} step={}/{} prefill_tokens={} generated_tokens={}",
                     request.request_id,
@@ -858,6 +864,7 @@ pub(crate) async fn real_glm_full_completion(
     max_tokens: usize,
     sampling: RealFullSamplingParams,
     allow_tool_calls: bool,
+    constraint: Option<Arc<RealFullConstraint>>,
 ) -> Result<BackendCompletion, ApiError> {
     validate_real_full_request_profile_limits(prompt_tokens, max_tokens)?;
     let full = state
@@ -877,6 +884,7 @@ pub(crate) async fn real_glm_full_completion(
                 max_tokens,
                 sampling,
                 allow_tool_calls,
+                constraint,
             )
             .await;
         }
@@ -886,7 +894,8 @@ pub(crate) async fn real_glm_full_completion(
     let request_execution = if let Some(executor) = state.config.real_full_executor.as_ref() {
         let request_index = state.next_request_id.fetch_add(1, Ordering::Relaxed);
         let mut request = RealFullRequest::new(request_index, prompt, prompt_tokens, max_tokens)
-            .with_sampling(sampling);
+            .with_sampling(sampling)
+            .with_constraint(constraint);
         if let Some(prompt_token_ids) = prompt_token_ids {
             request = request.with_prompt_token_ids(prompt_token_ids);
         }
@@ -1020,6 +1029,7 @@ async fn execute_real_full_decode_loop(
     max_tokens: usize,
     sampling: RealFullSamplingParams,
     allow_tool_calls: bool,
+    constraint: Option<Arc<RealFullConstraint>>,
 ) -> Result<BackendCompletion, ApiError> {
     let mut generated_token_ids = Vec::with_capacity(max_tokens);
     let mut content = String::new();
@@ -1050,7 +1060,8 @@ async fn execute_real_full_decode_loop(
         0,
         max_tokens,
     )
-    .with_sampling(sampling);
+    .with_sampling(sampling)
+    .with_constraint(constraint.clone());
     if let Some(prompt_token_ids) = prompt_token_ids {
         initial_request = initial_request.with_prompt_token_ids(prompt_token_ids);
     }
@@ -1099,7 +1110,8 @@ async fn execute_real_full_decode_loop(
                 decode_step_index,
                 max_tokens,
             )
-            .with_sampling(sampling);
+            .with_sampling(sampling)
+            .with_constraint(constraint.clone());
             if request_timing {
                 eprintln!(
                     "real_full_decode_loop_step_start request_id={} step={}/{} prefill_tokens={} generated_tokens={}",
