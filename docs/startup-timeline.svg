@@ -1,208 +1,97 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1720" viewBox="0 0 1920 1720" role="img" aria-labelledby="title desc">
-<title id="title">GLMRT final clean cold and warm startup timelines</title>
-<desc id="desc">Aligned measured cold and warm startup timelines for the GLMRT coordinator and four parallel Spark expert processes. Cold API readiness is 67.63 seconds. Warm API readiness with resident Spark experts is 40.89 seconds.</desc>
-<defs>
-  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#020812" flood-opacity=".45"/></filter>
-  <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-  <linearGradient id="background" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset=".55" stop-color="#091526"/><stop offset="1" stop-color="#07111f"/></linearGradient>
-  <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#10243a"/><stop offset="1" stop-color="#0b182a"/></linearGradient>
-  <linearGradient id="spark-panel" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#231c43"/><stop offset="1" stop-color="#111c35"/></linearGradient>
-  <linearGradient id="ready" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#56d69c" stop-opacity=".28"/><stop offset="1" stop-color="#56d69c" stop-opacity=".06"/></linearGradient>
-  <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse"><path d="M42 0H0V42" fill="none" stroke="#28415a" stroke-width="1" opacity=".13"/></pattern>
-  <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#56d69c"/></marker>
-  <style>
-    .title{font:700 34px Inter,Segoe UI,sans-serif;fill:#e9f3ff;letter-spacing:.3px}
-    .subtitle{font:400 16px Inter,Segoe UI,sans-serif;fill:#91a8bf}
-    .section{font:700 20px Inter,Segoe UI,sans-serif;fill:#e9f3ff}
-    .track-title{font:700 18px Inter,Segoe UI,sans-serif;fill:#e9f3ff}
-    .box-title{font:700 16px Inter,Segoe UI,sans-serif;fill:#e9f3ff}
-    .body{font:400 14px Inter,Segoe UI,sans-serif;fill:#b9cde0}
-    .small{font:400 12px Inter,Segoe UI,sans-serif;fill:#91a8bf}
-    .tiny{font:500 11px Inter,Segoe UI,sans-serif;fill:#91a8bf;letter-spacing:.5px}
-    .mono{font:500 12px ui-monospace,SFMono-Regular,Consolas,monospace;fill:#b9cde0}
-    .metric{font:700 20px Inter,Segoe UI,sans-serif;fill:#e9f3ff}
-    .metric-label{font:600 11px Inter,Segoe UI,sans-serif;fill:#91a8bf;letter-spacing:.9px}
-    .bar-label{font:700 13px Inter,Segoe UI,sans-serif;fill:#f4f9ff}
-    .bar-value{font:600 12px ui-monospace,SFMono-Regular,Consolas,monospace;fill:#e9f3ff}
-    .ledger{font:500 14px Inter,Segoe UI,sans-serif;fill:#c9d9e8}
-    .ledger-time{font:600 13px ui-monospace,SFMono-Regular,Consolas,monospace;fill:#e9f3ff}
-  </style>
-</defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
+  <title id="title">GLMRT cold startup timeline</title>
+  <desc id="desc">Measured cold launch of the GLMRT coordinator and four parallel Spark experts. The launcher reached the API in 55.20 seconds, coordinator startup completed in 51.46 seconds, and Spark targets were ready by 24.87 seconds.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="1" stop-color="#0b1829"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10243a"/>
+      <stop offset="1" stop-color="#0b182a"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#020812" flood-opacity=".45"/>
+    </filter>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#28415a" stroke-width="1" opacity=".12"/>
+    </pattern>
+    <style>
+      .title{font:700 29px Inter,Segoe UI,sans-serif;fill:#e9f3ff}
+      .subtitle{font:400 14px Inter,Segoe UI,sans-serif;fill:#91a8bf}
+      .metric{font:700 25px Inter,Segoe UI,sans-serif;fill:#e9f3ff}
+      .metric-label{font:600 11px Inter,Segoe UI,sans-serif;fill:#91a8bf;letter-spacing:.8px}
+      .section{font:700 18px Inter,Segoe UI,sans-serif;fill:#e9f3ff}
+      .body{font:400 13px Inter,Segoe UI,sans-serif;fill:#b9cde0}
+      .small{font:400 11px Inter,Segoe UI,sans-serif;fill:#91a8bf}
+      .bar{font:600 11px Inter,Segoe UI,sans-serif;fill:#f4f9ff}
+      .mono{font:600 11px ui-monospace,SFMono-Regular,Consolas,monospace;fill:#e9f3ff}
+    </style>
+  </defs>
 
-<rect width="1920" height="1720" fill="url(#background)"/>
-<rect width="1920" height="1720" fill="url(#grid)"/>
-<circle cx="1570" cy="80" r="430" fill="#5d8cff" opacity=".035"/>
-<circle cx="290" cy="1620" r="380" fill="#a978ff" opacity=".025"/>
+  <rect width="1200" height="650" fill="url(#background)"/>
+  <rect width="1200" height="650" fill="url(#grid)"/>
 
-<text id="title" x="64" y="58" class="title">GLMRT STARTUP · FINAL CLEAN TIMELINES</text>
-<text x="64" y="86" class="subtitle">Cold launch and resident-expert warm restart · coordinator and four Spark experts aligned to measured wall clocks</text>
+  <text id="title" x="52" y="50" class="title">GLMRT COLD STARTUP</text>
+  <text x="52" y="76" class="subtitle">Coordinator plus four DGX Spark experts · balanced profile · retained August 22, 2026 measurement</text>
 
-<g filter="url(#shadow)">
-  <rect x="64" y="112" width="255" height="72" rx="14" fill="#0b192a" stroke="#56d69c" stroke-width="1.2"/>
-  <rect x="337" y="112" width="255" height="72" rx="14" fill="#0b192a" stroke="#a978ff" stroke-width="1.2"/>
-  <rect x="610" y="112" width="255" height="72" rx="14" fill="#0b192a" stroke="#46d7e8" stroke-width="1.2"/>
-  <rect x="883" y="112" width="255" height="72" rx="14" fill="#0b192a" stroke="#5d8cff" stroke-width="1.2"/>
-  <rect x="1156" y="112" width="300" height="72" rx="14" fill="#0b192a" stroke="#ffc35a" stroke-width="1.2"/>
-  <rect x="1474" y="112" width="382" height="72" rx="14" fill="#0d2130" stroke="#203a55" stroke-width="1.2"/>
-</g>
-<text x="82" y="141" class="metric" fill="#56d69c">67.63 s</text><text x="82" y="166" class="metric-label">COLD API READY</text>
-<text x="355" y="141" class="metric" fill="#a978ff">40.89 s</text><text x="355" y="166" class="metric-label">WARM API READY</text>
-<text x="628" y="141" class="metric" fill="#46d7e8">26.58 s</text><text x="628" y="166" class="metric-label">COLD SPARKS READY</text>
-<text x="901" y="141" class="metric" fill="#5d8cff">t = 0</text><text x="901" y="166" class="metric-label">WARM SPARKS READY</text>
-<text x="1174" y="141" class="metric" fill="#ffc35a">19.19 s</text><text x="1174" y="166" class="metric-label">COLD SOURCE STREAM</text>
-<circle cx="1502" cy="148" r="7" fill="#56d69c" filter="url(#glow)"/>
-<text x="1520" y="143" class="box-title">FINAL CLEAN BUILD</text><text x="1520" y="166" class="small">local NVMe · valid kernel caches</text>
+  <g filter="url(#shadow)">
+    <rect x="52" y="100" width="330" height="94" rx="14" fill="url(#panel)" stroke="#56d69c"/>
+    <rect x="406" y="100" width="330" height="94" rx="14" fill="url(#panel)" stroke="#46d7e8"/>
+    <rect x="760" y="100" width="388" height="94" rx="14" fill="url(#panel)" stroke="#a978ff"/>
+  </g>
+  <text x="72" y="137" class="metric" fill="#56d69c">55.20 s</text>
+  <text x="72" y="162" class="metric-label">LAUNCHER → API READY</text>
+  <text x="72" y="181" class="small">includes validation and process dispatch</text>
+  <text x="426" y="137" class="metric" fill="#46d7e8">51.46 s</text>
+  <text x="426" y="162" class="metric-label">COORDINATOR STARTUP</text>
+  <text x="426" y="181" class="small">daemon validation through prewarm</text>
+  <text x="780" y="137" class="metric" fill="#a978ff">24.87 s</text>
+  <text x="780" y="162" class="metric-label">SPARK TARGETS READY</text>
+  <text x="780" y="181" class="small">all four expert slabs loaded in parallel</text>
 
-<rect x="64" y="215" width="1792" height="602" rx="20" fill="#0b1829" stroke="#203a55" stroke-width="1.2" filter="url(#shadow)"/>
-<text x="92" y="255" class="section">COLD START · SHARED WALL CLOCK</text>
-<text x="92" y="282" class="subtitle">t = 0 is coordinator process startup. Every segment is measured on the accepted final release build.</text>
+  <rect x="52" y="220" width="1096" height="350" rx="18" fill="#0b1829" stroke="#203a55" filter="url(#shadow)"/>
+  <text x="78" y="258" class="section">CRITICAL PATH</text>
+  <text x="78" y="281" class="subtitle">Full Spark reload with warm runtime, catalog, and compiled-kernel caches.</text>
 
-<!-- Coordinator track -->
-<text x="92" y="350" class="track-title" fill="#5d8cff">COORDINATOR</text>
-<text x="92" y="372" class="small">RTX PRO 6000</text>
-<rect x="300" y="320" width="74.8" height="27" rx="7" fill="#5d8cff" fill-opacity=".28" stroke="#5d8cff" stroke-width="1"/>
-<text x="386" y="339" class="small" fill="#5d8cff">Python + FlashInfer capture · 3.56 s · concurrent</text>
-<path d="M376 333H382" stroke="#5d8cff" stroke-width="1.5"/>
+  <rect x="250" y="325" width="59.3" height="72" rx="7" fill="#7c9cff" stroke="#91a8ff"/>
+  <rect x="309.3" y="325" width="272.4" height="72" rx="7" fill="#a978ff" fill-opacity=".78" stroke="#bd9aff"/>
+  <rect x="581.7" y="325" width="25.7" height="72" rx="7" fill="#ffc35a" stroke="#ffd17d"/>
+  <rect x="607.4" y="325" width="289.5" height="72" rx="7" fill="#56d69c" fill-opacity=".8" stroke="#74e4af"/>
+  <rect x="896.9" y="325" width="39.3" height="72" rx="7" fill="#32b985" stroke="#72e4b2"/>
+  <rect x="936.2" y="325" width="49.8" height="72" rx="7" fill="#46d7e8" fill-opacity=".8" stroke="#65e5f2"/>
 
-<rect x="300" y="360" width="12.1" height="72" rx="7" fill="#7c9cff" stroke="#91a8ff" stroke-width="1"/>
-<rect x="312.1" y="360" width="195.3" height="72" rx="7" fill="#5d8cff" fill-opacity=".82" stroke="#7ca2ff" stroke-width="1"/>
-<rect x="507.4" y="360" width="57.2" height="72" rx="7" fill="#46d7e8" fill-opacity=".78" stroke="#65e5f2" stroke-width="1"/>
-<rect x="564.6" y="360" width="294.9" height="72" rx="7" fill="#a978ff" fill-opacity=".72" stroke="#bd9aff" stroke-width="1"/>
-<rect x="859.5" y="360" width="24.7" height="72" rx="7" fill="#ffc35a" fill-opacity=".78" stroke="#ffd17d" stroke-width="1"/>
-<rect x="884.2" y="360" width="51.7" height="72" rx="7" fill="#e89b5f" fill-opacity=".8" stroke="#ffc08b" stroke-width="1"/>
-<rect x="935.9" y="360" width="710.3" height="72" rx="7" fill="#56d69c" fill-opacity=".78" stroke="#74e4af" stroke-width="1"/>
-<rect x="1646.2" y="360" width="74.0" height="72" rx="7" fill="#32b985" fill-opacity=".9" stroke="#72e4b2" stroke-width="1"/>
+  <text x="279.7" y="353" class="bar" text-anchor="middle">setup</text>
+  <text x="279.7" y="376" class="mono" text-anchor="middle">4.45</text>
+  <text x="445.5" y="353" class="bar" text-anchor="middle">Spark readiness wait</text>
+  <text x="445.5" y="376" class="mono" text-anchor="middle">20.43 s</text>
+  <text x="594.5" y="366" class="mono" text-anchor="middle">1.93</text>
+  <text x="752.2" y="353" class="bar" text-anchor="middle">main targeted prewarm</text>
+  <text x="752.2" y="376" class="mono" text-anchor="middle">21.72 s</text>
+  <text x="916.5" y="366" class="mono" text-anchor="middle">2.95</text>
+  <text x="961.1" y="353" class="bar" text-anchor="middle">API bind</text>
+  <text x="961.1" y="376" class="mono" text-anchor="middle">3.74</text>
 
-<text x="409.7" y="389" class="bar-label" text-anchor="middle">resident target</text><text x="409.7" y="412" class="bar-value" text-anchor="middle">9.30 s</text>
-<text x="536" y="404" class="bar-value" text-anchor="middle">2.72</text>
-<text x="712" y="389" class="bar-label" text-anchor="middle">wait for Spark endpoints</text><text x="712" y="412" class="bar-value" text-anchor="middle">14.04 s</text>
-<text x="910" y="404" class="bar-value" text-anchor="middle">2.46</text>
-<text x="1291" y="389" class="bar-label" text-anchor="middle">main graph prewarm</text><text x="1291" y="412" class="bar-value" text-anchor="middle">33.82 s</text>
-<text x="1683" y="389" class="bar-label" text-anchor="middle">widths</text><text x="1683" y="412" class="bar-value" text-anchor="middle">3.53</text>
+  <path d="M250 445H1050" stroke="#38516a" stroke-width="1.5"/>
+  <g class="small" text-anchor="middle">
+    <path d="M250 439V452" stroke="#587089"/><text x="250" y="473">0 s</text>
+    <path d="M383.3 439V452" stroke="#587089"/><text x="383.3" y="473">10</text>
+    <path d="M516.7 439V452" stroke="#587089"/><text x="516.7" y="473">20</text>
+    <path d="M650 439V452" stroke="#587089"/><text x="650" y="473">30</text>
+    <path d="M783.3 439V452" stroke="#587089"/><text x="783.3" y="473">40</text>
+    <path d="M916.7 439V452" stroke="#587089"/><text x="916.7" y="473">50</text>
+    <path d="M1050 439V452" stroke="#587089"/><text x="1050" y="473">60</text>
+  </g>
+  <g stroke="#28415a" opacity=".35">
+    <path d="M383.3 305V438"/><path d="M516.7 305V438"/><path d="M650 305V438"/>
+    <path d="M783.3 305V438"/><path d="M916.7 305V438"/><path d="M1050 305V438"/>
+  </g>
 
-<g class="tiny">
-  <circle cx="306" cy="462" r="5" fill="#7c9cff"/><text x="318" y="466">target config 0.58 s</text>
-  <circle cx="478" cy="462" r="5" fill="#46d7e8"/><text x="490" y="466">dSpark preload 2.72 s</text>
-  <circle cx="683" cy="462" r="5" fill="#ffc35a"/><text x="695" y="466">expert warm + assembly 1.18 s</text>
-  <circle cx="929" cy="462" r="5" fill="#e89b5f"/><text x="941" y="466">paired LM head 2.46 s</text>
-</g>
+  <g class="small">
+    <rect x="78" y="522" width="10" height="10" rx="2" fill="#ffc35a"/><text x="96" y="531">expert warmup + executor assembly</text>
+    <rect x="350" y="522" width="10" height="10" rx="2" fill="#32b985"/><text x="368" y="531">batched dSpark prewarm</text>
+    <rect x="590" y="522" width="10" height="10" rx="2" fill="#46d7e8"/><text x="608" y="531">launcher validation and API bind</text>
+  </g>
 
-<path d="M1720.2 344V448" stroke="#56d69c" stroke-width="2" stroke-dasharray="4 5"/>
-<circle cx="1720.2" cy="396" r="6" fill="#56d69c" filter="url(#glow)"/>
-<rect x="1662" y="302" width="150" height="36" rx="18" fill="#103229" stroke="#56d69c"/>
-<text x="1737" y="325" class="metric-label" text-anchor="middle" fill="#56d69c">API READY · 67.63</text>
-
-<!-- Spark track -->
-<text x="92" y="567" class="track-title" fill="#a978ff">4× SPARK EXPERTS</text>
-<text x="92" y="589" class="small">parallel envelope</text>
-<rect x="374.8" y="548" width="8.8" height="72" rx="7" fill="#806bd0" stroke="#a978ff"/>
-<rect x="383.6" y="548" width="434.7" height="72" rx="7" fill="#a978ff" fill-opacity=".72" stroke="#bd9aff"/>
-<rect x="818.3" y="548" width="22.5" height="72" rx="7" fill="#46d7e8" fill-opacity=".78" stroke="#6ceaf5"/>
-<rect x="840.8" y="548" width="17.4" height="72" rx="7" fill="#ffc35a" fill-opacity=".78" stroke="#ffd17d"/>
-<rect x="858.2" y="548" width="862" height="72" rx="7" fill="url(#ready)" stroke="#56d69c" stroke-opacity=".4" stroke-dasharray="5 6"/>
-<text x="601" y="577" class="bar-label" text-anchor="middle">resident expert construction</text><text x="601" y="600" class="bar-value" text-anchor="middle">20.70 s · four hosts in parallel</text>
-<text x="1289" y="577" class="bar-label" text-anchor="middle" fill="#56d69c">READY</text><text x="1289" y="600" class="small" text-anchor="middle">serving warmup and graph-capture traffic</text>
-
-<path d="M383.6 654H786.6" stroke="#5d8cff" stroke-width="5" stroke-linecap="round"/>
-<path d="M383.6 646V662M786.6 646V662" stroke="#5d8cff" stroke-width="1.5"/>
-<text x="585" y="680" class="mono" text-anchor="middle" fill="#7ca2ff">Direct-HF source stream · 19.19 s · 5.32 GB/s per Spark</text>
-<circle cx="854.0" cy="584" r="5" fill="#56d69c"/><circle cx="855.5" cy="574" r="5" fill="#56d69c"/><circle cx="856.9" cy="594" r="5" fill="#56d69c"/><circle cx="858.2" cy="584" r="5" fill="#56d69c"/>
-<text x="858" y="529" class="small" text-anchor="middle" fill="#56d69c">all ready 26.58 s</text>
-
-<!-- Axis -->
-<path d="M300 742H1770" stroke="#38516a" stroke-width="1.5"/>
-<g class="small" text-anchor="middle">
-  <path d="M300 736V749" stroke="#587089"/><text x="300" y="771">0 s</text>
-  <path d="M510 736V749" stroke="#587089"/><text x="510" y="771">10</text>
-  <path d="M720 736V749" stroke="#587089"/><text x="720" y="771">20</text>
-  <path d="M930 736V749" stroke="#587089"/><text x="930" y="771">30</text>
-  <path d="M1140 736V749" stroke="#587089"/><text x="1140" y="771">40</text>
-  <path d="M1350 736V749" stroke="#587089"/><text x="1350" y="771">50</text>
-  <path d="M1560 736V749" stroke="#587089"/><text x="1560" y="771">60</text>
-  <path d="M1770 736V749" stroke="#587089"/><text x="1770" y="771">70</text>
-</g>
-<g stroke="#28415a" stroke-width="1" opacity=".32"><path d="M510 300V735"/><path d="M720 300V735"/><path d="M930 300V735"/><path d="M1140 300V735"/><path d="M1350 300V735"/><path d="M1560 300V735"/></g>
-
-<!-- Warm-start tracks -->
-<rect x="64" y="845" width="1792" height="410" rx="20" fill="#0b1829" stroke="#56d69c" stroke-width="1.2" filter="url(#shadow)"/>
-<text x="92" y="885" class="section" fill="#56d69c">WARM START · RESIDENT EXPERTS</text>
-<text x="92" y="912" class="subtitle">Same process-start → API-bind boundary. Spark expert containers, weights, and execution lanes are already resident.</text>
-
-<text x="92" y="978" class="track-title" fill="#5d8cff">COORDINATOR</text>
-<text x="92" y="1000" class="small">warm filesystem + compiled caches</text>
-<rect x="300" y="940" width="68.7" height="27" rx="7" fill="#5d8cff" fill-opacity=".28" stroke="#5d8cff" stroke-width="1"/>
-<text x="380" y="959" class="small" fill="#5d8cff">Python + FlashInfer capture · 3.27 s · concurrent</text>
-<path d="M370 953H376" stroke="#5d8cff" stroke-width="1.5"/>
-
-<rect x="300" y="980" width="12.0" height="62" rx="7" fill="#7c9cff" stroke="#91a8ff"/>
-<rect x="312.0" y="980" width="43.5" height="62" rx="7" fill="#5d8cff" fill-opacity=".82" stroke="#7ca2ff"/>
-<rect x="355.5" y="980" width="28.1" height="62" rx="7" fill="#46d7e8" fill-opacity=".78" stroke="#65e5f2"/>
-<rect x="383.6" y="980" width="4.1" height="62" rx="2" fill="#ffc35a" stroke="#ffd17d"/>
-<rect x="387.7" y="980" width="704.9" height="62" rx="7" fill="#56d69c" fill-opacity=".78" stroke="#74e4af"/>
-<rect x="1092.6" y="980" width="66.0" height="62" rx="7" fill="#32b985" fill-opacity=".9" stroke="#72e4b2"/>
-<text x="740" y="1006" class="bar-label" text-anchor="middle">main graph prewarm</text><text x="740" y="1028" class="bar-value" text-anchor="middle">33.57 s</text>
-<text x="1125.6" y="1005" class="bar-label" text-anchor="middle">widths</text><text x="1125.6" y="1028" class="bar-value" text-anchor="middle">3.15</text>
-<path d="M1158.6 964V1055" stroke="#56d69c" stroke-width="2" stroke-dasharray="4 5"/>
-<circle cx="1158.6" cy="1011" r="6" fill="#56d69c" filter="url(#glow)"/>
-<rect x="1098" y="924" width="152" height="34" rx="17" fill="#103229" stroke="#56d69c"/>
-<text x="1174" y="946" class="metric-label" text-anchor="middle" fill="#56d69c">API READY · 40.89</text>
-
-<g class="tiny">
-  <circle cx="302" cy="1067" r="5" fill="#7c9cff"/><text x="314" y="1071">target setup 0.57 s</text>
-  <circle cx="462" cy="1067" r="5" fill="#5d8cff"/><text x="474" y="1071">resident target 2.07 s</text>
-  <circle cx="650" cy="1067" r="5" fill="#46d7e8"/><text x="662" y="1071">dSpark preload 1.34 s</text>
-  <circle cx="842" cy="1067" r="5" fill="#ffc35a"/><text x="854" y="1071">connect + assembly + paired head 0.19 s</text>
-</g>
-
-<text x="92" y="1133" class="track-title" fill="#a978ff">4× SPARK EXPERTS</text>
-<text x="92" y="1155" class="small">persistent WIP expert processes</text>
-<rect x="300" y="1110" width="858.6" height="58" rx="9" fill="url(#ready)" stroke="#56d69c" stroke-opacity=".7"/>
-<circle cx="320" cy="1139" r="7" fill="#56d69c" filter="url(#glow)"/>
-<text x="344" y="1136" class="bar-label" fill="#56d69c">READY AT t = 0</text>
-<text x="344" y="1157" class="small">resident weights · four execution lanes · immediate coordinator connection</text>
-
-<path d="M300 1200H1770" stroke="#38516a" stroke-width="1.5"/>
-<g class="small" text-anchor="middle">
-  <path d="M300 1194V1207" stroke="#587089"/><text x="300" y="1229">0 s</text>
-  <path d="M510 1194V1207" stroke="#587089"/><text x="510" y="1229">10</text>
-  <path d="M720 1194V1207" stroke="#587089"/><text x="720" y="1229">20</text>
-  <path d="M930 1194V1207" stroke="#587089"/><text x="930" y="1229">30</text>
-  <path d="M1140 1194V1207" stroke="#587089"/><text x="1140" y="1229">40</text>
-  <path d="M1350 1194V1207" stroke="#587089"/><text x="1350" y="1229">50</text>
-  <path d="M1560 1194V1207" stroke="#587089"/><text x="1560" y="1229">60</text>
-  <path d="M1770 1194V1207" stroke="#587089"/><text x="1770" y="1229">70</text>
-</g>
-<g stroke="#28415a" stroke-width="1" opacity=".32"><path d="M510 930V1193"/><path d="M720 930V1193"/><path d="M930 930V1193"/><path d="M1140 930V1193"/><path d="M1350 930V1193"/><path d="M1560 930V1193"/></g>
-
-<!-- Phase ledgers -->
-<rect x="64" y="1285" width="880" height="355" rx="18" fill="url(#panel)" stroke="#5d8cff" stroke-width="1.2" filter="url(#shadow)"/>
-<rect x="972" y="1285" width="884" height="355" rx="18" fill="url(#spark-panel)" stroke="#a978ff" stroke-width="1.2" filter="url(#shadow)"/>
-<text x="92" y="1324" class="section" fill="#5d8cff">COLD COORDINATOR CRITICAL PATH</text>
-<text x="1000" y="1324" class="section" fill="#a978ff">COLD SPARK EXPERT ENVELOPE</text>
-<text x="92" y="1348" class="small">Measured stage boundaries from process start to API bind</text>
-<text x="1000" y="1348" class="small">Four processes overlap; displayed as the slowest-host readiness envelope</text>
-
-<g>
-  <rect x="92" y="1374" width="7" height="7" rx="2" fill="#7c9cff"/><text x="114" y="1383" class="ledger">Target catalog, tokenizer, prompt setup</text><text x="800" y="1383" class="ledger-time" text-anchor="end">0.00–0.58</text><text x="918" y="1383" class="ledger-time" text-anchor="end">0.58 s</text>
-  <rect x="92" y="1411" width="7" height="7" rx="2" fill="#5d8cff"/><text x="114" y="1420" class="ledger">Coordinator-resident target load</text><text x="800" y="1420" class="ledger-time" text-anchor="end">0.58–9.87</text><text x="918" y="1420" class="ledger-time" text-anchor="end">9.30 s</text>
-  <rect x="92" y="1448" width="7" height="7" rx="2" fill="#46d7e8"/><text x="114" y="1457" class="ledger">dSpark preload</text><text x="800" y="1457" class="ledger-time" text-anchor="end">9.87–12.60</text><text x="918" y="1457" class="ledger-time" text-anchor="end">2.72 s</text>
-  <rect x="92" y="1485" width="7" height="7" rx="2" fill="#a978ff"/><text x="114" y="1494" class="ledger">Connect to all Spark targets</text><text x="800" y="1494" class="ledger-time" text-anchor="end">12.60–26.64</text><text x="918" y="1494" class="ledger-time" text-anchor="end">14.04 s</text>
-  <rect x="92" y="1522" width="7" height="7" rx="2" fill="#ffc35a"/><text x="114" y="1531" class="ledger">Expert warmup, assembly, paired LM head</text><text x="800" y="1531" class="ledger-time" text-anchor="end">26.64–30.28</text><text x="918" y="1531" class="ledger-time" text-anchor="end">3.64 s</text>
-  <rect x="92" y="1559" width="7" height="7" rx="2" fill="#56d69c"/><text x="114" y="1568" class="ledger">Main coordinator graph prewarm</text><text x="800" y="1568" class="ledger-time" text-anchor="end">30.28–64.10</text><text x="918" y="1568" class="ledger-time" text-anchor="end">33.82 s</text>
-  <rect x="92" y="1596" width="7" height="7" rx="2" fill="#32b985"/><text x="114" y="1605" class="ledger">Batched dSpark-width closure</text><text x="800" y="1605" class="ledger-time" text-anchor="end">64.10–67.63</text><text x="918" y="1605" class="ledger-time" text-anchor="end">3.53 s</text>
-</g>
-
-<g>
-  <rect x="1000" y="1374" width="7" height="7" rx="2" fill="#806bd0"/><text x="1022" y="1383" class="ledger">Expert processes dispatched and configured</text><text x="1746" y="1383" class="ledger-time" text-anchor="end">t≈3.57 s</text>
-  <rect x="1000" y="1417" width="7" height="7" rx="2" fill="#a978ff"/><text x="1022" y="1426" class="ledger">Resident expert construction</text><text x="1746" y="1426" class="ledger-time" text-anchor="end">20.70 s</text>
-  <path d="M1022 1448H1390" stroke="#5d8cff" stroke-width="4" stroke-linecap="round"/><text x="1410" y="1453" class="small" fill="#7ca2ff">includes 19.19 s direct-HF stream at 5.32 GB/s</text>
-  <rect x="1000" y="1479" width="7" height="7" rx="2" fill="#46d7e8"/><text x="1022" y="1488" class="ledger">Fork four persistent execution lanes</text><text x="1746" y="1488" class="ledger-time" text-anchor="end">0.95–1.18 s</text>
-  <rect x="1000" y="1522" width="7" height="7" rx="2" fill="#ffc35a"/><text x="1022" y="1531" class="ledger">Cleanup and service handoff</text><text x="1746" y="1531" class="ledger-time" text-anchor="end">ready 26.38–26.58</text>
-  <rect x="1000" y="1565" width="7" height="7" rx="2" fill="#56d69c"/><text x="1022" y="1574" class="ledger">Serve startup warmups while coordinator captures</text><text x="1746" y="1574" class="ledger-time" text-anchor="end">through API bind</text>
-  <rect x="1000" y="1600" width="828" height="22" rx="11" fill="#12342b" stroke="#56d69c" stroke-opacity=".55"/>
-  <text x="1414" y="1616" class="metric-label" text-anchor="middle" fill="#56d69c">SPARK READINESS COMPLETES WELL BEFORE COORDINATOR GRAPH PREWARM</text>
-</g>
-
-<text x="64" y="1682" class="small">Measurement: final clean balanced release · cold local-NVMe launch and resident-expert warm restart · process start → API bind</text>
-<text x="1856" y="1682" class="small" text-anchor="end">2026-08-03</text>
+  <text x="52" y="615" class="body">Measured launcher wall clock: 55.199 s. No new startup run was performed for this release graphic.</text>
 </svg>

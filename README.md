@@ -1,6 +1,6 @@
 # GLMRT - LLM engine for GLM 5.2
 
-## 4x Spark + 1x RTX 6000 @ 64 tok/s decode + 1,650 tok/s prefill
+## 4x Spark + 1x RTX 6000 @ 64 tok/s decode + 1,800 tok/s prefill
 
 <sub>X.com style headline low-entropy prompt test</sub>
 
@@ -17,7 +17,7 @@ continuous batching, long context, tool use, reasoning, vision, and plain,
 native-MTP, or dSpark decoding. It is built for this particular hardware
 layout, but is open source for anyone who wants to adapt it to their own.
 It is also zippy in `balanced` mode: about 35 TPS on real Python coding and
-about 1,650 TPS on large prefills.
+about 1,800 TPS on large prefills.
 
 ## Why
 
@@ -97,11 +97,11 @@ server reported the exact requested suffix size for all 60 samples.
 
 | Cached context | 1K | 2K | 4K | 8K | 16K | 32K |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0 | 0.58 | 0.89 | 1.38 | 1.84 | 1.81 | 1.82 |
-| 32K | 0.73 | 0.87 | 1.40 | 1.73 | 1.65 | 1.66 |
-| 64K | 0.73 | 0.87 | 1.27 | 1.66 | 1.59 | 1.60 |
-| 128K | 0.71 | 0.87 | 1.28 | 1.54 | 1.20 | 1.45 |
-| 256K | 0.72 | 0.81 | 1.05 | 1.37 | 1.35 | 1.31 |
+| 0 | 0.59 | 0.93 | 1.38 | 1.82 | 1.83 | 1.80 |
+| 32K | 0.86 | 0.91 | 1.41 | 1.72 | 1.72 | 1.69 |
+| 64K | 0.86 | 0.92 | 1.40 | 1.65 | 1.65 | 1.61 |
+| 128K | 0.83 | 0.92 | 1.33 | 1.51 | 1.51 | 1.49 |
+| 256K | 0.78 | 0.85 | 1.19 | 1.29 | 1.29 | 1.27 |
 
 ![Prefill throughput curves for the balanced profile](benchmarks/prefill-balanced.svg)
 
@@ -183,8 +183,8 @@ GLMRT is released under the [MIT License](LICENSE).
 
 ## Startup Time
 
-The measured cold launch and resident-expert warm restart are shown below.
-Cold startup streams model snapshots from local NVMe; warm startup reuses the
-resident Spark experts and their execution lanes.
+The measured cold launch is shown below. Runtime, catalog, and compiled-kernel
+caches were warm, while all four Sparks reloaded their resident expert slabs
+from local NVMe.
 
 [![GLMRT startup timeline](docs/startup-timeline.svg)](docs/startup-timeline.svg)

@@ -26,27 +26,27 @@
     <text x="700" y="350" text-anchor="middle">32K</text>
   </g>
   <g fill="none" stroke-linejoin="round" stroke-linecap="round" stroke-width="2.5">
-    <polyline stroke="#58a6ff" points="80,313.8 204,255.2 328,160.8 452,71.5 576,76.7 700,74.4"/>
-    <polyline stroke="#3fb950" points="80,286.3 204,258.5 328,155.2 452,93.2 576,108.4 700,106.7"/>
-    <polyline stroke="#d29922" points="80,285.9 204,257.7 328,181.5 452,106.5 576,118.5 700,116.9"/>
-    <polyline stroke="#f778ba" points="80,289.0 204,259.0 328,179.6 452,128.5 576,195.4 700,146.9"/>
-    <polyline stroke="#a371f7" points="80,288.0 204,270.6 328,222.9 452,161.4 576,166.2 700,173.4"/>
+    <polyline stroke="#58a6ff" points="80,312.6 204,246.9 328,159.9 452,74.8 576,72.9 700,78.7"/>
+    <polyline stroke="#3fb950" points="80,260.4 204,250.7 328,154.1 452,94.1 576,94.1 700,99.9"/>
+    <polyline stroke="#d29922" points="80,260.4 204,248.8 328,156.0 452,107.7 576,107.7 700,115.4"/>
+    <polyline stroke="#f778ba" points="80,266.2 204,248.8 328,169.5 452,134.7 576,134.7 700,138.6"/>
+    <polyline stroke="#a371f7" points="80,275.9 204,262.3 328,196.6 452,177.3 576,177.3 700,181.1"/>
   </g>
   <g>
     <g fill="#58a6ff">
-      <circle cx="80" cy="313.8" r="3"/><circle cx="204" cy="255.2" r="3"/><circle cx="328" cy="160.8" r="3"/><circle cx="452" cy="71.5" r="3"/><circle cx="576" cy="76.7" r="3"/><circle cx="700" cy="74.4" r="3"/>
+      <circle cx="80" cy="312.6" r="3"/><circle cx="204" cy="246.9" r="3"/><circle cx="328" cy="159.9" r="3"/><circle cx="452" cy="74.8" r="3"/><circle cx="576" cy="72.9" r="3"/><circle cx="700" cy="78.7" r="3"/>
     </g>
     <g fill="#3fb950">
-      <circle cx="80" cy="286.3" r="3"/><circle cx="204" cy="258.5" r="3"/><circle cx="328" cy="155.2" r="3"/><circle cx="452" cy="93.2" r="3"/><circle cx="576" cy="108.4" r="3"/><circle cx="700" cy="106.7" r="3"/>
+      <circle cx="80" cy="260.4" r="3"/><circle cx="204" cy="250.7" r="3"/><circle cx="328" cy="154.1" r="3"/><circle cx="452" cy="94.1" r="3"/><circle cx="576" cy="94.1" r="3"/><circle cx="700" cy="99.9" r="3"/>
     </g>
     <g fill="#d29922">
-      <circle cx="80" cy="285.9" r="3"/><circle cx="204" cy="257.7" r="3"/><circle cx="328" cy="181.5" r="3"/><circle cx="452" cy="106.5" r="3"/><circle cx="576" cy="118.5" r="3"/><circle cx="700" cy="116.9" r="3"/>
+      <circle cx="80" cy="260.4" r="3"/><circle cx="204" cy="248.8" r="3"/><circle cx="328" cy="156.0" r="3"/><circle cx="452" cy="107.7" r="3"/><circle cx="576" cy="107.7" r="3"/><circle cx="700" cy="115.4" r="3"/>
     </g>
     <g fill="#f778ba">
-      <circle cx="80" cy="289.0" r="3"/><circle cx="204" cy="259.0" r="3"/><circle cx="328" cy="179.6" r="3"/><circle cx="452" cy="128.5" r="3"/><circle cx="576" cy="195.4" r="3"/><circle cx="700" cy="146.9" r="3"/>
+      <circle cx="80" cy="266.2" r="3"/><circle cx="204" cy="248.8" r="3"/><circle cx="328" cy="169.5" r="3"/><circle cx="452" cy="134.7" r="3"/><circle cx="576" cy="134.7" r="3"/><circle cx="700" cy="138.6" r="3"/>
     </g>
     <g fill="#a371f7">
-      <circle cx="80" cy="288.0" r="3"/><circle cx="204" cy="270.6" r="3"/><circle cx="328" cy="222.9" r="3"/><circle cx="452" cy="161.4" r="3"/><circle cx="576" cy="166.2" r="3"/><circle cx="700" cy="173.4" r="3"/>
+      <circle cx="80" cy="275.9" r="3"/><circle cx="204" cy="262.3" r="3"/><circle cx="328" cy="196.6" r="3"/><circle cx="452" cy="177.3" r="3"/><circle cx="576" cy="177.3" r="3"/><circle cx="700" cy="181.1" r="3"/>
     </g>
   </g>
   <g font-family="system-ui, sans-serif" font-size="11" fill="#e6edf3">
