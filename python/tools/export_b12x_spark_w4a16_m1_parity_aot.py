@@ -15,13 +15,13 @@ TOP_K = 8
 def export_kernels(output_dir: Path, target_sms: int) -> None:
     # CuTe's C exporter needs the compiled IR, which executable-only cache hits
     # do not retain.
-    os.environ["SPARKINFER_COMPILE_DISK_CACHE"] = "0"
-    os.environ["SPARKINFER_COMPILE_MEMORY_CACHE"] = "0"
+    os.environ["B12X_COMPILE_DISK_CACHE"] = "0"
+    os.environ["B12X_COMPILE_MEMORY_CACHE"] = "0"
 
     import cuda.bindings.driver as cuda
     import torch
-    import sparkinfer.moe._shared.kernels.w4a16.kernel as w4a16_kernel
-    from sparkinfer.moe._shared.kernels.w4a16.host import (
+    import b12x.moe._shared.kernels.w4a16.kernel as w4a16_kernel
+    from b12x.moe._shared.kernels.w4a16.host import (
         select_route_block_size_m,
     )
 

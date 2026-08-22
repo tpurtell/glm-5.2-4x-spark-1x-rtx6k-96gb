@@ -133,17 +133,28 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Run the complete selected corpus this many times.",
     )
+    parser.add_argument(
+        "--nonce-seed",
+        type=int,
+        help=(
+            "Prefix every prompt with a deterministic unique nonce, preventing "
+            "prompt-cache reuse in paired performance qualification."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=300.0)
     return parser.parse_args()
 
 
 def completion_payload(
-    model: str, case: PromptCase, max_tokens: int | None = None
+    model: str,
+    case: PromptCase,
+    max_tokens: int | None = None,
+    prompt_prefix: str = "",
 ) -> bytes:
     return json.dumps(
         {
             "model": model,
-            "messages": [{"role": "user", "content": case.prompt}],
+            "messages": [{"role": "user", "content": prompt_prefix + case.prompt}],
             "temperature": 0,
             "max_tokens": case.max_tokens if max_tokens is None else max_tokens,
         }
@@ -233,7 +244,18 @@ def main() -> None:
     for repeat_index in range(args.repeats):
         repeat_cases = []
         for case_id in selected:
-            payload = completion_payload(args.model, CASES[case_id], args.max_tokens)
+            prompt_prefix = (
+                f"Qualification nonce {args.nonce_seed}-{repeat_index}-{case_id}. "
+                "Treat this identifier as irrelevant.\n"
+                if args.nonce_seed is not None
+                else ""
+            )
+            payload = completion_payload(
+                args.model,
+                CASES[case_id],
+                args.max_tokens,
+                prompt_prefix,
+            )
             result = request_completion(args.url, payload, args.timeout)
             summary = summarize_case(case_id, result)
             summary["repeat"] = repeat_index + 1

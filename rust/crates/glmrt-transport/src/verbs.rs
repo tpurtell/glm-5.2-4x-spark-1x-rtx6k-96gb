@@ -4447,8 +4447,27 @@ impl VerbsHostMappedRdmaRing {
     pub fn wait_recv_slot_with_stats(
         &mut self,
     ) -> Result<(VerbsHostMappedRdmaSlot, VerbsHostMappedRdmaPollStats)> {
+        self.wait_recv_slot_with_timeout_and_stats(Duration::from_secs(1))
+    }
+
+    pub fn wait_recv_slot_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<VerbsHostMappedRdmaSlot> {
+        self.wait_recv_slot_with_timeout_and_stats(timeout)
+            .map(|(slot, _)| slot)
+    }
+
+    pub fn wait_recv_slot_with_timeout_and_stats(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(VerbsHostMappedRdmaSlot, VerbsHostMappedRdmaPollStats)> {
+        anyhow::ensure!(
+            !timeout.is_zero(),
+            "mapped RDMA receive timeout must be positive"
+        );
         self.ensure_recv_capacity()?;
-        let stats = self.endpoint.poll_stats(0, 1, default_control_timeout())?;
+        let stats = self.endpoint.poll_stats(0, 1, timeout)?;
         Ok((
             self.take_completed_recv_slot()?,
             VerbsHostMappedRdmaPollStats::from_native(stats),
@@ -4965,9 +4984,7 @@ fn default_control_timeout() -> Duration {
 }
 
 fn active_poll_timeout_ms(timeout: Duration) -> u32 {
-    let requested = timeout.as_millis().max(1);
-    let default = u128::from(30_000_u32);
-    requested.max(default).min(u128::from(u32::MAX)) as u32
+    timeout.as_millis().max(1).min(u128::from(u32::MAX)) as u32
 }
 
 fn parse_env_u32(name: &str, default: u32) -> Result<u32> {
@@ -5186,6 +5203,17 @@ fn valid_gid_hex(value: &str) -> bool {
 mod persistent_tests {
     use super::*;
     use crate::{ExpertProtocolV2RowDescriptor, ExpertV2Dtype, ExpertV2SourceKind};
+
+    #[test]
+    fn active_poll_timeout_preserves_the_callers_deadline() {
+        assert_eq!(active_poll_timeout_ms(Duration::ZERO), 1);
+        assert_eq!(active_poll_timeout_ms(Duration::from_secs(1)), 1_000);
+        assert_eq!(active_poll_timeout_ms(Duration::from_secs(60)), 60_000);
+        assert_eq!(
+            active_poll_timeout_ms(Duration::from_millis(u64::from(u32::MAX) + 1)),
+            u32::MAX
+        );
+    }
 
     #[test]
     fn shared_cq_harvester_starts_and_stops_without_registered_qps() {

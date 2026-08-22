@@ -77,7 +77,7 @@ def report(label: str, samples: list[float]) -> None:
 
 
 def prepare_weights(device: torch.device, bench_experts: int):
-    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
+    from b12x.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
     )
 
@@ -181,12 +181,12 @@ def main() -> None:
         ):
             parser.error("expert route counts activate an unallocated expert")
 
-    from sparkinfer.moe._shared.kernels.w4a16.host import (
+    from b12x.moe._shared.kernels.w4a16.host import (
         make_w4a16_packed_buffers,
         max_packed_route_slots,
         packed_gemm_scratch_elements,
     )
-    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+    from b12x.moe._shared.kernels.w4a16.kernel import (
         compile_w4a16_fused_moe,
         run_w4a16_moe,
     )

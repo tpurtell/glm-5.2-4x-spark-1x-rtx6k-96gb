@@ -12112,7 +12112,6 @@ mod tests {
                         (
                             ScoredRoute {
                                 expert_id: slot % 2,
-                                owner: "spark".to_owned(),
                                 score: 0.0,
                                 corrected_score: 0.0,
                                 normalized_weight: route_index as f32 + 1.0,
@@ -12178,7 +12177,6 @@ mod tests {
                         (
                             ScoredRoute {
                                 expert_id: slot % 2,
-                                owner: "spark".to_owned(),
                                 score: 0.0,
                                 corrected_score: 0.0,
                                 normalized_weight: route_index as f32 + 1.0,
@@ -12514,7 +12512,6 @@ mod tests {
         let catalog = tiny_route_catalog(tempdir.path(), &[3]);
         let route = ScoredRoute {
             expert_id: 0,
-            owner: "dodo".to_owned(),
             score: 1.0,
             corrected_score: 1.0,
             normalized_weight: 1.0,
@@ -12578,7 +12575,6 @@ mod tests {
         let catalog = tiny_route_catalog(tempdir.path(), &[3]);
         let route = ScoredRoute {
             expert_id: 0,
-            owner: "dodo".to_owned(),
             score: 1.0,
             corrected_score: 1.0,
             normalized_weight: 1.0,
@@ -12629,7 +12625,6 @@ mod tests {
         let catalog = tiny_route_catalog(tempdir.path(), &[3]);
         let route = ScoredRoute {
             expert_id: 0,
-            owner: "dodo".to_owned(),
             score: 1.0,
             corrected_score: 1.0,
             normalized_weight: 1.0,
@@ -12696,7 +12691,6 @@ mod tests {
         let catalog = tiny_route_catalog(tempdir.path(), &[3, 4]);
         let route = ScoredRoute {
             expert_id: 0,
-            owner: "dodo".to_owned(),
             score: 1.0,
             corrected_score: 1.0,
             normalized_weight: 1.0,
@@ -12809,7 +12803,6 @@ mod tests {
         let row_routes = vec![vec![(
             ScoredRoute {
                 expert_id: 0,
-                owner: "dodo".to_owned(),
                 score: 1.0,
                 corrected_score: 1.0,
                 normalized_weight: 1.0,
@@ -12901,7 +12894,6 @@ mod tests {
             (
                 ScoredRoute {
                     expert_id: 0,
-                    owner: "dodo".to_owned(),
                     score: 1.0,
                     corrected_score: 1.0,
                     normalized_weight: 1.0,
@@ -12911,7 +12903,6 @@ mod tests {
             (
                 ScoredRoute {
                     expert_id: 1,
-                    owner: "emu".to_owned(),
                     score: 0.5,
                     corrected_score: 0.5,
                     normalized_weight: 0.5,
@@ -12954,7 +12945,6 @@ mod tests {
         let row_routes = vec![vec![(
             ScoredRoute {
                 expert_id: 0,
-                owner: "dodo".to_owned(),
                 score: 1.0,
                 corrected_score: 1.0,
                 normalized_weight: 1.0,
@@ -13018,7 +13008,6 @@ mod tests {
         let row_routes = vec![vec![(
             ScoredRoute {
                 expert_id: 0,
-                owner: "dodo".to_owned(),
                 score: 1.0,
                 corrected_score: 1.0,
                 normalized_weight: 1.0,

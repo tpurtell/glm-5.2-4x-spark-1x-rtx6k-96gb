@@ -865,6 +865,16 @@ pub(in crate::commands::real_full) struct RealFullSchedulerSparseTcpDispatchProb
     pub(in crate::commands::real_full) global_rows: usize,
     pub(in crate::commands::real_full) host_rows: usize,
     pub(in crate::commands::real_full) routes: usize,
+    /// Route-shape evidence is collected only while dSpark calibration tracing
+    /// is enabled.  These counters describe the actual wire cohorts (including
+    /// a merged two-request cohort), rather than the request-local row views
+    /// reconstructed after a combined dispatch.
+    pub(in crate::commands::real_full) route_profiled_wire_batches: usize,
+    pub(in crate::commands::real_full) route_profiled_assignments: usize,
+    pub(in crate::commands::real_full) route_profiled_unique_experts: usize,
+    pub(in crate::commands::real_full) route_profiled_reused_assignments: usize,
+    pub(in crate::commands::real_full) route_profiled_max_expert_load: usize,
+    pub(in crate::commands::real_full) route_profiled_load_square_sum: usize,
     pub(in crate::commands::real_full) request_wire_bytes: usize,
     pub(in crate::commands::real_full) response_wire_bytes: usize,
     pub(in crate::commands::real_full) output_values: usize,
@@ -929,6 +939,12 @@ pub(in crate::commands::real_full) async fn real_full_scheduler_sparse_tcp_dispa
         global_rows: 0,
         host_rows: 0,
         routes: 0,
+        route_profiled_wire_batches: 0,
+        route_profiled_assignments: 0,
+        route_profiled_unique_experts: 0,
+        route_profiled_reused_assignments: 0,
+        route_profiled_max_expert_load: 0,
+        route_profiled_load_square_sum: 0,
         request_wire_bytes: 0,
         response_wire_bytes: 0,
         output_values: 0,
@@ -2372,7 +2388,6 @@ mod tests {
                         let normalized_weight = (route_index + 1) as f32 / row.route_count as f32;
                         ScoredRoute {
                             expert_id,
-                            owner: EXPERT_HOSTS[expert_id % EXPERT_HOSTS.len()].to_owned(),
                             score: normalized_weight,
                             corrected_score: normalized_weight,
                             normalized_weight,

@@ -1,0 +1,7449 @@
+{
+  "cells": {
+    "1:1": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 600,
+          "mean": 600,
+          "median": 600.0,
+          "minimum": 600,
+          "p05": 600.0,
+          "p95": 600.0
+        },
+        "load_square_sum": {
+          "maximum": 600,
+          "mean": 600,
+          "median": 600.0,
+          "minimum": 600,
+          "p05": 600.0,
+          "p95": 600.0
+        },
+        "max_expert_load": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "reused_assignments": {
+          "maximum": 0,
+          "mean": 0,
+          "median": 0.0,
+          "minimum": 0,
+          "p05": 0.0,
+          "p95": 0.0
+        },
+        "route_assignments": {
+          "maximum": 600,
+          "mean": 600,
+          "median": 600.0,
+          "minimum": 600,
+          "p05": 600.0,
+          "p95": 600.0
+        },
+        "unique_experts": {
+          "maximum": 600,
+          "mean": 600,
+          "median": 600.0,
+          "minimum": 600,
+          "p05": 600.0,
+          "p95": 600.0
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 1,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "1:2": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1121,
+          "mean": 983.92578125,
+          "median": 983.0,
+          "minimum": 820,
+          "p05": 886.75,
+          "p95": 1086.25
+        },
+        "load_square_sum": {
+          "maximum": 1960,
+          "mean": 1632.1484375,
+          "median": 1634.0,
+          "minimum": 1358,
+          "p05": 1427.5,
+          "p95": 1826.5
+        },
+        "max_expert_load": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "reused_assignments": {
+          "maximum": 380,
+          "mean": 216.07421875,
+          "median": 217.0,
+          "minimum": 79,
+          "p05": 113.75,
+          "p95": 313.25
+        },
+        "route_assignments": {
+          "maximum": 1200,
+          "mean": 1200,
+          "median": 1200.0,
+          "minimum": 1200,
+          "p05": 1200.0,
+          "p95": 1200.0
+        },
+        "unique_experts": {
+          "maximum": 1121,
+          "mean": 983.92578125,
+          "median": 983.0,
+          "minimum": 820,
+          "p05": 886.75,
+          "p95": 1086.25
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 2,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "1:3": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 3,
+          "mean": 3,
+          "median": 3.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 3.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1641,
+          "mean": 1420.56640625,
+          "median": 1423.0,
+          "minimum": 1034,
+          "p05": 1248.75,
+          "p95": 1570.75
+        },
+        "load_square_sum": {
+          "maximum": 3758,
+          "mean": 2705.890625,
+          "median": 2694.0,
+          "minimum": 2122,
+          "p05": 2290.5,
+          "p95": 3205.0
+        },
+        "max_expert_load": {
+          "maximum": 3,
+          "mean": 3,
+          "median": 3.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 3.0
+        },
+        "reused_assignments": {
+          "maximum": 766,
+          "mean": 379.43359375,
+          "median": 377.0,
+          "minimum": 159,
+          "p05": 229.25,
+          "p95": 551.25
+        },
+        "route_assignments": {
+          "maximum": 1800,
+          "mean": 1800,
+          "median": 1800.0,
+          "minimum": 1800,
+          "p05": 1800.0,
+          "p95": 1800.0
+        },
+        "unique_experts": {
+          "maximum": 1641,
+          "mean": 1420.56640625,
+          "median": 1423.0,
+          "minimum": 1034,
+          "p05": 1248.75,
+          "p95": 1570.75
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 3,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "1:4": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 4,
+          "mean": 4,
+          "median": 4.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 4.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2078,
+          "mean": 1758.046875,
+          "median": 1770.5,
+          "minimum": 1002,
+          "p05": 1473.0,
+          "p95": 2038.0
+        },
+        "load_square_sum": {
+          "maximum": 6384,
+          "mean": 4149.4453125,
+          "median": 4084.0,
+          "minimum": 3126,
+          "p05": 3286.0,
+          "p95": 5160.0
+        },
+        "max_expert_load": {
+          "maximum": 4,
+          "mean": 3.99609375,
+          "median": 4.0,
+          "minimum": 3,
+          "p05": 4.0,
+          "p95": 4.0
+        },
+        "reused_assignments": {
+          "maximum": 1398,
+          "mean": 641.953125,
+          "median": 629.5,
+          "minimum": 322,
+          "p05": 362.0,
+          "p95": 927.0
+        },
+        "route_assignments": {
+          "maximum": 2400,
+          "mean": 2400,
+          "median": 2400.0,
+          "minimum": 2400,
+          "p05": 2400.0,
+          "p95": 2400.0
+        },
+        "unique_experts": {
+          "maximum": 2078,
+          "mean": 1758.046875,
+          "median": 1770.5,
+          "minimum": 1002,
+          "p05": 1473.0,
+          "p95": 2038.0
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 4,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "1:5": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 5,
+          "mean": 5,
+          "median": 5.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 5.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2570,
+          "mean": 2193.89453125,
+          "median": 2225.0,
+          "minimum": 1451,
+          "p05": 1853.75,
+          "p95": 2431.25
+        },
+        "load_square_sum": {
+          "maximum": 8128,
+          "mean": 5326.53125,
+          "median": 5128.0,
+          "minimum": 4030,
+          "p05": 4451.5,
+          "p95": 6634.0
+        },
+        "max_expert_load": {
+          "maximum": 5,
+          "mean": 4.9609375,
+          "median": 5.0,
+          "minimum": 4,
+          "p05": 5.0,
+          "p95": 5.0
+        },
+        "reused_assignments": {
+          "maximum": 1549,
+          "mean": 806.10546875,
+          "median": 775.0,
+          "minimum": 430,
+          "p05": 568.75,
+          "p95": 1146.25
+        },
+        "route_assignments": {
+          "maximum": 3000,
+          "mean": 3000,
+          "median": 3000.0,
+          "minimum": 3000,
+          "p05": 3000.0,
+          "p95": 3000.0
+        },
+        "unique_experts": {
+          "maximum": 2570,
+          "mean": 2193.89453125,
+          "median": 2225.0,
+          "minimum": 1451,
+          "p05": 1853.75,
+          "p95": 2431.25
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 5,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "1:6": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 6,
+          "mean": 6,
+          "median": 6.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 6.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3010,
+          "mean": 2445.3125,
+          "median": 2502.0,
+          "minimum": 983,
+          "p05": 1906.0,
+          "p95": 2894.5
+        },
+        "load_square_sum": {
+          "maximum": 14706,
+          "mean": 7312.6484375,
+          "median": 7099.0,
+          "minimum": 5034,
+          "p05": 5439.0,
+          "p95": 9700.5
+        },
+        "max_expert_load": {
+          "maximum": 6,
+          "mean": 5.8984375,
+          "median": 6.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 6.0
+        },
+        "reused_assignments": {
+          "maximum": 2617,
+          "mean": 1154.6875,
+          "median": 1098.0,
+          "minimum": 590,
+          "p05": 705.5,
+          "p95": 1694.0
+        },
+        "route_assignments": {
+          "maximum": 3600,
+          "mean": 3600,
+          "median": 3600.0,
+          "minimum": 3600,
+          "p05": 3600.0,
+          "p95": 3600.0
+        },
+        "unique_experts": {
+          "maximum": 3010,
+          "mean": 2445.3125,
+          "median": 2502.0,
+          "minimum": 983,
+          "p05": 1906.0,
+          "p95": 2894.5
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 6,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "1:7": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 7,
+          "mean": 7,
+          "median": 7.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 7.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3383,
+          "mean": 2804.671875,
+          "median": 2834.0,
+          "minimum": 1396,
+          "p05": 2103.5,
+          "p95": 3182.5
+        },
+        "load_square_sum": {
+          "maximum": 16308,
+          "mean": 8884.8359375,
+          "median": 8612.0,
+          "minimum": 6310,
+          "p05": 7018.5,
+          "p95": 12219.5
+        },
+        "max_expert_load": {
+          "maximum": 7,
+          "mean": 6.79296875,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 7.0
+        },
+        "reused_assignments": {
+          "maximum": 2804,
+          "mean": 1395.328125,
+          "median": 1366.0,
+          "minimum": 817,
+          "p05": 1017.5,
+          "p95": 2096.5
+        },
+        "route_assignments": {
+          "maximum": 4200,
+          "mean": 4200,
+          "median": 4200.0,
+          "minimum": 4200,
+          "p05": 4200.0,
+          "p95": 4200.0
+        },
+        "unique_experts": {
+          "maximum": 3383,
+          "mean": 2804.671875,
+          "median": 2834.0,
+          "minimum": 1396,
+          "p05": 2103.5,
+          "p95": 3182.5
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 7,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "1:8": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 1,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3788,
+          "mean": 2923.66015625,
+          "median": 3005.0,
+          "minimum": 1473,
+          "p05": 1643.75,
+          "p95": 3536.0
+        },
+        "load_square_sum": {
+          "maximum": 20640,
+          "mean": 11808.3515625,
+          "median": 11071.0,
+          "minimum": 7554,
+          "p05": 8389.0,
+          "p95": 18435.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.765625,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3327,
+          "mean": 1876.33984375,
+          "median": 1795.0,
+          "minimum": 1012,
+          "p05": 1264.0,
+          "p95": 3156.25
+        },
+        "route_assignments": {
+          "maximum": 4800,
+          "mean": 4800,
+          "median": 4800.0,
+          "minimum": 4800,
+          "p05": 4800.0,
+          "p95": 4800.0
+        },
+        "unique_experts": {
+          "maximum": 3788,
+          "mean": 2923.66015625,
+          "median": 3005.0,
+          "minimum": 1473,
+          "p05": 1643.75,
+          "p95": 3536.0
+        },
+        "wire_batches": {
+          "maximum": 75,
+          "mean": 75,
+          "median": 75.0,
+          "minimum": 75,
+          "p05": 75.0,
+          "p95": 75.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 8,
+      "wire_cohorts": [
+        [
+          0
+        ]
+      ]
+    },
+    "2:10": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.0078125,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.9921875,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3776,
+          "mean": 2796.8125,
+          "median": 2813.0,
+          "minimum": 1589,
+          "p05": 1870.25,
+          "p95": 3462.0
+        },
+        "load_square_sum": {
+          "maximum": 21320,
+          "mean": 12305.375,
+          "median": 11834.0,
+          "minimum": 8622,
+          "p05": 9589.0,
+          "p95": 17063.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 6.9609375,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3413,
+          "mean": 1908.23046875,
+          "median": 1819.0,
+          "minimum": 1074,
+          "p05": 1344.0,
+          "p95": 2753.0
+        },
+        "route_assignments": {
+          "maximum": 6000,
+          "mean": 6000,
+          "median": 6000.0,
+          "minimum": 6000,
+          "p05": 6000.0,
+          "p95": 6000.0
+        },
+        "unique_experts": {
+          "maximum": 4926,
+          "mean": 4091.76953125,
+          "median": 4181.0,
+          "minimum": 2587,
+          "p05": 3247.0,
+          "p95": 4656.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 10,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:11": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.328125,
+          "median": 5.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.671875,
+          "median": 6.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3620,
+          "mean": 2801.625,
+          "median": 2800.0,
+          "minimum": 1592,
+          "p05": 2151.25,
+          "p95": 3473.0
+        },
+        "load_square_sum": {
+          "maximum": 22854,
+          "mean": 13312.8125,
+          "median": 12818.0,
+          "minimum": 9756,
+          "p05": 10760.0,
+          "p95": 17680.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 6.9140625,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3635,
+          "mean": 2061.4453125,
+          "median": 1962.5,
+          "minimum": 1249,
+          "p05": 1530.25,
+          "p95": 2733.75
+        },
+        "route_assignments": {
+          "maximum": 6600,
+          "mean": 6600,
+          "median": 6600.0,
+          "minimum": 6600,
+          "p05": 6600.0,
+          "p95": 6600.0
+        },
+        "unique_experts": {
+          "maximum": 5351,
+          "mean": 4538.5546875,
+          "median": 4637.5,
+          "minimum": 2965,
+          "p05": 3866.25,
+          "p95": 5069.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 11,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:12": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.03125,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.96875,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3741,
+          "mean": 2843.8515625,
+          "median": 2821.5,
+          "minimum": 1749,
+          "p05": 1895.0,
+          "p95": 3533.25
+        },
+        "load_square_sum": {
+          "maximum": 24752,
+          "mean": 15425.453125,
+          "median": 14877.0,
+          "minimum": 10564,
+          "p05": 12034.0,
+          "p95": 20548.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.19921875,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3978,
+          "mean": 2441.1484375,
+          "median": 2383.5,
+          "minimum": 1360,
+          "p05": 1772.0,
+          "p95": 3524.75
+        },
+        "route_assignments": {
+          "maximum": 7200,
+          "mean": 7200,
+          "median": 7200.0,
+          "minimum": 7200,
+          "p05": 7200.0,
+          "p95": 7200.0
+        },
+        "unique_experts": {
+          "maximum": 5840,
+          "mean": 4758.8515625,
+          "median": 4816.5,
+          "minimum": 3222,
+          "p05": 3675.25,
+          "p95": 5428.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 12,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:13": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.484375,
+          "median": 6.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 6.515625,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3827,
+          "mean": 2935.41015625,
+          "median": 2995.5,
+          "minimum": 1574,
+          "p05": 2212.5,
+          "p95": 3521.25
+        },
+        "load_square_sum": {
+          "maximum": 27406,
+          "mean": 17080.9453125,
+          "median": 16632.0,
+          "minimum": 11832,
+          "p05": 13274.0,
+          "p95": 22201.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.5390625,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 4900,
+          "mean": 2694.64453125,
+          "median": 2629.0,
+          "minimum": 1533,
+          "p05": 1941.5,
+          "p95": 3836.25
+        },
+        "route_assignments": {
+          "maximum": 7800,
+          "mean": 7800,
+          "median": 7800.0,
+          "minimum": 7800,
+          "p05": 7800.0,
+          "p95": 7800.0
+        },
+        "unique_experts": {
+          "maximum": 6267,
+          "mean": 5105.35546875,
+          "median": 5171.0,
+          "minimum": 2900,
+          "p05": 3963.75,
+          "p95": 5858.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 13,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:14": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.9609375,
+          "median": 6.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.0390625,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3777,
+          "mean": 2982.73828125,
+          "median": 2997.0,
+          "minimum": 1473,
+          "p05": 2285.25,
+          "p95": 3496.0
+        },
+        "load_square_sum": {
+          "maximum": 31696,
+          "mean": 19039.140625,
+          "median": 18574.0,
+          "minimum": 13534,
+          "p05": 14918.0,
+          "p95": 24964.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.7265625,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 5531,
+          "mean": 3040.109375,
+          "median": 2952.0,
+          "minimum": 1904,
+          "p05": 2232.0,
+          "p95": 4158.25
+        },
+        "route_assignments": {
+          "maximum": 8400,
+          "mean": 8400,
+          "median": 8400.0,
+          "minimum": 8400,
+          "p05": 8400.0,
+          "p95": 8400.0
+        },
+        "unique_experts": {
+          "maximum": 6496,
+          "mean": 5359.890625,
+          "median": 5448.0,
+          "minimum": 2869,
+          "p05": 4241.75,
+          "p95": 6168.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 14,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:15": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 7.4296875,
+          "median": 7.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.5703125,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3776,
+          "mean": 3068.91015625,
+          "median": 3106.5,
+          "minimum": 1589,
+          "p05": 2562.5,
+          "p95": 3446.75
+        },
+        "load_square_sum": {
+          "maximum": 34584,
+          "mean": 20730.890625,
+          "median": 20154.0,
+          "minimum": 15208,
+          "p05": 16674.0,
+          "p95": 26679.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.80859375,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 5876,
+          "mean": 3293.81640625,
+          "median": 3170.5,
+          "minimum": 2234,
+          "p05": 2513.5,
+          "p95": 4474.5
+        },
+        "route_assignments": {
+          "maximum": 9000,
+          "mean": 9000,
+          "median": 9000.0,
+          "minimum": 9000,
+          "p05": 9000.0,
+          "p95": 9000.0
+        },
+        "unique_experts": {
+          "maximum": 6766,
+          "mean": 5706.18359375,
+          "median": 5829.5,
+          "minimum": 3124,
+          "p05": 4525.5,
+          "p95": 6486.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 15,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:16": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3776,
+          "mean": 3177.5625,
+          "median": 3211.5,
+          "minimum": 1647,
+          "p05": 2727.0,
+          "p95": 3579.25
+        },
+        "load_square_sum": {
+          "maximum": 37200,
+          "mean": 23118.7265625,
+          "median": 22597.0,
+          "minimum": 16456,
+          "p05": 18212.5,
+          "p95": 30771.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.921875,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 6364,
+          "mean": 3678.7890625,
+          "median": 3589.0,
+          "minimum": 2413,
+          "p05": 2785.25,
+          "p95": 5017.0
+        },
+        "route_assignments": {
+          "maximum": 9600,
+          "mean": 9600,
+          "median": 9600.0,
+          "minimum": 9600,
+          "p05": 9600.0,
+          "p95": 9600.0
+        },
+        "unique_experts": {
+          "maximum": 7187,
+          "mean": 5921.2109375,
+          "median": 6011.0,
+          "minimum": 3236,
+          "p05": 4583.0,
+          "p95": 6814.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 16,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:2": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "1": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 600,
+          "mean": 600,
+          "median": 600.0,
+          "minimum": 600,
+          "p05": 600.0,
+          "p95": 600.0
+        },
+        "load_square_sum": {
+          "maximum": 1200,
+          "mean": 1200,
+          "median": 1200.0,
+          "minimum": 1200,
+          "p05": 1200.0,
+          "p95": 1200.0
+        },
+        "max_expert_load": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "reused_assignments": {
+          "maximum": 0,
+          "mean": 0,
+          "median": 0.0,
+          "minimum": 0,
+          "p05": 0.0,
+          "p95": 0.0
+        },
+        "route_assignments": {
+          "maximum": 1200,
+          "mean": 1200,
+          "median": 1200.0,
+          "minimum": 1200,
+          "p05": 1200.0,
+          "p95": 1200.0
+        },
+        "unique_experts": {
+          "maximum": 1200,
+          "mean": 1200,
+          "median": 1200.0,
+          "minimum": 1200,
+          "p05": 1200.0,
+          "p95": 1200.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 2,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:3": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 1.5,
+          "median": 1.5,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 1.5,
+          "median": 1.5,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1159,
+          "mean": 982.296875,
+          "median": 977.0,
+          "minimum": 855,
+          "p05": 892.75,
+          "p95": 1087.25
+        },
+        "load_square_sum": {
+          "maximum": 2490,
+          "mean": 2235.40625,
+          "median": 2246.0,
+          "minimum": 1882,
+          "p05": 2025.5,
+          "p95": 2414.5
+        },
+        "max_expert_load": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "reused_assignments": {
+          "maximum": 345,
+          "mean": 217.703125,
+          "median": 223.0,
+          "minimum": 41,
+          "p05": 112.75,
+          "p95": 307.25
+        },
+        "route_assignments": {
+          "maximum": 1800,
+          "mean": 1800,
+          "median": 1800.0,
+          "minimum": 1800,
+          "p05": 1800.0,
+          "p95": 1800.0
+        },
+        "unique_experts": {
+          "maximum": 1759,
+          "mean": 1582.296875,
+          "median": 1577.0,
+          "minimum": 1455,
+          "p05": 1492.75,
+          "p95": 1687.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 3,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:4": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1151,
+          "mean": 1016.3984375,
+          "median": 1012.5,
+          "minimum": 885,
+          "p05": 923.0,
+          "p95": 1108.25
+        },
+        "load_square_sum": {
+          "maximum": 3722,
+          "mean": 3273.3984375,
+          "median": 3279.0,
+          "minimum": 2742,
+          "p05": 3000.5,
+          "p95": 3564.0
+        },
+        "max_expert_load": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "reused_assignments": {
+          "maximum": 661,
+          "mean": 436.69921875,
+          "median": 439.5,
+          "minimum": 171,
+          "p05": 300.25,
+          "p95": 582.0
+        },
+        "route_assignments": {
+          "maximum": 2400,
+          "mean": 2400,
+          "median": 2400.0,
+          "minimum": 2400,
+          "p05": 2400.0,
+          "p95": 2400.0
+        },
+        "unique_experts": {
+          "maximum": 2229,
+          "mean": 1963.30078125,
+          "median": 1960.5,
+          "minimum": 1739,
+          "p05": 1818.0,
+          "p95": 2099.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 4,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:5": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 3,
+          "mean": 2.55859375,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        },
+        "1": {
+          "maximum": 3,
+          "mean": 2.44140625,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1630,
+          "mean": 1412.42578125,
+          "median": 1414.0,
+          "minimum": 1024,
+          "p05": 1251.25,
+          "p95": 1555.25
+        },
+        "load_square_sum": {
+          "maximum": 5430,
+          "mean": 4380.4140625,
+          "median": 4378.0,
+          "minimum": 3754,
+          "p05": 3954.0,
+          "p95": 4840.0
+        },
+        "max_expert_load": {
+          "maximum": 3,
+          "mean": 3,
+          "median": 3.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 3.0
+        },
+        "reused_assignments": {
+          "maximum": 1047,
+          "mean": 613.85546875,
+          "median": 607.0,
+          "minimum": 352,
+          "p05": 449.75,
+          "p95": 778.25
+        },
+        "route_assignments": {
+          "maximum": 3000,
+          "mean": 3000,
+          "median": 3000.0,
+          "minimum": 3000,
+          "p05": 3000.0,
+          "p95": 3000.0
+        },
+        "unique_experts": {
+          "maximum": 2648,
+          "mean": 2386.14453125,
+          "median": 2393.0,
+          "minimum": 1953,
+          "p05": 2221.75,
+          "p95": 2550.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 5,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:6": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 4,
+          "mean": 2.99609375,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        },
+        "1": {
+          "maximum": 4,
+          "mean": 3.00390625,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2068,
+          "mean": 1707.13671875,
+          "median": 1746.0,
+          "minimum": 946,
+          "p05": 1407.25,
+          "p95": 1982.0
+        },
+        "load_square_sum": {
+          "maximum": 8838,
+          "mean": 5782.4140625,
+          "median": 5736.0,
+          "minimum": 4676,
+          "p05": 4968.5,
+          "p95": 6861.0
+        },
+        "max_expert_load": {
+          "maximum": 4,
+          "mean": 3.87109375,
+          "median": 4.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 4.0
+        },
+        "reused_assignments": {
+          "maximum": 1717,
+          "mean": 856.7421875,
+          "median": 838.0,
+          "minimum": 484,
+          "p05": 599.75,
+          "p95": 1182.0
+        },
+        "route_assignments": {
+          "maximum": 3600,
+          "mean": 3600,
+          "median": 3600.0,
+          "minimum": 3600,
+          "p05": 3600.0,
+          "p95": 3600.0
+        },
+        "unique_experts": {
+          "maximum": 3116,
+          "mean": 2743.2578125,
+          "median": 2762.0,
+          "minimum": 1883,
+          "p05": 2418.0,
+          "p95": 3000.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 6,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:7": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 5,
+          "mean": 3.58203125,
+          "median": 4.0,
+          "minimum": 1,
+          "p05": 2.0,
+          "p95": 5.0
+        },
+        "1": {
+          "maximum": 6,
+          "mean": 3.41796875,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 5.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2530,
+          "mean": 2027.8359375,
+          "median": 2042.5,
+          "minimum": 1471,
+          "p05": 1599.0,
+          "p95": 2417.0
+        },
+        "load_square_sum": {
+          "maximum": 9646,
+          "mean": 6990.109375,
+          "median": 6896.0,
+          "minimum": 5558,
+          "p05": 6048.0,
+          "p95": 8170.0
+        },
+        "max_expert_load": {
+          "maximum": 6,
+          "mean": 4.62890625,
+          "median": 5.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 5.0
+        },
+        "reused_assignments": {
+          "maximum": 1872,
+          "mean": 1039.66796875,
+          "median": 1038.5,
+          "minimum": 550,
+          "p05": 773.5,
+          "p95": 1360.25
+        },
+        "route_assignments": {
+          "maximum": 4200,
+          "mean": 4200,
+          "median": 4200.0,
+          "minimum": 4200,
+          "p05": 4200.0,
+          "p95": 4200.0
+        },
+        "unique_experts": {
+          "maximum": 3650,
+          "mean": 3160.33203125,
+          "median": 3161.5,
+          "minimum": 2328,
+          "p05": 2839.75,
+          "p95": 3426.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 7,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:8": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 6,
+          "mean": 3.9140625,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "1": {
+          "maximum": 6,
+          "mean": 4.0859375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3010,
+          "mean": 2316.16796875,
+          "median": 2351.0,
+          "minimum": 1396,
+          "p05": 1753.25,
+          "p95": 2813.0
+        },
+        "load_square_sum": {
+          "maximum": 12852,
+          "mean": 8616.3046875,
+          "median": 8424.0,
+          "minimum": 6682,
+          "p05": 7011.5,
+          "p95": 10902.5
+        },
+        "max_expert_load": {
+          "maximum": 6,
+          "mean": 5.40234375,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 6.0
+        },
+        "reused_assignments": {
+          "maximum": 2502,
+          "mean": 1316.84375,
+          "median": 1288.5,
+          "minimum": 774,
+          "p05": 915.0,
+          "p95": 1819.5
+        },
+        "route_assignments": {
+          "maximum": 4800,
+          "mean": 4800,
+          "median": 4800.0,
+          "minimum": 4800,
+          "p05": 4800.0,
+          "p95": 4800.0
+        },
+        "unique_experts": {
+          "maximum": 4026,
+          "mean": 3483.15625,
+          "median": 3511.5,
+          "minimum": 2298,
+          "p05": 2980.5,
+          "p95": 3885.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 8,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "2:9": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 7,
+          "mean": 4.6015625,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 7.0
+        },
+        "1": {
+          "maximum": 7,
+          "mean": 4.3984375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 7.0
+        }
+      },
+      "requests": 2,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3354,
+          "mean": 2428.18359375,
+          "median": 2360.0,
+          "minimum": 1307,
+          "p05": 1841.0,
+          "p95": 3087.75
+        },
+        "load_square_sum": {
+          "maximum": 17388,
+          "mean": 9954.4453125,
+          "median": 9780.0,
+          "minimum": 7604,
+          "p05": 8125.5,
+          "p95": 12346.0
+        },
+        "max_expert_load": {
+          "maximum": 7,
+          "mean": 5.74609375,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 5.0,
+          "p95": 7.0
+        },
+        "reused_assignments": {
+          "maximum": 3091,
+          "mean": 1525.66015625,
+          "median": 1507.0,
+          "minimum": 916,
+          "p05": 1086.0,
+          "p95": 2184.0
+        },
+        "route_assignments": {
+          "maximum": 5400,
+          "mean": 5400,
+          "median": 5400.0,
+          "minimum": 5400,
+          "p05": 5400.0,
+          "p95": 5400.0
+        },
+        "unique_experts": {
+          "maximum": 4484,
+          "mean": 3874.33984375,
+          "median": 3893.0,
+          "minimum": 2309,
+          "p05": 3216.0,
+          "p95": 4314.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 9,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "3:10": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 6,
+          "mean": 3.3203125,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "1": {
+          "maximum": 6,
+          "mean": 3.37890625,
+          "median": 2.5,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "2": {
+          "maximum": 6,
+          "mean": 3.30078125,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2930,
+          "mean": 2206.44921875,
+          "median": 2225.0,
+          "minimum": 1396,
+          "p05": 1687.75,
+          "p95": 2785.5
+        },
+        "load_square_sum": {
+          "maximum": 16084,
+          "mean": 10268.7421875,
+          "median": 10001.0,
+          "minimum": 7926,
+          "p05": 8736.0,
+          "p95": 12969.5
+        },
+        "max_expert_load": {
+          "maximum": 6,
+          "mean": 5.1796875,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 6.0
+        },
+        "reused_assignments": {
+          "maximum": 2724,
+          "mean": 1543.59375,
+          "median": 1503.0,
+          "minimum": 849,
+          "p05": 1140.5,
+          "p95": 2199.75
+        },
+        "route_assignments": {
+          "maximum": 6000,
+          "mean": 6000,
+          "median": 6000.0,
+          "minimum": 6000,
+          "p05": 6000.0,
+          "p95": 6000.0
+        },
+        "unique_experts": {
+          "maximum": 5151,
+          "mean": 4456.40625,
+          "median": 4497.0,
+          "minimum": 3276,
+          "p05": 3800.25,
+          "p95": 4859.5
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 10,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:11": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 7,
+          "mean": 3.515625,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.25
+        },
+        "1": {
+          "maximum": 7,
+          "mean": 3.7890625,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 7.0
+        },
+        "2": {
+          "maximum": 7,
+          "mean": 3.6953125,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.25
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3383,
+          "mean": 2378.16015625,
+          "median": 2336.0,
+          "minimum": 1589,
+          "p05": 1804.75,
+          "p95": 3036.25
+        },
+        "load_square_sum": {
+          "maximum": 15718,
+          "mean": 11321.875,
+          "median": 11174.0,
+          "minimum": 8742,
+          "p05": 9827.0,
+          "p95": 13130.5
+        },
+        "max_expert_load": {
+          "maximum": 7,
+          "mean": 5.50390625,
+          "median": 5.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 7.0
+        },
+        "reused_assignments": {
+          "maximum": 2762,
+          "mean": 1698.23828125,
+          "median": 1684.5,
+          "minimum": 923,
+          "p05": 1293.75,
+          "p95": 2164.25
+        },
+        "route_assignments": {
+          "maximum": 6600,
+          "mean": 6600,
+          "median": 6600.0,
+          "minimum": 6600,
+          "p05": 6600.0,
+          "p95": 6600.0
+        },
+        "unique_experts": {
+          "maximum": 5677,
+          "mean": 4901.76171875,
+          "median": 4915.5,
+          "minimum": 3838,
+          "p05": 4435.75,
+          "p95": 5306.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 11,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:12": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 3.9765625,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.12109375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 3.90234375,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3793,
+          "mean": 2628.25,
+          "median": 2655.5,
+          "minimum": 1621,
+          "p05": 1905.75,
+          "p95": 3392.75
+        },
+        "load_square_sum": {
+          "maximum": 21964,
+          "mean": 13669.859375,
+          "median": 13376.0,
+          "minimum": 10276,
+          "p05": 10878.5,
+          "p95": 18388.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 6.55859375,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3615,
+          "mean": 2085.734375,
+          "median": 2087.5,
+          "minimum": 1262,
+          "p05": 1463.25,
+          "p95": 2936.0
+        },
+        "route_assignments": {
+          "maximum": 7200,
+          "mean": 7200,
+          "median": 7200.0,
+          "minimum": 7200,
+          "p05": 7200.0,
+          "p95": 7200.0
+        },
+        "unique_experts": {
+          "maximum": 5938,
+          "mean": 5114.265625,
+          "median": 5112.5,
+          "minimum": 3585,
+          "p05": 4264.0,
+          "p95": 5736.75
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 12,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:13": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 4.27734375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.49609375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 4.2265625,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3728,
+          "mean": 2615.74609375,
+          "median": 2640.0,
+          "minimum": 1488,
+          "p05": 1981.75,
+          "p95": 3315.75
+        },
+        "load_square_sum": {
+          "maximum": 26412,
+          "mean": 14905.5546875,
+          "median": 14523.0,
+          "minimum": 11428,
+          "p05": 12065.0,
+          "p95": 19230.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 6.4921875,
+          "median": 6.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3961,
+          "mean": 2293.91015625,
+          "median": 2256.0,
+          "minimum": 1477,
+          "p05": 1707.75,
+          "p95": 3147.5
+        },
+        "route_assignments": {
+          "maximum": 7800,
+          "mean": 7800,
+          "median": 7800.0,
+          "minimum": 7800,
+          "p05": 7800.0,
+          "p95": 7800.0
+        },
+        "unique_experts": {
+          "maximum": 6323,
+          "mean": 5506.08984375,
+          "median": 5544.0,
+          "minimum": 3839,
+          "p05": 4652.5,
+          "p95": 6092.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 13,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:14": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 4.48046875,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.8828125,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 4.63671875,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3657,
+          "mean": 2759.25,
+          "median": 2742.5,
+          "minimum": 1807,
+          "p05": 2173.0,
+          "p95": 3319.0
+        },
+        "load_square_sum": {
+          "maximum": 24232,
+          "mean": 16517.1484375,
+          "median": 16191.0,
+          "minimum": 11990,
+          "p05": 13385.0,
+          "p95": 20659.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 6.890625,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3886,
+          "mean": 2547.515625,
+          "median": 2492.5,
+          "minimum": 1457,
+          "p05": 1880.0,
+          "p95": 3338.0
+        },
+        "route_assignments": {
+          "maximum": 8400,
+          "mean": 8400,
+          "median": 8400.0,
+          "minimum": 8400,
+          "p05": 8400.0,
+          "p95": 8400.0
+        },
+        "unique_experts": {
+          "maximum": 6943,
+          "mean": 5852.484375,
+          "median": 5907.5,
+          "minimum": 4514,
+          "p05": 5062.0,
+          "p95": 6520.0
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 14,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:15": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.19140625,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.87890625,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 4.9296875,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3740,
+          "mean": 2822.9375,
+          "median": 2800.0,
+          "minimum": 1621,
+          "p05": 2269.5,
+          "p95": 3462.0
+        },
+        "load_square_sum": {
+          "maximum": 29296,
+          "mean": 17876.6484375,
+          "median": 17337.0,
+          "minimum": 13770,
+          "p05": 14910.0,
+          "p95": 22387.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.078125,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 4653,
+          "mean": 2773.21875,
+          "median": 2684.5,
+          "minimum": 1854,
+          "p05": 2180.0,
+          "p95": 3711.5
+        },
+        "route_assignments": {
+          "maximum": 9000,
+          "mean": 9000,
+          "median": 9000.0,
+          "minimum": 9000,
+          "p05": 9000.0,
+          "p95": 9000.0
+        },
+        "unique_experts": {
+          "maximum": 7146,
+          "mean": 6226.78125,
+          "median": 6315.5,
+          "minimum": 4347,
+          "p05": 5288.5,
+          "p95": 6820.0
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 15,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:16": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.34765625,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.54296875,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 5.109375,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3622,
+          "mean": 2897.66015625,
+          "median": 2917.0,
+          "minimum": 1872,
+          "p05": 2290.25,
+          "p95": 3441.75
+        },
+        "load_square_sum": {
+          "maximum": 33120,
+          "mean": 19701.046875,
+          "median": 19203.0,
+          "minimum": 14050,
+          "p05": 16159.0,
+          "p95": 25012.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.26953125,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 5272,
+          "mean": 3070.40625,
+          "median": 2980.5,
+          "minimum": 1774,
+          "p05": 2373.75,
+          "p95": 4016.5
+        },
+        "route_assignments": {
+          "maximum": 9600,
+          "mean": 9600,
+          "median": 9600.0,
+          "minimum": 9600,
+          "p05": 9600.0,
+          "p95": 9600.0
+        },
+        "unique_experts": {
+          "maximum": 7826,
+          "mean": 6529.59375,
+          "median": 6619.5,
+          "minimum": 4328,
+          "p05": 5583.5,
+          "p95": 7226.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 16,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:17": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.6953125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.59375,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 5.7109375,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.75,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3621,
+          "mean": 2921.578125,
+          "median": 2920.0,
+          "minimum": 2062,
+          "p05": 2364.5,
+          "p95": 3431.0
+        },
+        "load_square_sum": {
+          "maximum": 30012,
+          "mean": 21349.9453125,
+          "median": 20991.0,
+          "minimum": 15600,
+          "p05": 17333.0,
+          "p95": 26429.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.40234375,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 4992,
+          "mean": 3337.203125,
+          "median": 3287.5,
+          "minimum": 2056,
+          "p05": 2566.25,
+          "p95": 4332.25
+        },
+        "route_assignments": {
+          "maximum": 10200,
+          "mean": 10200,
+          "median": 10200.0,
+          "minimum": 10200,
+          "p05": 10200.0,
+          "p95": 10200.0
+        },
+        "unique_experts": {
+          "maximum": 8144,
+          "mean": 6862.796875,
+          "median": 6912.5,
+          "minimum": 5208,
+          "p05": 5867.75,
+          "p95": 7633.75
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 17,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:18": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.91796875,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 6.24609375,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 5.8359375,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3776,
+          "mean": 3037.03125,
+          "median": 3032.5,
+          "minimum": 2050,
+          "p05": 2446.25,
+          "p95": 3495.75
+        },
+        "load_square_sum": {
+          "maximum": 33360,
+          "mean": 23285.7421875,
+          "median": 23044.0,
+          "minimum": 16944,
+          "p05": 18829.5,
+          "p95": 28767.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.6484375,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 5586,
+          "mean": 3660.890625,
+          "median": 3632.5,
+          "minimum": 2334,
+          "p05": 2824.75,
+          "p95": 4867.25
+        },
+        "route_assignments": {
+          "maximum": 10800,
+          "mean": 10800,
+          "median": 10800.0,
+          "minimum": 10800,
+          "p05": 10800.0,
+          "p95": 10800.0
+        },
+        "unique_experts": {
+          "maximum": 8466,
+          "mean": 7139.109375,
+          "median": 7167.5,
+          "minimum": 5214,
+          "p05": 5932.75,
+          "p95": 7975.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 18,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:19": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.31640625,
+          "median": 7.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 6.35546875,
+          "median": 6.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 6.328125,
+          "median": 6.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3727,
+          "mean": 3057.00390625,
+          "median": 3075.5,
+          "minimum": 2192,
+          "p05": 2527.25,
+          "p95": 3517.0
+        },
+        "load_square_sum": {
+          "maximum": 34958,
+          "mean": 24965.765625,
+          "median": 24229.0,
+          "minimum": 18348,
+          "p05": 20352.0,
+          "p95": 32400.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.71484375,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 5688,
+          "mean": 3920.859375,
+          "median": 3820.0,
+          "minimum": 2584,
+          "p05": 3030.25,
+          "p95": 5241.75
+        },
+        "route_assignments": {
+          "maximum": 11400,
+          "mean": 11400,
+          "median": 11400.0,
+          "minimum": 11400,
+          "p05": 11400.0,
+          "p95": 11400.0
+        },
+        "unique_experts": {
+          "maximum": 8816,
+          "mean": 7479.140625,
+          "median": 7580.0,
+          "minimum": 5712,
+          "p05": 6158.25,
+          "p95": 8369.75
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 19,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:20": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.53125,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 6.6875,
+          "median": 7.5,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 6.78125,
+          "median": 8.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3776,
+          "mean": 3126.84375,
+          "median": 3141.5,
+          "minimum": 2274,
+          "p05": 2579.0,
+          "p95": 3579.75
+        },
+        "load_square_sum": {
+          "maximum": 37320,
+          "mean": 26858.328125,
+          "median": 26375.0,
+          "minimum": 19544,
+          "p05": 22131.0,
+          "p95": 34048.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.828125,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 6298,
+          "mean": 4261.24609375,
+          "median": 4168.0,
+          "minimum": 2761,
+          "p05": 3334.25,
+          "p95": 5498.25
+        },
+        "route_assignments": {
+          "maximum": 12000,
+          "mean": 12000,
+          "median": 12000.0,
+          "minimum": 12000,
+          "p05": 12000.0,
+          "p95": 12000.0
+        },
+        "unique_experts": {
+          "maximum": 9239,
+          "mean": 7738.75390625,
+          "median": 7832.0,
+          "minimum": 5702,
+          "p05": 6501.75,
+          "p95": 8665.75
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 20,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:21": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.88671875,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.04296875,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 7.0703125,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3741,
+          "mean": 3133.85546875,
+          "median": 3178.5,
+          "minimum": 2215,
+          "p05": 2682.75,
+          "p95": 3547.0
+        },
+        "load_square_sum": {
+          "maximum": 44214,
+          "mean": 28711.453125,
+          "median": 28209.0,
+          "minimum": 22022,
+          "p05": 23379.0,
+          "p95": 35067.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.89453125,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 7515,
+          "mean": 4550.68359375,
+          "median": 4423.0,
+          "minimum": 3211,
+          "p05": 3558.25,
+          "p95": 5736.75
+        },
+        "route_assignments": {
+          "maximum": 12600,
+          "mean": 12600,
+          "median": 12600.0,
+          "minimum": 12600,
+          "p05": 12600.0,
+          "p95": 12600.0
+        },
+        "unique_experts": {
+          "maximum": 9389,
+          "mean": 8049.31640625,
+          "median": 8177.0,
+          "minimum": 5085,
+          "p05": 6863.25,
+          "p95": 9041.75
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 21,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:22": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 7.28515625,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.390625,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 7.32421875,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3621,
+          "mean": 3186.69921875,
+          "median": 3219.0,
+          "minimum": 2333,
+          "p05": 2727.0,
+          "p95": 3540.0
+        },
+        "load_square_sum": {
+          "maximum": 46318,
+          "mean": 30889.3984375,
+          "median": 30256.0,
+          "minimum": 23656,
+          "p05": 25618.0,
+          "p95": 37720.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.953125,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 7561,
+          "mean": 4917.3125,
+          "median": 4789.5,
+          "minimum": 3555,
+          "p05": 3898.0,
+          "p95": 6176.5
+        },
+        "route_assignments": {
+          "maximum": 13200,
+          "mean": 13200,
+          "median": 13200.0,
+          "minimum": 13200,
+          "p05": 13200.0,
+          "p95": 13200.0
+        },
+        "unique_experts": {
+          "maximum": 9645,
+          "mean": 8282.6875,
+          "median": 8410.5,
+          "minimum": 5639,
+          "p05": 7023.5,
+          "p95": 9302.0
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 22,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:23": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 7.67578125,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.63671875,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 7.6875,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3728,
+          "mean": 3227.43359375,
+          "median": 3243.0,
+          "minimum": 2466,
+          "p05": 2800.0,
+          "p95": 3594.0
+        },
+        "load_square_sum": {
+          "maximum": 44720,
+          "mean": 32256.4609375,
+          "median": 31986.0,
+          "minimum": 24662,
+          "p05": 26788.0,
+          "p95": 39523.0
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.9609375,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 7478,
+          "mean": 5125.66796875,
+          "median": 5018.5,
+          "minimum": 3720,
+          "p05": 4095.75,
+          "p95": 6465.5
+        },
+        "route_assignments": {
+          "maximum": 13800,
+          "mean": 13800,
+          "median": 13800.0,
+          "minimum": 13800,
+          "p05": 13800.0,
+          "p95": 13800.0
+        },
+        "unique_experts": {
+          "maximum": 10080,
+          "mean": 8674.33203125,
+          "median": 8781.5,
+          "minimum": 6322,
+          "p05": 7334.5,
+          "p95": 9704.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 23,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:24": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3750,
+          "mean": 3297.03515625,
+          "median": 3346.0,
+          "minimum": 2707,
+          "p05": 2924.0,
+          "p95": 3579.25
+        },
+        "load_square_sum": {
+          "maximum": 50330,
+          "mean": 34681.96875,
+          "median": 33758.0,
+          "minimum": 25830,
+          "p05": 28631.5,
+          "p95": 43392.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 7.98828125,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 8133,
+          "mean": 5517.93359375,
+          "median": 5404.0,
+          "minimum": 3907,
+          "p05": 4413.0,
+          "p95": 7129.25
+        },
+        "route_assignments": {
+          "maximum": 14400,
+          "mean": 14400,
+          "median": 14400.0,
+          "minimum": 14400,
+          "p05": 14400.0,
+          "p95": 14400.0
+        },
+        "unique_experts": {
+          "maximum": 10493,
+          "mean": 8882.06640625,
+          "median": 8996.0,
+          "minimum": 6267,
+          "p05": 7270.75,
+          "p95": 9987.0
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 24,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:3": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "1": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "2": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 600,
+          "mean": 600,
+          "median": 600.0,
+          "minimum": 600,
+          "p05": 600.0,
+          "p95": 600.0
+        },
+        "load_square_sum": {
+          "maximum": 1800,
+          "mean": 1800,
+          "median": 1800.0,
+          "minimum": 1800,
+          "p05": 1800.0,
+          "p95": 1800.0
+        },
+        "max_expert_load": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "reused_assignments": {
+          "maximum": 0,
+          "mean": 0,
+          "median": 0.0,
+          "minimum": 0,
+          "p05": 0.0,
+          "p95": 0.0
+        },
+        "route_assignments": {
+          "maximum": 1800,
+          "mean": 1800,
+          "median": 1800.0,
+          "minimum": 1800,
+          "p05": 1800.0,
+          "p95": 1800.0
+        },
+        "unique_experts": {
+          "maximum": 1800,
+          "mean": 1800,
+          "median": 1800.0,
+          "minimum": 1800,
+          "p05": 1800.0,
+          "p95": 1800.0
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 3,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:4": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 1.375,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 1.30078125,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "2": {
+          "maximum": 2,
+          "mean": 1.32421875,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1159,
+          "mean": 981.8046875,
+          "median": 979.5,
+          "minimum": 813,
+          "p05": 885.75,
+          "p95": 1091.25
+        },
+        "load_square_sum": {
+          "maximum": 3174,
+          "mean": 2836.390625,
+          "median": 2841.0,
+          "minimum": 2482,
+          "p05": 2617.5,
+          "p95": 3028.5
+        },
+        "max_expert_load": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "reused_assignments": {
+          "maximum": 387,
+          "mean": 218.1953125,
+          "median": 220.5,
+          "minimum": 41,
+          "p05": 108.75,
+          "p95": 314.25
+        },
+        "route_assignments": {
+          "maximum": 2400,
+          "mean": 2400,
+          "median": 2400.0,
+          "minimum": 2400,
+          "p05": 2400.0,
+          "p95": 2400.0
+        },
+        "unique_experts": {
+          "maximum": 2359,
+          "mean": 2181.8046875,
+          "median": 2179.5,
+          "minimum": 2013,
+          "p05": 2085.75,
+          "p95": 2291.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 4,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:5": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 1.7109375,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 1.6640625,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "2": {
+          "maximum": 2,
+          "mean": 1.625,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1134,
+          "mean": 1018.19140625,
+          "median": 1014.0,
+          "minimum": 893,
+          "p05": 938.75,
+          "p95": 1104.5
+        },
+        "load_square_sum": {
+          "maximum": 4304,
+          "mean": 3872.515625,
+          "median": 3883.0,
+          "minimum": 3426,
+          "p05": 3577.0,
+          "p95": 4139.5
+        },
+        "max_expert_load": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "reused_assignments": {
+          "maximum": 652,
+          "mean": 436.2578125,
+          "median": 441.5,
+          "minimum": 213,
+          "p05": 288.5,
+          "p95": 569.75
+        },
+        "route_assignments": {
+          "maximum": 3000,
+          "mean": 3000,
+          "median": 3000.0,
+          "minimum": 3000,
+          "p05": 3000.0,
+          "p95": 3000.0
+        },
+        "unique_experts": {
+          "maximum": 2787,
+          "mean": 2563.7421875,
+          "median": 2558.5,
+          "minimum": 2348,
+          "p05": 2430.25,
+          "p95": 2711.5
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 5,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:6": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "2": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1159,
+          "mean": 1040.9921875,
+          "median": 1043.5,
+          "minimum": 913,
+          "p05": 962.25,
+          "p95": 1115.5
+        },
+        "load_square_sum": {
+          "maximum": 5346,
+          "mean": 4899.171875,
+          "median": 4881.0,
+          "minimum": 4282,
+          "p05": 4575.5,
+          "p95": 5203.0
+        },
+        "max_expert_load": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "reused_assignments": {
+          "maximum": 873,
+          "mean": 649.5859375,
+          "median": 640.5,
+          "minimum": 341,
+          "p05": 487.75,
+          "p95": 801.5
+        },
+        "route_assignments": {
+          "maximum": 3600,
+          "mean": 3600,
+          "median": 3600.0,
+          "minimum": 3600,
+          "p05": 3600.0,
+          "p95": 3600.0
+        },
+        "unique_experts": {
+          "maximum": 3259,
+          "mean": 2950.4140625,
+          "median": 2959.5,
+          "minimum": 2727,
+          "p05": 2798.5,
+          "p95": 3112.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 6,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:7": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 3,
+          "mean": 2.33203125,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        },
+        "1": {
+          "maximum": 3,
+          "mean": 2.34765625,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        },
+        "2": {
+          "maximum": 3,
+          "mean": 2.3203125,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1632,
+          "mean": 1423.0703125,
+          "median": 1417.0,
+          "minimum": 1152,
+          "p05": 1245.5,
+          "p95": 1588.5
+        },
+        "load_square_sum": {
+          "maximum": 6878,
+          "mean": 5970.375,
+          "median": 5957.0,
+          "minimum": 4922,
+          "p05": 5424.0,
+          "p95": 6519.0
+        },
+        "max_expert_load": {
+          "maximum": 3,
+          "mean": 3,
+          "median": 3.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 3.0
+        },
+        "reused_assignments": {
+          "maximum": 1186,
+          "mean": 811.25,
+          "median": 811.5,
+          "minimum": 351,
+          "p05": 589.75,
+          "p95": 1021.0
+        },
+        "route_assignments": {
+          "maximum": 4200,
+          "mean": 4200,
+          "median": 4200.0,
+          "minimum": 4200,
+          "p05": 4200.0,
+          "p95": 4200.0
+        },
+        "unique_experts": {
+          "maximum": 3849,
+          "mean": 3388.75,
+          "median": 3388.5,
+          "minimum": 3014,
+          "p05": 3179.0,
+          "p95": 3610.25
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 7,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:8": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 4,
+          "mean": 2.6015625,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        },
+        "1": {
+          "maximum": 4,
+          "mean": 2.625,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        },
+        "2": {
+          "maximum": 4,
+          "mean": 2.7734375,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2068,
+          "mean": 1731.11328125,
+          "median": 1748.0,
+          "minimum": 1002,
+          "p05": 1466.0,
+          "p95": 1982.0
+        },
+        "load_square_sum": {
+          "maximum": 9838,
+          "mean": 7341.1640625,
+          "median": 7316.0,
+          "minimum": 6240,
+          "p05": 6521.0,
+          "p95": 8191.5
+        },
+        "max_expert_load": {
+          "maximum": 4,
+          "mean": 3.8671875,
+          "median": 4.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 4.0
+        },
+        "reused_assignments": {
+          "maximum": 1925,
+          "mean": 1055.875,
+          "median": 1048.5,
+          "minimum": 677,
+          "p05": 768.0,
+          "p95": 1314.75
+        },
+        "route_assignments": {
+          "maximum": 4800,
+          "mean": 4800,
+          "median": 4800.0,
+          "minimum": 4800,
+          "p05": 4800.0,
+          "p95": 4800.0
+        },
+        "unique_experts": {
+          "maximum": 4123,
+          "mean": 3744.125,
+          "median": 3751.5,
+          "minimum": 2875,
+          "p05": 3485.25,
+          "p95": 4032.0
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 8,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "3:9": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 5,
+          "mean": 2.9921875,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 5.0
+        },
+        "1": {
+          "maximum": 5,
+          "mean": 2.9765625,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 5.0
+        },
+        "2": {
+          "maximum": 5,
+          "mean": 3.03125,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 5.0
+        }
+      },
+      "requests": 3,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2587,
+          "mean": 1942.33203125,
+          "median": 1897.0,
+          "minimum": 1358,
+          "p05": 1554.75,
+          "p95": 2372.0
+        },
+        "load_square_sum": {
+          "maximum": 12144,
+          "mean": 8524.78125,
+          "median": 8431.0,
+          "minimum": 6794,
+          "p05": 7546.5,
+          "p95": 9693.0
+        },
+        "max_expert_load": {
+          "maximum": 5,
+          "mean": 4.39453125,
+          "median": 4.0,
+          "minimum": 3,
+          "p05": 4.0,
+          "p95": 5.0
+        },
+        "reused_assignments": {
+          "maximum": 2300,
+          "mean": 1233.6171875,
+          "median": 1222.0,
+          "minimum": 617,
+          "p05": 908.25,
+          "p95": 1558.75
+        },
+        "route_assignments": {
+          "maximum": 5400,
+          "mean": 5400,
+          "median": 5400.0,
+          "minimum": 5400,
+          "p05": 5400.0,
+          "p95": 5400.0
+        },
+        "unique_experts": {
+          "maximum": 4783,
+          "mean": 4166.3828125,
+          "median": 4178.0,
+          "minimum": 3100,
+          "p05": 3841.25,
+          "p95": 4491.75
+        },
+        "wire_batches": {
+          "maximum": 225,
+          "mean": 225,
+          "median": 225.0,
+          "minimum": 225,
+          "p05": 225.0,
+          "p95": 225.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 9,
+      "wire_cohorts": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    "4:10": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 4,
+          "mean": 2.62890625,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        },
+        "1": {
+          "maximum": 4,
+          "mean": 2.39453125,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        },
+        "2": {
+          "maximum": 4,
+          "mean": 2.484375,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        },
+        "3": {
+          "maximum": 4,
+          "mean": 2.4921875,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 4.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3002,
+          "mean": 2571.2109375,
+          "median": 2582.5,
+          "minimum": 1843,
+          "p05": 2231.75,
+          "p95": 2884.5
+        },
+        "load_square_sum": {
+          "maximum": 14596,
+          "mean": 10029.234375,
+          "median": 9899.0,
+          "minimum": 8502,
+          "p05": 8847.0,
+          "p95": 11668.5
+        },
+        "max_expert_load": {
+          "maximum": 6,
+          "mean": 5.46484375,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 6.0
+        },
+        "reused_assignments": {
+          "maximum": 2472,
+          "mean": 1526.75,
+          "median": 1498.5,
+          "minimum": 1123,
+          "p05": 1230.25,
+          "p95": 1862.5
+        },
+        "route_assignments": {
+          "maximum": 6000,
+          "mean": 6000,
+          "median": 6000.0,
+          "minimum": 6000,
+          "p05": 6000.0,
+          "p95": 6000.0
+        },
+        "unique_experts": {
+          "maximum": 4877,
+          "mean": 4473.25,
+          "median": 4501.5,
+          "minimum": 3528,
+          "p05": 4137.5,
+          "p95": 4769.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 10,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:11": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 5,
+          "mean": 2.6796875,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 2.0,
+          "p95": 5.0
+        },
+        "1": {
+          "maximum": 5,
+          "mean": 2.80859375,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 5.0
+        },
+        "2": {
+          "maximum": 6,
+          "mean": 2.76171875,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 5.0
+        },
+        "3": {
+          "maximum": 5,
+          "mean": 2.75,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 5.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3511,
+          "mean": 2825.9921875,
+          "median": 2818.5,
+          "minimum": 2143,
+          "p05": 2378.75,
+          "p95": 3257.5
+        },
+        "load_square_sum": {
+          "maximum": 15170,
+          "mean": 11346.53125,
+          "median": 11161.0,
+          "minimum": 9224,
+          "p05": 9829.5,
+          "p95": 13367.0
+        },
+        "max_expert_load": {
+          "maximum": 7,
+          "mean": 5.8671875,
+          "median": 6.0,
+          "minimum": 4,
+          "p05": 5.0,
+          "p95": 7.0
+        },
+        "reused_assignments": {
+          "maximum": 2622,
+          "mean": 1742.1796875,
+          "median": 1725.0,
+          "minimum": 1180,
+          "p05": 1361.5,
+          "p95": 2142.5
+        },
+        "route_assignments": {
+          "maximum": 6600,
+          "mean": 6600,
+          "median": 6600.0,
+          "minimum": 6600,
+          "p05": 6600.0,
+          "p95": 6600.0
+        },
+        "unique_experts": {
+          "maximum": 5420,
+          "mean": 4857.8203125,
+          "median": 4875.0,
+          "minimum": 3978,
+          "p05": 4457.5,
+          "p95": 5238.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 11,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:12": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 6,
+          "mean": 2.9921875,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "1": {
+          "maximum": 6,
+          "mean": 2.9921875,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "2": {
+          "maximum": 6,
+          "mean": 2.921875,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "3": {
+          "maximum": 6,
+          "mean": 3.09375,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 3845,
+          "mean": 3098.87890625,
+          "median": 3133.5,
+          "minimum": 2159,
+          "p05": 2559.75,
+          "p95": 3649.5
+        },
+        "load_square_sum": {
+          "maximum": 20128,
+          "mean": 12901.5,
+          "median": 12659.0,
+          "minimum": 10558,
+          "p05": 10943.0,
+          "p95": 15720.5
+        },
+        "max_expert_load": {
+          "maximum": 8,
+          "mean": 6.4296875,
+          "median": 6.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "reused_assignments": {
+          "maximum": 3270,
+          "mean": 2009.34765625,
+          "median": 1984.0,
+          "minimum": 1388,
+          "p05": 1569.0,
+          "p95": 2553.75
+        },
+        "route_assignments": {
+          "maximum": 7200,
+          "mean": 7200,
+          "median": 7200.0,
+          "minimum": 7200,
+          "p05": 7200.0,
+          "p95": 7200.0
+        },
+        "unique_experts": {
+          "maximum": 5812,
+          "mean": 5190.65234375,
+          "median": 5216.0,
+          "minimum": 3930,
+          "p05": 4646.25,
+          "p95": 5631.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 12,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:13": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 7,
+          "mean": 3.21875,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "1": {
+          "maximum": 7,
+          "mean": 3.18359375,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "2": {
+          "maximum": 7,
+          "mean": 3.1484375,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "3": {
+          "maximum": 7,
+          "mean": 3.44921875,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 4052,
+          "mean": 3271.02734375,
+          "median": 3271.0,
+          "minimum": 2213,
+          "p05": 2691.75,
+          "p95": 3853.0
+        },
+        "load_square_sum": {
+          "maximum": 20568,
+          "mean": 14445.921875,
+          "median": 14145.0,
+          "minimum": 11678,
+          "p05": 12337.5,
+          "p95": 17611.0
+        },
+        "max_expert_load": {
+          "maximum": 9,
+          "mean": 6.87109375,
+          "median": 7.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 9.0
+        },
+        "reused_assignments": {
+          "maximum": 3815,
+          "mean": 2266.03515625,
+          "median": 2227.5,
+          "minimum": 1603,
+          "p05": 1812.75,
+          "p95": 2867.25
+        },
+        "route_assignments": {
+          "maximum": 7800,
+          "mean": 7800,
+          "median": 7800.0,
+          "minimum": 7800,
+          "p05": 7800.0,
+          "p95": 7800.0
+        },
+        "unique_experts": {
+          "maximum": 6197,
+          "mean": 5533.96484375,
+          "median": 5572.5,
+          "minimum": 3985,
+          "p05": 4932.75,
+          "p95": 5987.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 13,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:14": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 3.4765625,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 6.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 3.6171875,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 3.46875,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 3.4375,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 4497,
+          "mean": 3564.125,
+          "median": 3561.5,
+          "minimum": 2427,
+          "p05": 2822.5,
+          "p95": 4289.0
+        },
+        "load_square_sum": {
+          "maximum": 26752,
+          "mean": 16375.9765625,
+          "median": 15964.0,
+          "minimum": 12208,
+          "p05": 13780.0,
+          "p95": 20294.5
+        },
+        "max_expert_load": {
+          "maximum": 10,
+          "mean": 7.6015625,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 10.0
+        },
+        "reused_assignments": {
+          "maximum": 4143,
+          "mean": 2587.1953125,
+          "median": 2516.0,
+          "minimum": 1616,
+          "p05": 2047.5,
+          "p95": 3341.5
+        },
+        "route_assignments": {
+          "maximum": 8400,
+          "mean": 8400,
+          "median": 8400.0,
+          "minimum": 8400,
+          "p05": 8400.0,
+          "p95": 8400.0
+        },
+        "unique_experts": {
+          "maximum": 6784,
+          "mean": 5812.8046875,
+          "median": 5884.0,
+          "minimum": 4257,
+          "p05": 5058.5,
+          "p95": 6352.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 14,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:15": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 3.78125,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 7.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 3.7578125,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 3.83984375,
+          "median": 4.0,
+          "minimum": 1,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 3.62109375,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 4688,
+          "mean": 3674.16015625,
+          "median": 3595.5,
+          "minimum": 2200,
+          "p05": 3041.0,
+          "p95": 4435.25
+        },
+        "load_square_sum": {
+          "maximum": 35764,
+          "mean": 18052.28125,
+          "median": 17627.0,
+          "minimum": 14376,
+          "p05": 15315.5,
+          "p95": 21879.5
+        },
+        "max_expert_load": {
+          "maximum": 11,
+          "mean": 7.91015625,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 10.0
+        },
+        "reused_assignments": {
+          "maximum": 5058,
+          "mean": 2862.05859375,
+          "median": 2785.5,
+          "minimum": 2072,
+          "p05": 2340.5,
+          "p95": 3643.25
+        },
+        "route_assignments": {
+          "maximum": 9000,
+          "mean": 9000,
+          "median": 9000.0,
+          "minimum": 9000,
+          "p05": 9000.0,
+          "p95": 9000.0
+        },
+        "unique_experts": {
+          "maximum": 6928,
+          "mean": 6137.94140625,
+          "median": 6214.5,
+          "minimum": 3942,
+          "p05": 5356.75,
+          "p95": 6659.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 15,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:16": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 3.98828125,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 3.7734375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 4.22265625,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 4.015625,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 4973,
+          "mean": 3812.94921875,
+          "median": 3819.0,
+          "minimum": 2516,
+          "p05": 3017.75,
+          "p95": 4617.25
+        },
+        "load_square_sum": {
+          "maximum": 34380,
+          "mean": 20047.75,
+          "median": 19250.0,
+          "minimum": 15288,
+          "p05": 16693.0,
+          "p95": 26425.5
+        },
+        "max_expert_load": {
+          "maximum": 12,
+          "mean": 8.37890625,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 6.0,
+          "p95": 11.0
+        },
+        "reused_assignments": {
+          "maximum": 5066,
+          "mean": 3182.078125,
+          "median": 3080.5,
+          "minimum": 2241,
+          "p05": 2567.25,
+          "p95": 4165.0
+        },
+        "route_assignments": {
+          "maximum": 9600,
+          "mean": 9600,
+          "median": 9600.0,
+          "minimum": 9600,
+          "p05": 9600.0,
+          "p95": 9600.0
+        },
+        "unique_experts": {
+          "maximum": 7359,
+          "mean": 6417.921875,
+          "median": 6519.5,
+          "minimum": 4534,
+          "p05": 5435.0,
+          "p95": 7032.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 16,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:17": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 3.96484375,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.33984375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 4.33984375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 4.35546875,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5210,
+          "mean": 3929.6796875,
+          "median": 3883.5,
+          "minimum": 2866,
+          "p05": 3263.0,
+          "p95": 4766.25
+        },
+        "load_square_sum": {
+          "maximum": 35402,
+          "mean": 21700.9140625,
+          "median": 21257.0,
+          "minimum": 16696,
+          "p05": 18473.0,
+          "p95": 26554.0
+        },
+        "max_expert_load": {
+          "maximum": 13,
+          "mean": 8.765625,
+          "median": 9.0,
+          "minimum": 6,
+          "p05": 7.0,
+          "p95": 12.0
+        },
+        "reused_assignments": {
+          "maximum": 5438,
+          "mean": 3454.25390625,
+          "median": 3366.0,
+          "minimum": 2539,
+          "p05": 2850.5,
+          "p95": 4304.25
+        },
+        "route_assignments": {
+          "maximum": 10200,
+          "mean": 10200,
+          "median": 10200.0,
+          "minimum": 10200,
+          "p05": 10200.0,
+          "p95": 10200.0
+        },
+        "unique_experts": {
+          "maximum": 7661,
+          "mean": 6745.74609375,
+          "median": 6834.0,
+          "minimum": 4762,
+          "p05": 5895.75,
+          "p95": 7349.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 17,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:18": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 4.6953125,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.484375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 4.4921875,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 4.328125,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5495,
+          "mean": 4119.83984375,
+          "median": 4033.0,
+          "minimum": 2688,
+          "p05": 3278.25,
+          "p95": 5066.75
+        },
+        "load_square_sum": {
+          "maximum": 42708,
+          "mean": 23717.9296875,
+          "median": 23353.0,
+          "minimum": 18516,
+          "p05": 19824.5,
+          "p95": 28993.0
+        },
+        "max_expert_load": {
+          "maximum": 14,
+          "mean": 9.0625,
+          "median": 9.0,
+          "minimum": 6,
+          "p05": 7.0,
+          "p95": 12.0
+        },
+        "reused_assignments": {
+          "maximum": 6209,
+          "mean": 3794.75,
+          "median": 3742.5,
+          "minimum": 2791,
+          "p05": 3095.75,
+          "p95": 4654.5
+        },
+        "route_assignments": {
+          "maximum": 10800,
+          "mean": 10800,
+          "median": 10800.0,
+          "minimum": 10800,
+          "p05": 10800.0,
+          "p95": 10800.0
+        },
+        "unique_experts": {
+          "maximum": 8009,
+          "mean": 7005.25,
+          "median": 7057.5,
+          "minimum": 4591,
+          "p05": 6145.5,
+          "p95": 7704.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 18,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:19": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 4.77734375,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.765625,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 4.8984375,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 4.55859375,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5599,
+          "mean": 4176.84765625,
+          "median": 4135.5,
+          "minimum": 2653,
+          "p05": 3504.5,
+          "p95": 4939.0
+        },
+        "load_square_sum": {
+          "maximum": 39504,
+          "mean": 25531.03125,
+          "median": 24942.0,
+          "minimum": 19506,
+          "p05": 21539.5,
+          "p95": 31835.5
+        },
+        "max_expert_load": {
+          "maximum": 14,
+          "mean": 9.3671875,
+          "median": 9.0,
+          "minimum": 6,
+          "p05": 8.0,
+          "p95": 12.0
+        },
+        "reused_assignments": {
+          "maximum": 6531,
+          "mean": 4098.42578125,
+          "median": 4020.0,
+          "minimum": 2909,
+          "p05": 3416.75,
+          "p95": 5066.0
+        },
+        "route_assignments": {
+          "maximum": 11400,
+          "mean": 11400,
+          "median": 11400.0,
+          "minimum": 11400,
+          "p05": 11400.0,
+          "p95": 11400.0
+        },
+        "unique_experts": {
+          "maximum": 8491,
+          "mean": 7301.57421875,
+          "median": 7380.0,
+          "minimum": 4869,
+          "p05": 6334.0,
+          "p95": 7983.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 19,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:20": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 4.65625,
+          "median": 4.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 4.9375,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 5.2421875,
+          "median": 5.5,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 5.1640625,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5757,
+          "mean": 4325.01953125,
+          "median": 4256.0,
+          "minimum": 2813,
+          "p05": 3587.75,
+          "p95": 5252.0
+        },
+        "load_square_sum": {
+          "maximum": 52356,
+          "mean": 28125.71875,
+          "median": 27260.0,
+          "minimum": 20976,
+          "p05": 23175.5,
+          "p95": 35007.5
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 9.875,
+          "median": 10.0,
+          "minimum": 7,
+          "p05": 8.0,
+          "p95": 13.0
+        },
+        "reused_assignments": {
+          "maximum": 6732,
+          "mean": 4489.2421875,
+          "median": 4423.0,
+          "minimum": 3275,
+          "p05": 3703.0,
+          "p95": 5676.0
+        },
+        "route_assignments": {
+          "maximum": 12000,
+          "mean": 12000,
+          "median": 12000.0,
+          "minimum": 12000,
+          "p05": 12000.0,
+          "p95": 12000.0
+        },
+        "unique_experts": {
+          "maximum": 8725,
+          "mean": 7510.7578125,
+          "median": 7577.0,
+          "minimum": 5268,
+          "p05": 6324.0,
+          "p95": 8297.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 20,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:21": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 4.99609375,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.4296875,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 5.28515625,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 5.2890625,
+          "median": 5.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5753,
+          "mean": 4502.3984375,
+          "median": 4436.5,
+          "minimum": 3495,
+          "p05": 3862.5,
+          "p95": 5367.0
+        },
+        "load_square_sum": {
+          "maximum": 49834,
+          "mean": 29390.671875,
+          "median": 28725.0,
+          "minimum": 22204,
+          "p05": 24650.0,
+          "p95": 36064.5
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 10.12109375,
+          "median": 10.0,
+          "minimum": 7,
+          "p05": 8.0,
+          "p95": 13.0
+        },
+        "reused_assignments": {
+          "maximum": 6683,
+          "mean": 4704.19921875,
+          "median": 4648.5,
+          "minimum": 3455,
+          "p05": 3962.5,
+          "p95": 5625.0
+        },
+        "route_assignments": {
+          "maximum": 12600,
+          "mean": 12600,
+          "median": 12600.0,
+          "minimum": 12600,
+          "p05": 12600.0,
+          "p95": 12600.0
+        },
+        "unique_experts": {
+          "maximum": 9145,
+          "mean": 7895.80078125,
+          "median": 7951.5,
+          "minimum": 5917,
+          "p05": 6975.0,
+          "p95": 8637.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 21,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:22": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.8125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.38671875,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 5.53125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 5.26953125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5872,
+          "mean": 4610.78515625,
+          "median": 4589.5,
+          "minimum": 2793,
+          "p05": 3899.5,
+          "p95": 5350.0
+        },
+        "load_square_sum": {
+          "maximum": 69280,
+          "mean": 32062.1796875,
+          "median": 31365.0,
+          "minimum": 25660,
+          "p05": 26839.0,
+          "p95": 39990.0
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 10.58203125,
+          "median": 10.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 13.25
+        },
+        "reused_assignments": {
+          "maximum": 7945,
+          "mean": 5104.45703125,
+          "median": 4999.5,
+          "minimum": 4103,
+          "p05": 4332.25,
+          "p95": 6223.5
+        },
+        "route_assignments": {
+          "maximum": 13200,
+          "mean": 13200,
+          "median": 13200.0,
+          "minimum": 13200,
+          "p05": 13200.0,
+          "p95": 13200.0
+        },
+        "unique_experts": {
+          "maximum": 9097,
+          "mean": 8095.54296875,
+          "median": 8200.5,
+          "minimum": 5255,
+          "p05": 6976.5,
+          "p95": 8867.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 22,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:23": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 5.8046875,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.6953125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 5.82421875,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 5.67578125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5856,
+          "mean": 4701.94921875,
+          "median": 4673.5,
+          "minimum": 2893,
+          "p05": 3982.25,
+          "p95": 5525.0
+        },
+        "load_square_sum": {
+          "maximum": 57184,
+          "mean": 34111.5390625,
+          "median": 33395.0,
+          "minimum": 26662,
+          "p05": 28668.0,
+          "p95": 42390.0
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 11.05859375,
+          "median": 11.0,
+          "minimum": 7,
+          "p05": 8.0,
+          "p95": 14.0
+        },
+        "reused_assignments": {
+          "maximum": 8076,
+          "mean": 5445.8203125,
+          "median": 5375.0,
+          "minimum": 4243,
+          "p05": 4593.25,
+          "p95": 6639.5
+        },
+        "route_assignments": {
+          "maximum": 13800,
+          "mean": 13800,
+          "median": 13800.0,
+          "minimum": 13800,
+          "p05": 13800.0,
+          "p95": 13800.0
+        },
+        "unique_experts": {
+          "maximum": 9557,
+          "mean": 8354.1796875,
+          "median": 8425.0,
+          "minimum": 5724,
+          "p05": 7160.5,
+          "p95": 9206.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 23,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:24": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.2265625,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 5.76953125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 6.1015625,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 5.90234375,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6097,
+          "mean": 4882.7109375,
+          "median": 4884.5,
+          "minimum": 3003,
+          "p05": 4089.75,
+          "p95": 5675.25
+        },
+        "load_square_sum": {
+          "maximum": 62438,
+          "mean": 36351.2109375,
+          "median": 35098.0,
+          "minimum": 28772,
+          "p05": 30596.0,
+          "p95": 46614.5
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 11.48828125,
+          "median": 11.0,
+          "minimum": 7,
+          "p05": 9.0,
+          "p95": 14.0
+        },
+        "reused_assignments": {
+          "maximum": 8526,
+          "mean": 5775.515625,
+          "median": 5684.0,
+          "minimum": 4627,
+          "p05": 4892.25,
+          "p95": 7139.0
+        },
+        "route_assignments": {
+          "maximum": 14400,
+          "mean": 14400,
+          "median": 14400.0,
+          "minimum": 14400,
+          "p05": 14400.0,
+          "p95": 14400.0
+        },
+        "unique_experts": {
+          "maximum": 9773,
+          "mean": 8624.484375,
+          "median": 8716.0,
+          "minimum": 5874,
+          "p05": 7261.0,
+          "p95": 9507.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 24,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:25": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.23828125,
+          "median": 6.5,
+          "minimum": 2,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 6.37109375,
+          "median": 7.0,
+          "minimum": 2,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 6.33203125,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 6.05859375,
+          "median": 6.0,
+          "minimum": 2,
+          "p05": 2.75,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 5953,
+          "mean": 4927.484375,
+          "median": 4932.5,
+          "minimum": 3563,
+          "p05": 4033.5,
+          "p95": 5730.25
+        },
+        "load_square_sum": {
+          "maximum": 63096,
+          "mean": 38431.8359375,
+          "median": 37489.0,
+          "minimum": 30684,
+          "p05": 32223.0,
+          "p95": 46536.0
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 11.63671875,
+          "median": 12.0,
+          "minimum": 8,
+          "p05": 9.0,
+          "p95": 15.0
+        },
+        "reused_assignments": {
+          "maximum": 8484,
+          "mean": 6134.05078125,
+          "median": 6057.5,
+          "minimum": 4976,
+          "p05": 5171.5,
+          "p95": 7279.75
+        },
+        "route_assignments": {
+          "maximum": 15000,
+          "mean": 15000,
+          "median": 15000.0,
+          "minimum": 15000,
+          "p05": 15000.0,
+          "p95": 15000.0
+        },
+        "unique_experts": {
+          "maximum": 10024,
+          "mean": 8865.94921875,
+          "median": 8942.5,
+          "minimum": 6516,
+          "p05": 7720.25,
+          "p95": 9828.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 25,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:26": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.72265625,
+          "median": 8.0,
+          "minimum": 2,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 6.30859375,
+          "median": 7.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 6.59765625,
+          "median": 8.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 6.37109375,
+          "median": 7.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6125,
+          "mean": 5065.14453125,
+          "median": 5105.5,
+          "minimum": 3558,
+          "p05": 4277.75,
+          "p95": 5847.75
+        },
+        "load_square_sum": {
+          "maximum": 65696,
+          "mean": 40827.5859375,
+          "median": 39546.0,
+          "minimum": 32490,
+          "p05": 34344.0,
+          "p95": 51157.5
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 11.7578125,
+          "median": 12.0,
+          "minimum": 8,
+          "p05": 9.0,
+          "p95": 15.0
+        },
+        "reused_assignments": {
+          "maximum": 9612,
+          "mean": 6495.63671875,
+          "median": 6343.5,
+          "minimum": 5304,
+          "p05": 5573.75,
+          "p95": 7786.5
+        },
+        "route_assignments": {
+          "maximum": 15600,
+          "mean": 15600,
+          "median": 15600.0,
+          "minimum": 15600,
+          "p05": 15600.0,
+          "p95": 15600.0
+        },
+        "unique_experts": {
+          "maximum": 10296,
+          "mean": 9104.36328125,
+          "median": 9256.5,
+          "minimum": 5988,
+          "p05": 7813.5,
+          "p95": 10026.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 26,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:27": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 6.7109375,
+          "median": 7.0,
+          "minimum": 3,
+          "p05": 3.75,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 6.7734375,
+          "median": 8.0,
+          "minimum": 3,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 6.6484375,
+          "median": 7.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 6.8671875,
+          "median": 8.0,
+          "minimum": 3,
+          "p05": 4.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6002,
+          "mean": 5071.3515625,
+          "median": 5110.0,
+          "minimum": 3538,
+          "p05": 4289.25,
+          "p95": 5729.5
+        },
+        "load_square_sum": {
+          "maximum": 67274,
+          "mean": 43655.7109375,
+          "median": 42349.0,
+          "minimum": 33126,
+          "p05": 37129.0,
+          "p95": 54265.5
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 12.265625,
+          "median": 12.0,
+          "minimum": 9,
+          "p05": 10.0,
+          "p95": 15.0
+        },
+        "reused_assignments": {
+          "maximum": 9188,
+          "mean": 6897.22265625,
+          "median": 6707.5,
+          "minimum": 5412,
+          "p05": 6000.75,
+          "p95": 8331.75
+        },
+        "route_assignments": {
+          "maximum": 16200,
+          "mean": 16200,
+          "median": 16200.0,
+          "minimum": 16200,
+          "p05": 16200.0,
+          "p95": 16200.0
+        },
+        "unique_experts": {
+          "maximum": 10788,
+          "mean": 9302.77734375,
+          "median": 9492.5,
+          "minimum": 7012,
+          "p05": 7868.25,
+          "p95": 10199.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 27,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:28": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 7.0859375,
+          "median": 8.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.0390625,
+          "median": 8.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 6.94140625,
+          "median": 8.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 6.93359375,
+          "median": 8.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6165,
+          "mean": 5202.35546875,
+          "median": 5234.0,
+          "minimum": 3848,
+          "p05": 4455.5,
+          "p95": 5874.5
+        },
+        "load_square_sum": {
+          "maximum": 74882,
+          "mean": 45598.21875,
+          "median": 44427.0,
+          "minimum": 36950,
+          "p05": 39012.5,
+          "p95": 56354.0
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 12.5234375,
+          "median": 12.0,
+          "minimum": 8,
+          "p05": 10.0,
+          "p95": 16.0
+        },
+        "reused_assignments": {
+          "maximum": 9730,
+          "mean": 7210.19140625,
+          "median": 7136.0,
+          "minimum": 6061,
+          "p05": 6303.0,
+          "p95": 8504.75
+        },
+        "route_assignments": {
+          "maximum": 16800,
+          "mean": 16800,
+          "median": 16800.0,
+          "minimum": 16800,
+          "p05": 16800.0,
+          "p95": 16800.0
+        },
+        "unique_experts": {
+          "maximum": 10739,
+          "mean": 9589.80859375,
+          "median": 9664.0,
+          "minimum": 7070,
+          "p05": 8295.25,
+          "p95": 10497.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 28,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:29": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 7.34375,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.20703125,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 7.2421875,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 7.20703125,
+          "median": 8.0,
+          "minimum": 5,
+          "p05": 5.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6105,
+          "mean": 5232.48046875,
+          "median": 5305.0,
+          "minimum": 3540,
+          "p05": 4449.0,
+          "p95": 5854.0
+        },
+        "load_square_sum": {
+          "maximum": 82658,
+          "mean": 49092.7734375,
+          "median": 46604.0,
+          "minimum": 38622,
+          "p05": 40330.5,
+          "p95": 66285.0
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 12.828125,
+          "median": 13.0,
+          "minimum": 9,
+          "p05": 10.0,
+          "p95": 16.0
+        },
+        "reused_assignments": {
+          "maximum": 10760,
+          "mean": 7689.53125,
+          "median": 7495.0,
+          "minimum": 6327,
+          "p05": 6573.0,
+          "p95": 9572.0
+        },
+        "route_assignments": {
+          "maximum": 17400,
+          "mean": 17400,
+          "median": 17400.0,
+          "minimum": 17400,
+          "p05": 17400.0,
+          "p95": 17400.0
+        },
+        "unique_experts": {
+          "maximum": 11073,
+          "mean": 9710.46875,
+          "median": 9905.0,
+          "minimum": 6640,
+          "p05": 7828.0,
+          "p95": 10827.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 29,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:30": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 7.5546875,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.51171875,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 7.45703125,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 7.4765625,
+          "median": 8.0,
+          "minimum": 6,
+          "p05": 6.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6202,
+          "mean": 5324.16796875,
+          "median": 5329.0,
+          "minimum": 4002,
+          "p05": 4700.0,
+          "p95": 5896.75
+        },
+        "load_square_sum": {
+          "maximum": 81720,
+          "mean": 51720.0390625,
+          "median": 49757.0,
+          "minimum": 40250,
+          "p05": 43387.5,
+          "p95": 66775.0
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 13.18359375,
+          "median": 13.0,
+          "minimum": 9,
+          "p05": 10.0,
+          "p95": 16.0
+        },
+        "reused_assignments": {
+          "maximum": 10708,
+          "mean": 8094.87109375,
+          "median": 7912.5,
+          "minimum": 6595,
+          "p05": 7019.5,
+          "p95": 9755.75
+        },
+        "route_assignments": {
+          "maximum": 18000,
+          "mean": 18000,
+          "median": 18000.0,
+          "minimum": 18000,
+          "p05": 18000.0,
+          "p95": 18000.0
+        },
+        "unique_experts": {
+          "maximum": 11405,
+          "mean": 9905.12890625,
+          "median": 10087.5,
+          "minimum": 7292,
+          "p05": 8244.25,
+          "p95": 10980.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 30,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:31": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 7.7734375,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 7.7578125,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 7.734375,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 7.734375,
+          "median": 8.0,
+          "minimum": 7,
+          "p05": 7.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6351,
+          "mean": 5411.71484375,
+          "median": 5486.0,
+          "minimum": 3927,
+          "p05": 4713.25,
+          "p95": 5909.75
+        },
+        "load_square_sum": {
+          "maximum": 108758,
+          "mean": 54043.6796875,
+          "median": 51787.0,
+          "minimum": 41818,
+          "p05": 44515.0,
+          "p95": 70442.5
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 13.34765625,
+          "median": 13.0,
+          "minimum": 9,
+          "p05": 10.0,
+          "p95": 16.0
+        },
+        "reused_assignments": {
+          "maximum": 12087,
+          "mean": 8445.8359375,
+          "median": 8243.0,
+          "minimum": 6846,
+          "p05": 7252.25,
+          "p95": 10163.25
+        },
+        "route_assignments": {
+          "maximum": 18600,
+          "mean": 18600,
+          "median": 18600.0,
+          "minimum": 18600,
+          "p05": 18600.0,
+          "p95": 18600.0
+        },
+        "unique_experts": {
+          "maximum": 11754,
+          "mean": 10154.1640625,
+          "median": 10357.0,
+          "minimum": 6513,
+          "p05": 8436.75,
+          "p95": 11347.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 31,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:32": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "1": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "2": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        },
+        "3": {
+          "maximum": 8,
+          "mean": 8,
+          "median": 8.0,
+          "minimum": 8,
+          "p05": 8.0,
+          "p95": 8.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 6239,
+          "mean": 5507.67578125,
+          "median": 5585.0,
+          "minimum": 4237,
+          "p05": 4663.25,
+          "p95": 5994.25
+        },
+        "load_square_sum": {
+          "maximum": 84256,
+          "mean": 57491.4609375,
+          "median": 55544.0,
+          "minimum": 43802,
+          "p05": 47298.0,
+          "p95": 76336.0
+        },
+        "max_expert_load": {
+          "maximum": 16,
+          "mean": 13.8046875,
+          "median": 14.0,
+          "minimum": 10,
+          "p05": 10.75,
+          "p95": 16.0
+        },
+        "reused_assignments": {
+          "maximum": 11203,
+          "mean": 8896.3828125,
+          "median": 8704.5,
+          "minimum": 7118,
+          "p05": 7704.75,
+          "p95": 10750.0
+        },
+        "route_assignments": {
+          "maximum": 19200,
+          "mean": 19200,
+          "median": 19200.0,
+          "minimum": 19200,
+          "p05": 19200.0,
+          "p95": 19200.0
+        },
+        "unique_experts": {
+          "maximum": 12082,
+          "mean": 10303.6171875,
+          "median": 10495.5,
+          "minimum": 7997,
+          "p05": 8450.0,
+          "p95": 11495.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 32,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:4": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "1": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "2": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        },
+        "3": {
+          "maximum": 1,
+          "mean": 1,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 1.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1196,
+          "mean": 1177.9609375,
+          "median": 1181.0,
+          "minimum": 1022,
+          "p05": 1158.5,
+          "p95": 1189.25
+        },
+        "load_square_sum": {
+          "maximum": 3122,
+          "mean": 2562.734375,
+          "median": 2524.0,
+          "minimum": 2440,
+          "p05": 2458.0,
+          "p95": 2775.0
+        },
+        "max_expert_load": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "reused_assignments": {
+          "maximum": 361,
+          "mean": 81.3671875,
+          "median": 62.0,
+          "minimum": 20,
+          "p05": 29.0,
+          "p95": 187.5
+        },
+        "route_assignments": {
+          "maximum": 2400,
+          "mean": 2400,
+          "median": 2400.0,
+          "minimum": 2400,
+          "p05": 2400.0,
+          "p95": 2400.0
+        },
+        "unique_experts": {
+          "maximum": 2380,
+          "mean": 2318.6328125,
+          "median": 2338.0,
+          "minimum": 2039,
+          "p05": 2212.5,
+          "p95": 2371.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 4,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:5": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 1.234375,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 1.25,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "2": {
+          "maximum": 2,
+          "mean": 1.22265625,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "3": {
+          "maximum": 2,
+          "mean": 1.29296875,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 1680,
+          "mean": 1523.796875,
+          "median": 1535.5,
+          "minimum": 1180,
+          "p05": 1381.0,
+          "p95": 1646.25
+        },
+        "load_square_sum": {
+          "maximum": 4652,
+          "mean": 3660.703125,
+          "median": 3620.0,
+          "minimum": 3266,
+          "p05": 3387.0,
+          "p95": 4068.5
+        },
+        "max_expert_load": {
+          "maximum": 3,
+          "mean": 2.9921875,
+          "median": 3.0,
+          "minimum": 2,
+          "p05": 3.0,
+          "p95": 3.0
+        },
+        "reused_assignments": {
+          "maximum": 648,
+          "mean": 309.34765625,
+          "median": 297.5,
+          "minimum": 133,
+          "p05": 189.5,
+          "p95": 454.25
+        },
+        "route_assignments": {
+          "maximum": 3000,
+          "mean": 3000,
+          "median": 3000.0,
+          "minimum": 3000,
+          "p05": 3000.0,
+          "p95": 3000.0
+        },
+        "unique_experts": {
+          "maximum": 2867,
+          "mean": 2690.65234375,
+          "median": 2702.5,
+          "minimum": 2352,
+          "p05": 2545.75,
+          "p95": 2810.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 5,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:6": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 1.53125,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 1.5,
+          "median": 1.5,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "2": {
+          "maximum": 2,
+          "mean": 1.46484375,
+          "median": 1.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "3": {
+          "maximum": 2,
+          "mean": 1.50390625,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2060,
+          "mean": 1653.26171875,
+          "median": 1593.0,
+          "minimum": 1367,
+          "p05": 1485.0,
+          "p95": 1965.5
+        },
+        "load_square_sum": {
+          "maximum": 6116,
+          "mean": 4849.265625,
+          "median": 4782.0,
+          "minimum": 4264,
+          "p05": 4436.5,
+          "p95": 5512.5
+        },
+        "max_expert_load": {
+          "maximum": 4,
+          "mean": 3.30859375,
+          "median": 3.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 4.0
+        },
+        "reused_assignments": {
+          "maximum": 897,
+          "mean": 567.1953125,
+          "median": 559.0,
+          "minimum": 321,
+          "p05": 404.75,
+          "p95": 764.5
+        },
+        "route_assignments": {
+          "maximum": 3600,
+          "mean": 3600,
+          "median": 3600.0,
+          "minimum": 3600,
+          "p05": 3600.0,
+          "p95": 3600.0
+        },
+        "unique_experts": {
+          "maximum": 3279,
+          "mean": 3032.8046875,
+          "median": 3041.0,
+          "minimum": 2703,
+          "p05": 2835.5,
+          "p95": 3195.25
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 6,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:7": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 1.78125,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 1.73046875,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "2": {
+          "maximum": 2,
+          "mean": 1.75390625,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        },
+        "3": {
+          "maximum": 2,
+          "mean": 1.734375,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 1.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2099,
+          "mean": 1859.60546875,
+          "median": 1865.0,
+          "minimum": 1546,
+          "p05": 1668.0,
+          "p95": 2035.75
+        },
+        "load_square_sum": {
+          "maximum": 7530,
+          "mean": 6045.390625,
+          "median": 5977.0,
+          "minimum": 5244,
+          "p05": 5495.5,
+          "p95": 6871.0
+        },
+        "max_expert_load": {
+          "maximum": 4,
+          "mean": 3.90625,
+          "median": 4.0,
+          "minimum": 3,
+          "p05": 3.0,
+          "p95": 4.0
+        },
+        "reused_assignments": {
+          "maximum": 1166,
+          "mean": 811.296875,
+          "median": 802.5,
+          "minimum": 497,
+          "p05": 616.5,
+          "p95": 1039.75
+        },
+        "route_assignments": {
+          "maximum": 4200,
+          "mean": 4200,
+          "median": 4200.0,
+          "minimum": 4200,
+          "p05": 4200.0,
+          "p95": 4200.0
+        },
+        "unique_experts": {
+          "maximum": 3703,
+          "mean": 3388.703125,
+          "median": 3397.5,
+          "minimum": 3034,
+          "p05": 3160.25,
+          "p95": 3583.5
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 7,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:8": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 2,
+          "mean": 1.99609375,
+          "median": 2.0,
+          "minimum": 1,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "1": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "2": {
+          "maximum": 3,
+          "mean": 2.00390625,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        },
+        "3": {
+          "maximum": 2,
+          "mean": 2,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 2.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2326,
+          "mean": 1913.39453125,
+          "median": 1912.5,
+          "minimum": 1655,
+          "p05": 1755.75,
+          "p95": 2045.0
+        },
+        "load_square_sum": {
+          "maximum": 11626,
+          "mean": 7433.4453125,
+          "median": 7322.0,
+          "minimum": 6320,
+          "p05": 6638.5,
+          "p95": 8597.0
+        },
+        "max_expert_load": {
+          "maximum": 4,
+          "mean": 3.9921875,
+          "median": 4.0,
+          "minimum": 3,
+          "p05": 4.0,
+          "p95": 4.0
+        },
+        "reused_assignments": {
+          "maximum": 2197,
+          "mean": 1106.890625,
+          "median": 1087.5,
+          "minimum": 727,
+          "p05": 862.25,
+          "p95": 1414.0
+        },
+        "route_assignments": {
+          "maximum": 4800,
+          "mean": 4800,
+          "median": 4800.0,
+          "minimum": 4800,
+          "p05": 4800.0,
+          "p95": 4800.0
+        },
+        "unique_experts": {
+          "maximum": 4073,
+          "mean": 3693.109375,
+          "median": 3712.5,
+          "minimum": 2603,
+          "p05": 3386.0,
+          "p95": 3937.75
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 8,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    "4:9": {
+      "request_width_distribution": {
+        "0": {
+          "maximum": 3,
+          "mean": 2.25390625,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        },
+        "1": {
+          "maximum": 3,
+          "mean": 2.21484375,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        },
+        "2": {
+          "maximum": 3,
+          "mean": 2.234375,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        },
+        "3": {
+          "maximum": 3,
+          "mean": 2.296875,
+          "median": 2.0,
+          "minimum": 2,
+          "p05": 2.0,
+          "p95": 3.0
+        }
+      },
+      "requests": 4,
+      "route_shape": {
+        "critical_unique_experts": {
+          "maximum": 2547,
+          "mean": 2260.29296875,
+          "median": 2279.0,
+          "minimum": 1702,
+          "p05": 2011.75,
+          "p95": 2460.5
+        },
+        "load_square_sum": {
+          "maximum": 11096,
+          "mean": 8630.0859375,
+          "median": 8539.0,
+          "minimum": 7264,
+          "p05": 7624.5,
+          "p95": 9866.5
+        },
+        "max_expert_load": {
+          "maximum": 5,
+          "mean": 4.71484375,
+          "median": 5.0,
+          "minimum": 4,
+          "p05": 4.0,
+          "p95": 5.0
+        },
+        "reused_assignments": {
+          "maximum": 2098,
+          "mean": 1294.16796875,
+          "median": 1282.5,
+          "minimum": 860,
+          "p05": 1022.0,
+          "p95": 1573.25
+        },
+        "route_assignments": {
+          "maximum": 5400,
+          "mean": 5400,
+          "median": 5400.0,
+          "minimum": 5400,
+          "p05": 5400.0,
+          "p95": 5400.0
+        },
+        "unique_experts": {
+          "maximum": 4540,
+          "mean": 4105.83203125,
+          "median": 4117.5,
+          "minimum": 3302,
+          "p05": 3826.75,
+          "p95": 4378.0
+        },
+        "wire_batches": {
+          "maximum": 150,
+          "mean": 150,
+          "median": 150.0,
+          "minimum": 150,
+          "p05": 150.0,
+          "p95": 150.0
+        }
+      },
+      "samples": 256,
+      "target_rows": 9,
+      "wire_cohorts": [
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          3
+        ]
+      ]
+    }
+  },
+  "max_concurrency": 4,
+  "max_drafts": 7,
+  "route_bank": ".glmrt-cache/route-banks/general-v1.jsonl.gz",
+  "route_bank_schema": "glmrt-expert-route-bank-v1",
+  "route_bank_source_trace_log": "/home/tj/Developer/glmrt/.glmrt-cache/benchmarks/route-bank-server-clean-20260726.log",
+  "samples_per_cell": 256,
+  "schema": "glmrt-dspark-route-reference-v1",
+  "seed": 20260813,
+  "semantic_case_weights": [
+    "code",
+    "math",
+    "fable",
+    "hello",
+    "topic",
+    "structured-json",
+    "multilingual"
+  ],
+  "source_sha256": "3bd450d007a1c54da328716fba4de818d5b9bb6be89bda2846d3a5ecf57096d2",
+  "sparse_layers": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77
+  ],
+  "verification_width_evidence": {
+    "case_width_counts": {
+      "code": {
+        "1": 0,
+        "2": 41,
+        "3": 50,
+        "4": 117,
+        "5": 76,
+        "6": 89,
+        "7": 14,
+        "8": 28
+      },
+      "fable": {
+        "1": 0,
+        "2": 508,
+        "3": 80,
+        "4": 33,
+        "5": 5,
+        "6": 1,
+        "7": 0,
+        "8": 1
+      },
+      "hello": {
+        "1": 0,
+        "2": 2,
+        "3": 1,
+        "4": 8,
+        "5": 1,
+        "6": 8,
+        "7": 0,
+        "8": 4
+      },
+      "math": {
+        "1": 0,
+        "2": 17,
+        "3": 7,
+        "4": 35,
+        "5": 22,
+        "6": 16,
+        "7": 0,
+        "8": 23
+      },
+      "multilingual": {
+        "1": 0,
+        "2": 387,
+        "3": 19,
+        "4": 12,
+        "5": 0,
+        "6": 0,
+        "7": 0,
+        "8": 0
+      },
+      "structured-json": {
+        "1": 0,
+        "2": 53,
+        "3": 12,
+        "4": 8,
+        "5": 11,
+        "6": 27,
+        "7": 6,
+        "8": 23
+      },
+      "topic": {
+        "1": 0,
+        "2": 376,
+        "3": 143,
+        "4": 147,
+        "5": 23,
+        "6": 15,
+        "7": 1,
+        "8": 0
+      }
+    },
+    "laplace_pseudocount_per_case_width": 1,
+    "observations": 2450,
+    "path": ".glmrt-cache/benchmarks/dspark-route-profile-20260813/c1-measured.jsonl",
+    "sha256": "1d893f5db2bdabadc9fde5f52a3f3781a050d482c16dd04e48eaa067cf9a1ed1",
+    "width_counts": {
+      "1": 0,
+      "2": 1384,
+      "3": 312,
+      "4": 360,
+      "5": 138,
+      "6": 156,
+      "7": 21,
+      "8": 79
+    }
+  }
+}

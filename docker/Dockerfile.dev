@@ -72,7 +72,7 @@ RUN python3 /opt/glmrt/scripts/verify-sparkinfer-source.py \
     uv pip install --system --break-system-packages --no-cache --no-deps \
       --editable /opt/glmrt/third_party/sparkinfer && \
     uv pip check && \
-    python3 -c 'import importlib.metadata, pathlib, sparkinfer; source = pathlib.Path("/opt/glmrt/third_party/sparkinfer").resolve(); module = pathlib.Path(sparkinfer.__file__).resolve(); assert module.is_relative_to(source), (module, source); print(importlib.metadata.version("sparkinfer"), module)' && \
+    python3 -c 'import importlib.metadata, pathlib, b12x; source = pathlib.Path("/opt/glmrt/third_party/sparkinfer").resolve(); module = pathlib.Path(b12x.__file__).resolve(); assert module.is_relative_to(source), (module, source); print(importlib.metadata.version("b12x"), module)' && \
     python3 /opt/glmrt/scripts/verify-sparkinfer-source.py \
       --source /opt/glmrt/third_party/sparkinfer \
       --lock /opt/glmrt/third_party/sparkinfer.lock.json \

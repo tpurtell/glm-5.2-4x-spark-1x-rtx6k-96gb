@@ -29,7 +29,10 @@ use loadplan::write_node_load_plans;
 pub(crate) use loadplan::{read_expert_loadplan, read_expert_serving_loadplan};
 
 const RUNTIME_CATALOG_CACHE_DIR_ENV: &str = "GLMRT_RUNTIME_CATALOG_CACHE_DIR";
-const RUNTIME_CATALOG_CACHE_SCHEMA: u32 = 1;
+const RUNTIME_CATALOG_CACHE_SCHEMA: u32 = 2;
+const RUNTIME_CATALOG_SOURCE_IDENTITY_SCHEMA: &[u8] = b"glmrt-runtime-catalog-v2";
+const RUNTIME_CATALOG_QUANTIZATION_CONFIG_FILES: [&str; 2] =
+    ["quantize_config.json", "quantization_config.json"];
 
 #[derive(Debug, Deserialize)]
 struct RuntimeCatalogSafetensorsIndex {
@@ -146,11 +149,22 @@ fn runtime_catalog_source_identity(model_id: &str, snapshot_path: &Path) -> Resu
     );
 
     let mut hasher = Sha256::new();
-    update_catalog_identity_field(&mut hasher, b"glmrt-runtime-catalog-v1");
+    update_catalog_identity_field(&mut hasher, RUNTIME_CATALOG_SOURCE_IDENTITY_SCHEMA);
     update_catalog_identity_field(&mut hasher, model_id.as_bytes());
     update_catalog_identity_field(&mut hasher, snapshot_path.as_os_str().as_encoded_bytes());
     update_catalog_identity_field(&mut hasher, &config);
     update_catalog_identity_field(&mut hasher, &index_bytes);
+    for file_name in RUNTIME_CATALOG_QUANTIZATION_CONFIG_FILES {
+        let path = snapshot_path.join(file_name);
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&path).with_context(|| {
+            format!("reading runtime catalog identity source {}", path.display())
+        })?;
+        update_catalog_identity_field(&mut hasher, file_name.as_bytes());
+        update_catalog_identity_field(&mut hasher, &bytes);
+    }
     for file_name in files {
         let shard_path = snapshot_path.join(&file_name);
         let mut shard = File::open(&shard_path).with_context(|| {
@@ -193,7 +207,7 @@ fn update_catalog_identity_field(hasher: &mut Sha256, value: &[u8]) {
 
 fn runtime_catalog_cache_paths(cache_dir: &Path, source_identity: &str) -> (PathBuf, PathBuf) {
     (
-        cache_dir.join(format!("{source_identity}.catalog.json")),
+        cache_dir.join(format!("{source_identity}.catalog.bin")),
         cache_dir.join(format!("{source_identity}.manifest.json")),
     )
 }
@@ -248,7 +262,7 @@ fn read_runtime_catalog_cache(
         payload_sha256 == manifest.payload_sha256,
         "runtime catalog cache payload hash mismatch"
     );
-    let catalog: TensorCatalog = serde_json::from_slice(&payload)
+    let catalog: TensorCatalog = bincode::deserialize(&payload)
         .with_context(|| format!("parsing runtime catalog payload {}", payload_path.display()))?;
     anyhow::ensure!(
         catalog.model_id == model_id,
@@ -270,7 +284,9 @@ fn write_runtime_catalog_cache(
 ) -> Result<()> {
     fs::create_dir_all(cache_dir)
         .with_context(|| format!("creating runtime catalog cache {}", cache_dir.display()))?;
-    let payload = serde_json::to_vec(catalog).context("serializing runtime catalog cache")?;
+    // The versioned manifest supplies the schema and integrity envelope, so the
+    // local cache payload can use Serde's compact binary representation.
+    let payload = bincode::serialize(catalog).context("serializing runtime catalog cache")?;
     let manifest = RuntimeCatalogCacheManifest {
         schema: RUNTIME_CATALOG_CACHE_SCHEMA,
         model_id: model_id.to_owned(),
@@ -603,6 +619,33 @@ mod runtime_catalog_cache_tests {
         let first = runtime_catalog_source_identity(SUPPORTED_MODEL_IDS[0], &snapshot_path)
             .expect("first identity");
         write_shard(b"{ }");
+        let second = runtime_catalog_source_identity(SUPPORTED_MODEL_IDS[0], &snapshot_path)
+            .expect("second identity");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn runtime_catalog_identity_changes_with_external_quantization_config() {
+        let temporary = tempdir().expect("temporary directory");
+        let snapshot_path = temporary.path().join("snapshot");
+        fs::create_dir_all(&snapshot_path).expect("snapshot directory");
+        fs::write(snapshot_path.join("config.json"), b"{}\n").expect("config");
+        fs::write(
+            snapshot_path.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"tensor":"model-00001-of-00001.safetensors"}}"#,
+        )
+        .expect("index");
+        let shard_path = snapshot_path.join("model-00001-of-00001.safetensors");
+        let mut shard = 2_u64.to_le_bytes().to_vec();
+        shard.extend_from_slice(b"{}");
+        shard.push(0);
+        fs::write(shard_path, shard).expect("shard");
+        let quantization_path = snapshot_path.join("quantize_config.json");
+        fs::write(&quantization_path, b"{\"recipe\":1}\n").expect("quantization config");
+        let first = runtime_catalog_source_identity(SUPPORTED_MODEL_IDS[0], &snapshot_path)
+            .expect("first identity");
+        fs::write(&quantization_path, b"{\"recipe\":2}\n").expect("quantization config");
         let second = runtime_catalog_source_identity(SUPPORTED_MODEL_IDS[0], &snapshot_path)
             .expect("second identity");
 

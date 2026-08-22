@@ -245,6 +245,11 @@ if ((validation_failed)); then
   release_die "one or more WIP slot validations failed: $slot"
 fi
 coordinator_slot_fingerprint="$(<"$validation_dir/0.out")"
+coordinator_sparkinfer_commit="$(
+  docker exec "$coordinator_container" python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["sparkinfer_revision"])' \
+    "/wip/slots/$slot/coordinator/META.json"
+)"
 expert_slot_fingerprint=
 expert_model_revision=
 validation_index=0
@@ -556,6 +561,10 @@ report_wip_startup_phase spark-dispatch
 
 env_file="$state_dir/coordinator.env"
 jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$env_file"
+coordinator_power_limit_watts="$(
+  nvidia-smi --id=0 --query-gpu=power.limit --format=csv,noheader,nounits |
+    awk '{printf "%d\n", $1 + 0.5}'
+)"
 {
   echo "ADDR=$ADDR"
   echo "GLMRT_REAL_FULL_SERVE_EXPERT_HOSTS=$expert_hosts_csv"
@@ -571,6 +580,8 @@ jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$en
   echo "GLMRT_BIN=$coordinator_workspace/.glmrt-wip/glmrt"
   echo "GLMRT_NATIVE_LIB=$coordinator_workspace/.glmrt-wip/libglmrt_native.so"
   echo "GLMRT_ENGINE_COMMIT=$coordinator_engine_commit"
+  echo "GLMRT_SPARKINFER_COMMIT=$coordinator_sparkinfer_commit"
+  echo "GLMRT_COORDINATOR_POWER_LIMIT_WATTS=$coordinator_power_limit_watts"
   echo "GLMRT_RELEASE_CONFIG_SHA256=$deployment_fingerprint"
   echo "GLMRT_KERNEL_CACHE_BASE=/wip/cache/kernels"
   echo "GLMRT_KERNEL_CACHE_ENVIRONMENT_ID=$coordinator_image_id"
@@ -585,6 +596,18 @@ jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$en
 # file between restarts.
 if [[ -n "${GLMRT_REAL_FULL_GRAPH_CAPTURE_TRACE:-}" ]]; then
   echo "GLMRT_REAL_FULL_GRAPH_CAPTURE_TRACE=$GLMRT_REAL_FULL_GRAPH_CAPTURE_TRACE" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_REAL_FULL_DSPARK_TRACE:-}" ]]; then
+  echo "GLMRT_REAL_FULL_DSPARK_TRACE=$GLMRT_REAL_FULL_DSPARK_TRACE" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_REAL_FULL_DSPARK_PROFILE_AT_STARTUP:-}" ]]; then
+  echo "GLMRT_REAL_FULL_DSPARK_PROFILE_AT_STARTUP=$GLMRT_REAL_FULL_DSPARK_PROFILE_AT_STARTUP" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES:-}" ]]; then
+  echo "GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES=$GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES" \
     >>"$env_file"
 fi
 

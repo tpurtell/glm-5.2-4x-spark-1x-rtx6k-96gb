@@ -436,6 +436,22 @@ spark_start_pid=$!
 
 env_file="$state_dir/coordinator.env"
 jq -r '.environment | to_entries[] | "\(.key)=\(.value)"' "$resolved_json" >"$env_file"
+coordinator_power_limit_watts="$(
+  nvidia-smi --id=0 --query-gpu=power.limit --format=csv,noheader,nounits |
+    awk '{printf "%d\n", $1 + 0.5}'
+)"
+if [[ -n "${GLMRT_REAL_FULL_DSPARK_TRACE:-}" ]]; then
+  echo "GLMRT_REAL_FULL_DSPARK_TRACE=$GLMRT_REAL_FULL_DSPARK_TRACE" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_REAL_FULL_DSPARK_PROFILE_AT_STARTUP:-}" ]]; then
+  echo "GLMRT_REAL_FULL_DSPARK_PROFILE_AT_STARTUP=$GLMRT_REAL_FULL_DSPARK_PROFILE_AT_STARTUP" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES:-}" ]]; then
+  echo "GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES=$GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES" \
+    >>"$env_file"
+fi
 coordinator_image_id="$(docker image inspect -f '{{.Id}}' "$COORDINATOR_DOCKER_INFERENCE")"
 {
   echo "ADDR=$ADDR"
@@ -452,6 +468,8 @@ coordinator_image_id="$(docker image inspect -f '{{.Id}}' "$COORDINATOR_DOCKER_I
   echo "GLMRT_BIN=/opt/glmrt/bin/glmrt"
   echo "GLMRT_NATIVE_LIB=/opt/glmrt/lib/libglmrt_native.so"
   echo "GLMRT_ENGINE_COMMIT=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$COORDINATOR_DOCKER_INFERENCE")"
+  echo "GLMRT_SPARKINFER_COMMIT=$coordinator_sparkinfer_commit"
+  echo "GLMRT_COORDINATOR_POWER_LIMIT_WATTS=$coordinator_power_limit_watts"
   echo "GLMRT_RELEASE_CONFIG_SHA256=$deployment_fingerprint"
   echo "GLMRT_KERNEL_CACHE_BASE=/var/cache/glmrt/kernels"
   echo "GLMRT_KERNEL_CACHE_ENVIRONMENT_ID=$coordinator_image_id"
@@ -462,7 +480,7 @@ mkdir -p "$state_dir/kernel-cache" "$state_dir/catalog-cache"
 docker_args=(
   run -d
   --name "$coordinator_container"
-  --restart unless-stopped
+  --restart no
   --gpus device=0
   --net=host
   --ipc=host

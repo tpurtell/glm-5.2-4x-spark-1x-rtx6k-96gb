@@ -86,6 +86,26 @@ def test_release_image_packages_cache_identity_helper() -> None:
     ) in dockerfile
 
 
+def test_b12x_compile_cache_uses_current_environment_contract() -> None:
+    launcher = (ROOT / "scripts" / "real-full-tcp-serve.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "export B12X_COMPILE_CACHE_DIR=" in launcher
+    assert "export SPARKINFER_COMPILE_CACHE_DIR=" not in launcher
+
+    exporters = (
+        "export_b12x_coordinator_aot.py",
+        "export_b12x_spark_moe_aot.py",
+        "export_b12x_spark_w4a16_m1_parity_aot.py",
+        "export_w8a16_packed_o_aot.py",
+    )
+    for name in exporters:
+        source = (ROOT / "python" / "tools" / name).read_text(encoding="utf-8")
+        assert 'B12X_COMPILE_DISK_CACHE"] = "0"' in source
+        assert 'B12X_COMPILE_MEMORY_CACHE"] = "0"' in source
+        assert "SPARKINFER_COMPILE_" not in source
+
+
 def test_remote_release_launch_preserves_empty_optional_arguments() -> None:
     launcher = (ROOT / "scripts" / "phase0-spark-tcp-bench.sh").read_text(
         encoding="utf-8"

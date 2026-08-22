@@ -46,6 +46,7 @@ use crate::commands::real_full::coordinator_kernels::{
     rmsnorm_hidden_bf16_preloaded_resident_weight_device_input_output,
     rmsnorm_hidden_bf16_preloaded_resident_weight_device_input_output_async,
     silu_gated_mlp_rows_bf16_preloaded_gate_up_down_resident_weight_device_input_device_output_only,
+    sparse_b_scatter_shared_residual_add_bf16_async_owned_device_output,
     sparse_b_scatter_shared_residual_add_bf16_device_output,
     sparse_b_scatter_shared_residual_add_low_precision_device_output, CoordinatorCudaEvent,
     CudaStreamedSparseBAccumulator, DeviceBf16Output, StreamedSparseBAccumulatorChunk,
@@ -118,7 +119,7 @@ const ROLLING_SPARSE_PACKS_ENV: &str = "GLMRT_REAL_FULL_ROLLING_SPARSE_PACKS";
 const ROLLING_SPARSE_SOURCE_ADMISSION_ROWS: usize = 512;
 const ROLLING_SPARSE_PACK_ROWS: usize = 256;
 const ROLLING_SPARSE_LOOKAHEAD_ROWS: usize = 4096;
-const ROLLING_SPARSE_ACCUMULATOR_PAGE_ROWS: usize = 2048;
+pub(super) const ROLLING_SPARSE_ACCUMULATOR_PAGE_ROWS: usize = 2048;
 const ROLLING_SPARSE_REQUIRED_MIN_ROWS: usize = 8_193;
 // Keep the qualified <=8K layer-major path, then require bounded hidden
 // segments and reclaim-page sparse accumulation through the configured 400K
@@ -132,6 +133,7 @@ const ROLLING_SPARSE_EXPERT_TILE_ROWS: usize = 32;
 pub(super) struct RealFullSchedulerNumericProgression {
     shape: RealFullSchedulerNumericProgressionShape,
     live_request: bool,
+    event_owned_raw_tp4_reduction: bool,
     retain_final_target_device_hidden: bool,
     retain_full_target_device_hidden: bool,
     target_device_hidden_tap_rows: usize,
@@ -358,6 +360,7 @@ struct SchedulerSparseTcpPayloadDispatchHandle {
     batch: SchedulerSparseTcpPayloadDispatchBatchShape,
     batch_index: usize,
     started: Option<Instant>,
+    row_sharded_completion_chunks: bool,
     chunk_rx: Option<mpsc::Receiver<VerbsHostProtocolV2HostBatchSetBf16PayloadChunk>>,
     response_rx: Option<mpsc::Receiver<Result<TcpProtocolV2HostBatchSetBf16PayloadDispatch>>>,
     direct_owner_pending: Option<VerbsHostProtocolV2ReducedIdentityPayloadPending>,
@@ -367,6 +370,14 @@ struct SchedulerSparseTcpPayloadDispatchHandle {
 }
 
 impl SchedulerSparseTcpPayloadDispatchHandle {
+    fn response_batch_target_rows(&self) -> usize {
+        if self.row_sharded_completion_chunks {
+            self.batch.rows
+        } else {
+            STREAMED_SPARSE_B_RESPONSE_BATCH_ROWS
+        }
+    }
+
     fn has_response_chunks(&self) -> bool {
         self.chunk_rx.is_some()
             || self.direct_owner_pending.is_some()
@@ -574,24 +585,38 @@ struct SchedulerSparseTcpPayloadDispatchBatchShape {
     rows: usize,
     routes: usize,
     unique_experts: usize,
+    max_expert_load: usize,
+    expert_load_square_sum: usize,
+    route_profiled: bool,
     hidden_dim: usize,
 }
 
 impl SchedulerSparseTcpPayloadDispatchBatchShape {
     fn from_batch_and_routes(batch: &ExpertBatch, routes: &[ExpertBatchRoute]) -> Self {
+        let route_profiled = dspark_route_profile_enabled();
+        let compute_route_shape = route_profiled || sparse_tcp_stage_timing_enabled();
+        let mut expert_loads = [0_usize; GLM52_ROUTED_EXPERTS];
+        if compute_route_shape {
+            for route in routes {
+                if let Some(load) = expert_loads.get_mut(route.expert_id) {
+                    *load += 1;
+                }
+            }
+        }
+        let unique_experts = expert_loads.iter().filter(|load| **load > 0).count();
+        let max_expert_load = expert_loads.iter().copied().max().unwrap_or(0);
+        let expert_load_square_sum = expert_loads
+            .iter()
+            .map(|load| load.saturating_mul(*load))
+            .sum();
         Self {
             layer_id: batch.layer_id,
             rows: batch.num_rows(),
             routes: batch.route_count(),
-            unique_experts: sparse_tcp_stage_timing_enabled()
-                .then(|| {
-                    routes
-                        .iter()
-                        .map(|route| route.expert_id)
-                        .collect::<BTreeSet<_>>()
-                        .len()
-                })
-                .unwrap_or(0),
+            unique_experts,
+            max_expert_load,
+            expert_load_square_sum,
+            route_profiled,
             hidden_dim: batch.hidden_dim,
         }
     }
@@ -1589,6 +1614,12 @@ impl RealFullSchedulerSparseTcpRoutedMlpContext {
                 global_rows: 0,
                 host_rows: 0,
                 routes: 0,
+                route_profiled_wire_batches: 0,
+                route_profiled_assignments: 0,
+                route_profiled_unique_experts: 0,
+                route_profiled_reused_assignments: 0,
+                route_profiled_max_expert_load: 0,
+                route_profiled_load_square_sum: 0,
                 request_wire_bytes: 0,
                 response_wire_bytes: 0,
                 output_values: 0,
@@ -1740,6 +1771,9 @@ impl RealFullSchedulerSparseTcpRoutedMlpContext {
         let (batch_index, request_id_base) = self.reserve_dispatch_request_ids()?;
         let batch_shape =
             SchedulerSparseTcpPayloadDispatchBatchShape::from_batch_and_routes(&batch, &routes);
+        let row_sharded_completion_chunks =
+            spark_expert_reduction_dispatch_for_rows(batch.num_rows())?
+                .is_some_and(|reduction| reduction.row_sharded);
         if self.dispatch_worker.supports_streaming_responses() {
             match self.dispatch_worker.try_start_direct_owner_payload(
                 &batch,
@@ -1752,6 +1786,7 @@ impl RealFullSchedulerSparseTcpRoutedMlpContext {
                         batch: batch_shape,
                         batch_index,
                         started: sparse_tcp_stage_timing_enabled().then(Instant::now),
+                        row_sharded_completion_chunks,
                         chunk_rx: None,
                         response_rx: None,
                         direct_owner_pending: Some(direct_owner_pending),
@@ -1783,6 +1818,7 @@ impl RealFullSchedulerSparseTcpRoutedMlpContext {
             batch: batch_shape,
             batch_index,
             started: sparse_tcp_stage_timing_enabled().then(Instant::now),
+            row_sharded_completion_chunks,
             chunk_rx,
             response_rx: Some(response_rx),
             direct_owner_pending: None,
@@ -1819,6 +1855,9 @@ impl RealFullSchedulerSparseTcpRoutedMlpContext {
         let (batch_index, request_id_base) = self.reserve_dispatch_request_ids()?;
         let batch_shape =
             SchedulerSparseTcpPayloadDispatchBatchShape::from_batch_and_routes(&batch, &routes);
+        let row_sharded_completion_chunks =
+            spark_expert_reduction_dispatch_for_rows(batch.num_rows())?
+                .is_some_and(|reduction| reduction.row_sharded);
         let started = sparse_tcp_stage_timing_enabled().then(Instant::now);
         let slice_count = batch.num_rows().div_ceil(self.max_global_rows_per_dispatch);
         let global_hidden_payload = Arc::new(global_hidden_payload);
@@ -1868,6 +1907,7 @@ impl RealFullSchedulerSparseTcpRoutedMlpContext {
             batch: batch_shape,
             batch_index,
             started,
+            row_sharded_completion_chunks,
             chunk_rx: None,
             response_rx: None,
             direct_owner_pending: None,
@@ -2798,6 +2838,18 @@ impl RealFullSchedulerSparseTcpRoutedMlpContext {
         self.probe.global_rows += dispatch.stats.global_rows;
         self.probe.host_rows += dispatch.stats.host_rows;
         self.probe.routes += batch.routes;
+        if batch.route_profiled {
+            self.probe.route_profiled_wire_batches += 1;
+            self.probe.route_profiled_assignments += batch.routes;
+            self.probe.route_profiled_unique_experts += batch.unique_experts;
+            self.probe.route_profiled_reused_assignments +=
+                batch.routes.saturating_sub(batch.unique_experts);
+            self.probe.route_profiled_max_expert_load = self
+                .probe
+                .route_profiled_max_expert_load
+                .max(batch.max_expert_load);
+            self.probe.route_profiled_load_square_sum += batch.expert_load_square_sum;
+        }
         self.probe.request_wire_bytes += dispatch.stats.request_wire_bytes;
         self.probe.response_wire_bytes += dispatch.stats.response_wire_bytes;
         self.probe.output_values += dispatch.stats.output_values;
@@ -2867,6 +2919,27 @@ fn sparse_tcp_stage_timing_enabled() -> bool {
                 )
             })
             .unwrap_or(false)
+    })
+}
+
+fn dspark_route_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        [
+            "GLMRT_REAL_FULL_DSPARK_TRACE",
+            "GLMRT_REAL_FULL_DSPARK_ROUTE_PROFILE",
+        ]
+        .into_iter()
+        .any(|name| {
+            env::var(name)
+                .map(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
+                .unwrap_or(false)
+        })
     })
 }
 
@@ -3891,6 +3964,7 @@ impl RealFullSchedulerNumericProgression {
         Self {
             shape,
             live_request: false,
+            event_owned_raw_tp4_reduction: false,
             retain_final_target_device_hidden: false,
             retain_full_target_device_hidden: false,
             target_device_hidden_tap_rows: 0,
@@ -3997,6 +4071,11 @@ impl RealFullSchedulerNumericProgression {
 
     pub(super) fn with_live_request(mut self) -> Self {
         self.live_request = true;
+        self
+    }
+
+    pub(super) fn with_event_owned_raw_tp4_reduction(mut self) -> Self {
+        self.event_owned_raw_tp4_reduction = true;
         self
     }
 
@@ -5991,10 +6070,16 @@ impl RealFullSchedulerNumericProgression {
                     remap_sparse_payload_chunk_rows(&mut chunk, &pending.emission.row_indices)?;
                     response_chunks.push(chunk);
                     let mut response_rows = response_chunks[0].global_row_indices.len();
-                    while response_chunks
-                        .iter()
-                        .all(|chunk| chunk.completed_global_row_indices.is_empty())
-                        && response_rows < STREAMED_SPARSE_B_RESPONSE_BATCH_ROWS
+                    let response_batch_target_rows = pending.handle.response_batch_target_rows();
+                    // Row-sharded Spark reduction completes disjoint rows on
+                    // each rank. Collect every already-ready rank shard for
+                    // this physical pack so its staged H2D/scatter path pays
+                    // one synchronization instead of one per rank.
+                    while (pending.handle.row_sharded_completion_chunks
+                        || response_chunks
+                            .iter()
+                            .all(|chunk| chunk.completed_global_row_indices.is_empty()))
+                        && response_rows < response_batch_target_rows
                     {
                         match pending.handle.poll_streaming_response(false)? {
                             SchedulerSparseTcpPayloadStreamPoll::Pending => break,
@@ -6275,10 +6360,24 @@ impl RealFullSchedulerNumericProgression {
         };
         let mut response_chunks = vec![chunk];
         let mut response_batch_rows = response_chunks[0].global_row_indices.len();
-        while response_chunks
-            .iter()
-            .all(|chunk| chunk.completed_global_row_indices.is_empty())
-            && response_batch_rows < STREAMED_SPARSE_B_RESPONSE_BATCH_ROWS
+        let response_batch_target_rows = pending
+            .pending_dispatch
+            .as_ref()
+            .context("incremental scheduler sparse apply lost its dispatch handle before coalescing responses")?
+            .response_batch_target_rows();
+        let row_sharded_completion_chunks = pending
+            .pending_dispatch
+            .as_ref()
+            .expect("incremental sparse dispatch exists while coalescing responses")
+            .row_sharded_completion_chunks;
+        // Unlike overlapping partial reductions, each row-sharded completion
+        // chunk owns complete, disjoint rows. Coalesce the logical batch before
+        // the existing synchronized device staging operation.
+        while (row_sharded_completion_chunks
+            || response_chunks
+                .iter()
+                .all(|chunk| chunk.completed_global_row_indices.is_empty()))
+            && response_batch_rows < response_batch_target_rows
         {
             let next = {
                 let handle = pending.pending_dispatch.as_mut().context(
@@ -6483,7 +6582,7 @@ impl RealFullSchedulerNumericProgression {
         let SchedulerSparseTcpPendingApply {
             layer_id,
             batch,
-            ready_segments,
+            mut ready_segments,
             pending_dispatch,
             pending_routes,
             pending_hidden_payload,
@@ -6680,6 +6779,97 @@ impl RealFullSchedulerNumericProgression {
         self.device_real_sparse_routed_mlp_router_cache_entries = router_stats.entries;
         self.device_real_sparse_routed_mlp_router_cache_hits = router_stats.cache_hits;
 
+        // Below the Spark-RDMA reduction threshold, a one-row decode returns
+        // four raw BF16 rank partials.  Hand the exact ordered FP32 reduction
+        // and residual closure to the next native stream through an event,
+        // instead of synchronizing the coordinator host at every sparse
+        // layer.  The graph copies response bytes into its own pinned staging;
+        // only the two device inputs need to remain owned until completion.
+        if self.event_owned_raw_tp4_reduction
+            && streamed_sparse_b_outputs.is_none()
+            && real_full_moe_response_dtype_for_batch(&batch)? == ExpertV2Dtype::Bf16
+            && spark_expert_reduction_dispatch_for_rows(batch.num_rows())?.is_none()
+            && ready_segments.len() == 1
+        {
+            let segment = ready_segments
+                .pop()
+                .expect("single-segment asynchronous raw TP4 path has one segment");
+            anyhow::ensure!(
+                segment.batch_row_start == 0 && segment.row_count == batch.num_rows(),
+                "single-segment asynchronous raw TP4 path does not cover the complete batch"
+            );
+            let key = DeviceHiddenSegmentKey {
+                byte_start: segment.byte_start,
+                byte_end: segment.byte_end,
+            };
+            let residual = self.device_hidden_segments.remove(&key).context(
+                "scheduler resident hidden segment missing before asynchronous raw TP4 reduction",
+            )?;
+            log_device_bf16_hash(layer_id, "residual", 0, &residual)?;
+            log_device_bf16_hash(layer_id, "shared_delta", 0, &segment.shared_delta)?;
+            let shared_delta_backend = segment.shared_delta.backend;
+            let sparse_b_start = stage_timing_enabled.then(Instant::now);
+            let output = sparse_b_scatter_shared_residual_add_bf16_async_owned_device_output(
+                residual,
+                segment.shared_delta,
+                dispatch.partial_outputs_bf16_by_host,
+                dispatch.global_row_indices_by_host,
+                segment.row_count,
+                NUMERIC_PROGRESS_HIDDEN_DIM,
+            )
+            .context("applying asynchronous fused scheduler raw TP4 residual update")?;
+            log_device_bf16_hash(layer_id, "fused_output", 0, &output)?;
+            sparse_b_ms += elapsed_ms_optional(sparse_b_start);
+            self.record_real_sparse_shared_mlp_delta_accounting(
+                layer_id,
+                segment.row_count,
+                shared_delta_backend,
+            )?;
+            self.record_real_sparse_routed_mlp_delta_accounting(
+                layer_id,
+                segment.row_count,
+                dispatch_transport.sparse_delta_backend(),
+            )?;
+            let apply_start = stage_timing_enabled.then(Instant::now);
+            self.apply_device_residual_output_bytes(
+                segment.byte_start,
+                segment.byte_end,
+                ResidualDeltaStage::Mlp,
+                output,
+            )?;
+            dump_layer_boundary_device_hidden(
+                layer_id,
+                segment.kind,
+                segment.token_start,
+                segment.row_count,
+                "post_mlp",
+                &self.device_hidden_segments,
+                key,
+            )?;
+            apply_ms += elapsed_ms_optional(apply_start);
+            self.record_selected_rows(segment.kind, segment.row_count);
+            if stage_timing_enabled {
+                eprintln!(
+                    "real_full_sparse_{}_stage_timing layer_id={} rows={} routes={} attention_delta_ms={:.3} norm_ms={:.3} shared_mlp_ms={:.3} normalized_readback_ms={:.3} router_ms={:.3} routes_ms={:.3} dispatch_ms={:.3} sparse_b_ms={:.3} apply_ms={:.3} total_ms={:.3}",
+                    dispatch_transport.label(),
+                    layer_id,
+                    batch.num_rows(),
+                    batch.route_count(),
+                    attention_delta_ms,
+                    norm_ms,
+                    shared_mlp_ms,
+                    normalized_readback_ms,
+                    router_ms,
+                    routes_ms,
+                    dispatch_ms,
+                    sparse_b_ms,
+                    apply_ms,
+                    elapsed_ms_optional(stage_total_start)
+                );
+            }
+            return Ok(());
+        }
+
         let mut output_row_offset = 0_usize;
         for (segment_index, segment) in ready_segments.into_iter().enumerate() {
             anyhow::ensure!(
@@ -6847,19 +7037,20 @@ impl RealFullSchedulerNumericProgression {
             if self.device_hidden_segments.contains_key(desired) {
                 continue;
             }
-            let (parent_key, parent) = self
+            let parent_key = smallest_containing_device_hidden_segment_key(
+                &self.device_hidden_segments,
+                *desired,
+            )
+            .with_context(|| {
+                format!(
+                    "scheduler hidden rechunk found no resident parent for bytes {}..{}",
+                    desired.byte_start, desired.byte_end
+                )
+            })?;
+            let parent = self
                 .device_hidden_segments
-                .iter()
-                .filter(|(key, _)| {
-                    key.byte_start <= desired.byte_start && key.byte_end >= desired.byte_end
-                })
-                .min_by_key(|(key, _)| key.byte_end - key.byte_start)
-                .with_context(|| {
-                    format!(
-                        "scheduler hidden rechunk found no resident parent for bytes {}..{}",
-                        desired.byte_start, desired.byte_end
-                    )
-                })?;
+                .get(&parent_key)
+                .context("scheduler hidden rechunk resident parent disappeared")?;
             let parent_bytes = parent_key.byte_end - parent_key.byte_start;
             anyhow::ensure!(
                 parent.rows * row_bytes == parent_bytes
@@ -6943,12 +7134,44 @@ impl RealFullSchedulerNumericProgression {
             byte_end,
         };
         if !self.device_hidden_segments.contains_key(&key) {
-            let initial = device_bf16_output_from_bf16_bytes(
-                &self.residual_bf16[byte_start..byte_end],
-                row_count,
-                NUMERIC_PROGRESS_HIDDEN_DIM,
-                "scheduler numeric resident hidden source",
-            )?;
+            let initial = if let Some(parent_key) =
+                smallest_containing_device_hidden_segment_key(&self.device_hidden_segments, key)
+            {
+                let parent = self
+                    .device_hidden_segments
+                    .get(&parent_key)
+                    .context("scheduler resident hidden parent disappeared")?;
+                let row_bytes = NUMERIC_PROGRESS_HIDDEN_DIM
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .context("scheduler resident hidden row bytes overflow usize")?;
+                let parent_bytes = parent_key.byte_end - parent_key.byte_start;
+                anyhow::ensure!(
+                    parent.rows * row_bytes == parent_bytes
+                        && parent.values_per_row == NUMERIC_PROGRESS_HIDDEN_DIM,
+                    "scheduler resident hidden parent shape {}x{} did not match {parent_bytes} bytes",
+                    parent.rows,
+                    parent.values_per_row
+                );
+                let view = device_buffer_byte_view(
+                    parent.buffer(),
+                    key.byte_start - parent_key.byte_start,
+                    key.byte_end - key.byte_start,
+                    "scheduler resident hidden parent slice",
+                )?;
+                device_bf16_output_from_device_template_buffer(
+                    view,
+                    row_count,
+                    NUMERIC_PROGRESS_HIDDEN_DIM,
+                    "scheduler numeric resident hidden parent slice",
+                )?
+            } else {
+                device_bf16_output_from_bf16_bytes(
+                    &self.residual_bf16[byte_start..byte_end],
+                    row_count,
+                    NUMERIC_PROGRESS_HIDDEN_DIM,
+                    "scheduler numeric resident hidden source",
+                )?
+            };
             self.device_hidden_segments.insert(key, initial);
         }
         let segment = self
@@ -10405,6 +10628,17 @@ struct DeviceHiddenSegmentKey {
     byte_end: usize,
 }
 
+fn smallest_containing_device_hidden_segment_key<T>(
+    segments: &BTreeMap<DeviceHiddenSegmentKey, T>,
+    desired: DeviceHiddenSegmentKey,
+) -> Option<DeviceHiddenSegmentKey> {
+    segments
+        .keys()
+        .copied()
+        .filter(|key| key.byte_start <= desired.byte_start && key.byte_end >= desired.byte_end)
+        .min_by_key(|key| key.byte_end - key.byte_start)
+}
+
 #[derive(Default)]
 struct DeviceHiddenSegmentSummary {
     resident_segments: usize,
@@ -10991,6 +11225,93 @@ mod tests {
     }
 
     #[test]
+    fn device_hidden_subrange_selects_smallest_resident_parent() {
+        let outer = DeviceHiddenSegmentKey {
+            byte_start: 0,
+            byte_end: 4_096,
+        };
+        let inner = DeviceHiddenSegmentKey {
+            byte_start: 1_024,
+            byte_end: 3_072,
+        };
+        let desired = DeviceHiddenSegmentKey {
+            byte_start: 1_536,
+            byte_end: 2_048,
+        };
+        let mut segments = BTreeMap::new();
+        segments.insert(outer, ());
+        segments.insert(inner, ());
+
+        assert_eq!(
+            smallest_containing_device_hidden_segment_key(&segments, desired),
+            Some(inner)
+        );
+        assert_eq!(
+            smallest_containing_device_hidden_segment_key(
+                &segments,
+                DeviceHiddenSegmentKey {
+                    byte_start: 4_096,
+                    byte_end: 4_608,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn device_hidden_subrange_copies_resident_parent_instead_of_zero_host_fallback() -> Result<()> {
+        let _cuda_reference_override = cuda_reference_kernels_test_override(true);
+        let row_bytes = NUMERIC_PROGRESS_HIDDEN_DIM * std::mem::size_of::<u16>();
+        let mut parent_bytes = vec![0_u8; 2 * row_bytes];
+        fill_repeated_bf16_bytes(0.25, &mut parent_bytes[..row_bytes]);
+        fill_repeated_bf16_bytes(-0.5, &mut parent_bytes[row_bytes..]);
+        let parent = match device_bf16_output_from_bf16_bytes(
+            &parent_bytes,
+            2,
+            NUMERIC_PROGRESS_HIDDEN_DIM,
+            "scheduler resident parent slice unit",
+        ) {
+            Ok(parent) => parent,
+            Err(error) => {
+                eprintln!("skipped: CUDA device upload unavailable: {error:#}");
+                return Ok(());
+            }
+        };
+        let mut progression =
+            RealFullSchedulerNumericProgression::new(RealFullSchedulerNumericProgressionShape {
+                prefix_tokens: 0,
+                prefill_rows: 2,
+                prefill_chunk_tokens: 2,
+                decode_rows: 0,
+                mtp_rows: 0,
+                mtp_accepted_rows: 0,
+                source_segments_per_layer: 1,
+                sparse_source_segments_per_layer: 1,
+            });
+        progression.device_hidden_segments.insert(
+            DeviceHiddenSegmentKey {
+                byte_start: 0,
+                byte_end: 2 * row_bytes,
+            },
+            parent,
+        );
+
+        let source = progression
+            .device_hidden_source(RowSourceKind::PrefillChunk, 1, 1)?
+            .context("resident parent slice source unavailable")?;
+        assert_eq!(source.rows, 1);
+        let child = progression
+            .device_hidden_segments
+            .get(&DeviceHiddenSegmentKey {
+                byte_start: row_bytes,
+                byte_end: 2 * row_bytes,
+            })
+            .context("resident parent slice child was not retained")?;
+        assert_eq!(child.copy_to_host_bytes()?, parent_bytes[row_bytes..]);
+        Ok(())
+    }
+
+    #[test]
     fn rolling_sparse_is_mandatory_through_long_context_ceiling() {
         assert!(!rolling_sparse_packs_supported_for_rows(
             ROLLING_SPARSE_REQUIRED_MIN_ROWS - 1
@@ -11172,6 +11493,9 @@ mod tests {
             rows: 1,
             routes: GLM52_TOP_K,
             unique_experts: 0,
+            max_expert_load: 0,
+            expert_load_square_sum: 0,
+            route_profiled: false,
             hidden_dim: GLM52_HIDDEN_SIZE,
         };
         let expected_executor_id = context.probe.expected_real_executor_id;
@@ -11700,12 +12024,16 @@ mod tests {
             rows: 4,
             routes: 4 * GLM52_TOP_K,
             unique_experts: 0,
+            max_expert_load: 0,
+            expert_load_square_sum: 0,
+            route_profiled: false,
             hidden_dim: 2,
         };
         let mut handle = SchedulerSparseTcpPayloadDispatchHandle {
             batch,
             batch_index: 1,
             started: None,
+            row_sharded_completion_chunks: false,
             chunk_rx: None,
             response_rx: None,
             direct_owner_pending: None,
@@ -11728,6 +12056,9 @@ mod tests {
             sliced_poll_cursor: 0,
             deferred_streaming_completion: None,
         };
+        assert_eq!(handle.response_batch_target_rows(), 256);
+        handle.row_sharded_completion_chunks = true;
+        assert_eq!(handle.response_batch_target_rows(), 4);
         let chunk = |row_index| VerbsHostProtocolV2HostBatchSetBf16PayloadChunk {
             host_index: 0,
             partial_output: glmrt_transport::VerbsHostProtocolV2ResponsePayload::from_owned(

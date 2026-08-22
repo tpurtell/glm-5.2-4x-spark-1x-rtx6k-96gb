@@ -119,6 +119,16 @@ pub(crate) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
             Some("max_completion_tokens"),
         ));
     }
+    let max_tokens = request_max_tokens(request);
+    if request
+        .min_tokens
+        .is_some_and(|minimum| minimum > max_tokens)
+    {
+        return Err(invalid_request(
+            format!("min_tokens cannot exceed the requested output limit ({max_tokens})"),
+            Some("min_tokens"),
+        ));
+    }
     if request
         .temperature
         .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
@@ -173,12 +183,6 @@ pub(crate) fn validate_request(request: &ChatCompletionRequest) -> Result<(), Ap
                     )?;
                 }
             }
-        }
-        if !matches!(response_format, ResponseFormat::Text) && tool_calls_enabled(request) {
-            return Err(invalid_request(
-                "non-text response_format cannot be combined with enabled tools",
-                Some("response_format"),
-            ));
         }
     }
     if let Some(tools) = &request.tools {

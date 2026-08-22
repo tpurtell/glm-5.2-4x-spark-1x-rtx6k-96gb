@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 
 use crate::request::{
@@ -123,6 +124,15 @@ struct BoundaryJoinRealFullExecutor {
     info: RealFullInfo,
 }
 
+#[derive(Debug)]
+struct BufferedResponseCancellationRealFullExecutor {
+    first_cycle_started: mpsc::SyncSender<()>,
+    release_first_cycle: Mutex<mpsc::Receiver<()>>,
+    held_once: AtomicBool,
+    finishes: Arc<Mutex<Vec<String>>>,
+    info: RealFullInfo,
+}
+
 impl RealFullRequestExecutor for BatchRecordingRealFullExecutor {
     fn execute_real_full_request(&self, _request: RealFullRequest) -> Result<RealFullInfo, String> {
         Ok(self.info.clone())
@@ -214,6 +224,52 @@ impl RealFullRequestExecutor for PersistentBatchRecordingRealFullExecutor {
         _request: &RealFullRequest,
     ) -> Option<Duration> {
         Some(Duration::from_millis(10))
+    }
+
+    fn finish_real_full_sequence(&self, sequence_id: &str) -> Result<(), String> {
+        self.finishes.lock().unwrap().push(sequence_id.to_owned());
+        Ok(())
+    }
+}
+
+impl RealFullRequestExecutor for BufferedResponseCancellationRealFullExecutor {
+    fn execute_real_full_request(&self, _request: RealFullRequest) -> Result<RealFullInfo, String> {
+        Err("buffered-response cancellation test requires cycle execution".to_owned())
+    }
+
+    fn execute_real_full_decode_cycle_batch(
+        &self,
+        requests: Vec<RealFullRequest>,
+    ) -> Vec<Result<RealFullDecodeCycle, String>> {
+        if !self.held_once.swap(true, Ordering::SeqCst) {
+            self.first_cycle_started
+                .send(())
+                .expect("notifying buffered-response cycle start");
+            self.release_first_cycle
+                .lock()
+                .unwrap()
+                .recv()
+                .expect("releasing buffered-response cycle");
+        }
+        requests
+            .into_iter()
+            .map(|request| {
+                let token_id = 100 + request.generated_token_ids.len();
+                let mut info = self.info.clone();
+                info.status = "ready".to_owned();
+                info.blocker.clear();
+                info.failed_requirements.clear();
+                info.scheduler_terminal_lm_head_sampled_token_id = Some(token_id);
+                info.scheduler_terminal_lm_head_sampled_text = Some("a".to_owned());
+                Ok(RealFullDecodeCycle {
+                    info,
+                    generated_tokens: vec![RealFullGeneratedToken {
+                        token_id,
+                        text: Some("a".to_owned()),
+                    }],
+                })
+            })
+            .collect()
     }
 
     fn finish_real_full_sequence(&self, sequence_id: &str) -> Result<(), String> {
@@ -804,6 +860,8 @@ fn base_request(content: &str) -> ChatCompletionRequest {
         stream_options: None,
         max_tokens: Some(16),
         max_completion_tokens: None,
+        min_tokens: None,
+        ignore_eos: None,
         temperature: Some(0.0),
         top_p: Some(1.0),
         top_k: None,
@@ -865,6 +923,27 @@ fn request_accepts_openai_max_completion_tokens() {
 }
 
 #[test]
+fn request_accepts_exact_generation_extensions_and_rejects_an_impossible_floor() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 128,
+        "min_tokens": 128,
+        "ignore_eos": true
+    }))
+    .unwrap();
+
+    assert_eq!(request.min_tokens, Some(128));
+    assert_eq!(request.ignore_eos, Some(true));
+    validate_request(&request).unwrap();
+
+    let mut impossible = request;
+    impossible.min_tokens = Some(129);
+    let error = validate_request(&impossible).unwrap_err();
+    assert_eq!(error.param.as_deref(), Some("min_tokens"));
+}
+
+#[test]
 fn request_validates_openai_json_schema_strict_subset() {
     let valid: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "test",
@@ -911,15 +990,37 @@ fn request_validates_openai_json_schema_strict_subset() {
 }
 
 #[test]
-fn request_rejects_competing_response_and_tool_contracts() {
+fn request_accepts_combined_response_and_tool_contracts() {
     let mut request = base_request("answer or call");
     request.response_format = Some(ResponseFormat::JsonObject);
     request.tools = Some(vec![lookup_tool()]);
-    let error = validate_request(&request).unwrap_err();
-    assert!(error.message.contains("response_format cannot be combined"));
+    validate_request(&request).unwrap();
+    let constraint = crate::constrained::request_constraint(&request)
+        .unwrap()
+        .expect("combined response/tool request should be constrained");
+    let RealFullConstraintGrammar::StructuralTag {
+        structural_tag_json,
+    } = &constraint.grammar
+    else {
+        panic!("combined response/tool request should use a structural grammar")
+    };
+    let grammar: serde_json::Value = serde_json::from_str(structural_tag_json).unwrap();
+    assert_eq!(grammar["format"]["type"], "or");
+    assert_eq!(grammar["format"]["elements"][0]["type"], "json_schema");
+    assert_eq!(
+        grammar["format"]["elements"][1]["type"],
+        "tags_with_separator"
+    );
 
     request.tool_choice = Some(ToolChoice::Mode("none".to_owned()));
     validate_request(&request).unwrap();
+    assert!(matches!(
+        crate::constrained::request_constraint(&request)
+            .unwrap()
+            .unwrap()
+            .grammar,
+        RealFullConstraintGrammar::Json
+    ));
 }
 
 #[test]
@@ -1336,6 +1437,8 @@ fn thread_pinned_real_full_executor_keeps_persistent_c4_sequences_in_one_recurre
                             2,
                         ),
                         max_output_tokens: 2,
+                        min_output_tokens: 0,
+                        ignore_eos: false,
                         stop_token_ids: vec![2],
                         stop_texts: Vec::new(),
                     },
@@ -1440,6 +1543,8 @@ fn thread_pinned_real_full_persistent_wave_drains_through_every_width_without_pa
                             max_output_tokens,
                         ),
                         max_output_tokens,
+                        min_output_tokens: 0,
+                        ignore_eos: false,
                         stop_token_ids: Vec::new(),
                         stop_texts: Vec::new(),
                     },
@@ -1517,6 +1622,8 @@ fn thread_pinned_real_full_admits_new_members_at_a_complete_cycle_boundary() {
             2,
         ),
         max_output_tokens: 2,
+        min_output_tokens: 0,
+        ignore_eos: false,
         stop_token_ids: Vec::new(),
         stop_texts: Vec::new(),
     };
@@ -1614,6 +1721,8 @@ fn thread_pinned_real_full_executor_retries_transient_initial_admission() {
                             2,
                         ),
                         max_output_tokens: 2,
+                        min_output_tokens: 0,
+                        ignore_eos: false,
                         stop_token_ids: vec![2],
                         stop_texts: Vec::new(),
                     },
@@ -1654,6 +1763,64 @@ fn thread_pinned_real_full_executor_retries_transient_initial_admission() {
 }
 
 #[test]
+fn thread_pinned_real_full_sequence_honors_minimum_output_and_ignore_eos() {
+    let finishes = Arc::new(Mutex::new(Vec::new()));
+    let executor = ThreadPinnedRealFullRequestExecutor::spawn(
+        "glmrt-api-thread-pinned-real-full-exact-output-test",
+        RetryableAdmissionRealFullExecutor {
+            batches: Arc::new(Mutex::new(Vec::new())),
+            finishes: Arc::clone(&finishes),
+            rejected_once: AtomicBool::new(true),
+            info: blocked_real_full_info(),
+        },
+    )
+    .expect("spawning exact-output real-full executor");
+    let collect = |sequence_id: &str, min_output_tokens: usize, ignore_eos: bool| {
+        let mut receiver = executor
+            .start_real_full_sequence_on_worker(
+                0,
+                RealFullSequenceRequest {
+                    request: RealFullRequest::new_decode_step_for_sequence(
+                        100,
+                        sequence_id,
+                        "prompt",
+                        1,
+                        1,
+                        Vec::new(),
+                        0,
+                        3,
+                    ),
+                    max_output_tokens: 3,
+                    min_output_tokens,
+                    ignore_eos,
+                    stop_token_ids: vec![2],
+                    stop_texts: Vec::new(),
+                },
+            )
+            .expect("starting exact-output sequence");
+        let mut tokens = Vec::new();
+        while let Some(event) = receiver.blocking_recv() {
+            tokens.extend(
+                event
+                    .expect("exact-output sequence cycle")
+                    .cycle
+                    .generated_tokens
+                    .into_iter()
+                    .map(|token| token.token_id),
+            );
+        }
+        tokens
+    };
+
+    assert_eq!(collect("minimum-output", 3, false), vec![1, 2, 2]);
+    assert_eq!(collect("ignore-eos", 0, true), vec![1, 2, 2]);
+    assert_eq!(
+        finishes.lock().unwrap().as_slice(),
+        &["minimum-output".to_owned(), "ignore-eos".to_owned()]
+    );
+}
+
+#[test]
 fn thread_pinned_real_full_queue_caps_total_active_and_pending_sequences() {
     let (first_cycle_started, first_cycle_started_receiver) = mpsc::sync_channel(1);
     let (release_first_cycle, release_first_cycle_receiver) = mpsc::sync_channel(1);
@@ -1679,6 +1846,8 @@ fn thread_pinned_real_full_queue_caps_total_active_and_pending_sequences() {
             2,
         ),
         max_output_tokens: 2,
+        min_output_tokens: 0,
+        ignore_eos: false,
         stop_token_ids: vec![2],
         stop_texts: Vec::new(),
     };
@@ -1734,6 +1903,8 @@ fn thread_pinned_real_full_capacity_retry_does_not_block_a_fitting_request() {
             2,
         ),
         max_output_tokens: 2,
+        min_output_tokens: 0,
+        ignore_eos: false,
         stop_token_ids: vec![2],
         stop_texts: Vec::new(),
     };
@@ -1835,6 +2006,8 @@ fn thread_pinned_real_full_prunes_a_cancelled_pending_request() {
             2,
         ),
         max_output_tokens: 2,
+        min_output_tokens: 0,
+        ignore_eos: false,
         stop_token_ids: vec![2],
         stop_texts: Vec::new(),
     };
@@ -1909,6 +2082,8 @@ fn thread_pinned_real_full_blocked_admission_cannot_starve_the_active_owner() {
             2,
         ),
         max_output_tokens: 2,
+        min_output_tokens: 0,
+        ignore_eos: false,
         stop_token_ids: vec![2],
         stop_texts: Vec::new(),
     };
@@ -2236,6 +2411,81 @@ async fn request_text_from_router(
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
     (status, text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnecting_non_stream_real_full_request_cancels_persistent_sequence() {
+    let (first_cycle_started, first_cycle_started_receiver) = mpsc::sync_channel(1);
+    let (release_first_cycle, release_first_cycle_receiver) = mpsc::sync_channel(1);
+    let finishes = Arc::new(Mutex::new(Vec::new()));
+    let executor = ThreadPinnedRealFullRequestExecutor::spawn(
+        "glmrt-api-buffered-response-cancellation-test",
+        BufferedResponseCancellationRealFullExecutor {
+            first_cycle_started,
+            release_first_cycle: Mutex::new(release_first_cycle_receiver),
+            held_once: AtomicBool::new(false),
+            finishes: Arc::clone(&finishes),
+            info: blocked_runtime_sample_real_full_info(100, "a"),
+        },
+    )
+    .expect("spawning buffered-response cancellation executor");
+    let mut config = ApiConfig::default();
+    config.backend = ApiBackend::RealGlmFull;
+    config.real_full = Some(blocked_real_full_info());
+    config.real_full_executor = Some(Arc::new(executor));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router_with_config(config))
+            .await
+            .unwrap();
+    });
+    let body = json!({
+        "model": format!("{}-full", DEFAULT_MODEL_ID),
+        "messages": [{"role": "user", "content": "Write a long answer."}],
+        "max_tokens": 4096,
+        "temperature": 0
+    })
+    .to_string();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    first_cycle_started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("generation starts before the buffered response exists");
+    let mut response_probe = [0_u8; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), client.read(&mut response_probe))
+            .await
+            .is_err(),
+        "buffered non-streaming generation must not send headers or body bytes before completion"
+    );
+
+    drop(client);
+    release_first_cycle
+        .send(())
+        .expect("releasing in-flight decode cycle after disconnect");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if !finishes.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("disconnected request releases its persistent execution lane");
+    assert_eq!(finishes.lock().unwrap().len(), 1);
+    server.abort();
 }
 
 mod routes;
@@ -3742,6 +3992,48 @@ async fn real_glm_full_route_streams_executor_decode_steps_as_sse_chunks() {
     assert_eq!(captured[1].decode_step_index, 1);
     assert_eq!(captured[2].generated_token_ids, vec![42, 43]);
     assert_eq!(captured[2].decode_step_index, 2);
+}
+
+#[tokio::test]
+async fn real_glm_full_route_streams_executor_failure_as_error_not_content() {
+    let sequences = Arc::new(Mutex::new(Vec::new()));
+    let finishes = Arc::new(Mutex::new(Vec::new()));
+    let mut config = test_state(ApiBackend::RealGlmFull, ApiTransport::Inproc).config;
+    config.real_full = Some(blocked_real_full_info());
+    config.real_full_executor = Some(Arc::new(FailingFinishingRealFullExecutor {
+        sequences: Arc::clone(&sequences),
+        finishes: Arc::clone(&finishes),
+    }));
+
+    let (status, text) = request_text_with_config(
+        config,
+        Method::POST,
+        "/v1/chat/completions",
+        json!({
+            "model": format!("{}-full", DEFAULT_MODEL_ID),
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "messages": [{"role": "user", "content": "Use real full."}],
+            "max_tokens": 8
+        }),
+    )
+    .await;
+
+    // The response headers are already committed once an SSE stream begins,
+    // so a runtime failure remains HTTP 200 and is carried by an error event.
+    assert_eq!(status, StatusCode::OK);
+    assert!(text.contains("\"error\":{\"message\":\"real-full streaming executor error: intentional real-full execution failure\""));
+    assert!(text.contains("\"type\":\"server_error\""));
+    assert!(text.contains("\"code\":\"backend_error\""));
+    assert!(!text.contains("\"delta\":{\"content\":\"real-full streaming executor error"));
+    assert!(!text.contains("\"finish_reason\""));
+    assert!(!text.contains("\"usage\""));
+    assert!(!text.contains("\"metrics\""));
+    assert!(text.contains("[DONE]"));
+    assert_eq!(
+        finishes.lock().unwrap().as_slice(),
+        sequences.lock().unwrap().as_slice()
+    );
 }
 
 #[tokio::test]

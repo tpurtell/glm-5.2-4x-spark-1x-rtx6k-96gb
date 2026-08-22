@@ -6003,24 +6003,19 @@ fn ensure_glm_dsa_sparse_mla_prefill_graph(
     slot.stream_synchronize()
         .context("synchronizing GLM DSA sparse MLA query before Python warmup")?;
     if let Some(selector_buffers) = selector_buffers.as_ref() {
-        for function in [
-            B12X_GLM_DSA_PREFILL_PREPARE_FUNCTION,
-            B12X_GLM_DSA_PREFILL_CAPTURE_FUNCTION,
-        ] {
-            launch_python_graph_capture(PythonGraphCaptureLaunch {
-                module: B12X_MLA_CAPTURE_MODULE,
-                function,
-                cuda_stream: stream,
-                buffers: selector_buffers,
-                kwargs: &selector_kwargs,
-            })
-            .with_context(|| {
-                format!(
-                    "warming GLM DSA selector layer={} query_bucket={bucket_rows}",
-                    input.layer_id
-                )
-            })?;
-        }
+        launch_python_graph_capture(PythonGraphCaptureLaunch {
+            module: B12X_MLA_CAPTURE_MODULE,
+            function: B12X_GLM_DSA_PREFILL_PREPARE_FUNCTION,
+            cuda_stream: stream,
+            buffers: selector_buffers,
+            kwargs: &selector_kwargs,
+        })
+        .with_context(|| {
+            format!(
+                "preparing GLM DSA selector layer={} query_bucket={bucket_rows}",
+                input.layer_id
+            )
+        })?;
     }
     if compact_nvfp4_indices {
         unsafe {
@@ -6072,23 +6067,21 @@ fn ensure_glm_dsa_sparse_mla_prefill_graph(
         )
         .context("warming native BF16 sparse MLA attention")?;
     } else {
-        let (sparse_prepare_function, sparse_capture_function, sparse_backend_label) =
+        let (sparse_prepare_function, _, sparse_backend_label) =
             sparse_python_functions.expect("non-BF16 sparse MLA has Python functions");
-        for function in [sparse_prepare_function, sparse_capture_function] {
-            launch_python_graph_capture(PythonGraphCaptureLaunch {
-                module: B12X_MLA_CAPTURE_MODULE,
-                function,
-                cuda_stream: stream,
-                buffers: &sparse_buffers,
-                kwargs: &sparse_kwargs,
-            })
-            .with_context(|| {
-                format!(
-                    "warming sparse {sparse_backend_label} MLA layer={} query_bucket={bucket_rows}",
-                    input.layer_id
-                )
-            })?;
-        }
+        launch_python_graph_capture(PythonGraphCaptureLaunch {
+            module: B12X_MLA_CAPTURE_MODULE,
+            function: sparse_prepare_function,
+            cuda_stream: stream,
+            buffers: &sparse_buffers,
+            kwargs: &sparse_kwargs,
+        })
+        .with_context(|| {
+            format!(
+                "preparing sparse {sparse_backend_label} MLA layer={} query_bucket={bucket_rows}",
+                input.layer_id
+            )
+        })?;
     }
     unsafe {
         enqueue_glm_dsa_sparse_mla_output(library, stream, input, buffers, bucket_rows)?;
@@ -6782,29 +6775,35 @@ fn ensure_flashinfer_packed_fp8_mla_decode_graphs(
             ("scale", PythonKernelArg::F64(scale as f64)),
             ("initialize_kv", PythonKernelArg::Bool(initialize_kv)),
         ];
-        let capture_length = i32::try_from(if initialize_kv {
-            bucket_rows
-        } else {
-            capture_rows.min(bucket_rows)
-        })
-        .context("packed FP8 MLA capture bucket exceeds i32")?
-        .to_ne_bytes();
-        let capture_index_base = i32::try_from(capture_index_base)
-            .context("packed FP8 MLA capture physical index base exceeds i32")?
+        let python_buffers = flashinfer_packed_fp8_mla_python_buffers(buffers.flashinfer);
+        // Capture records the pointer-specific launch without executing it.
+        // Only the first graph for this slot/shape consumes synthetic metadata
+        // and a preparation replay; requests upload live metadata before use.
+        let prepare_capture_shape = !slot.has_captured_graph(program, signature);
+        if prepare_capture_shape {
+            let capture_length = i32::try_from(if initialize_kv {
+                bucket_rows
+            } else {
+                capture_rows.min(bucket_rows)
+            })
+            .context("packed FP8 MLA capture bucket exceeds i32")?
             .to_ne_bytes();
-        let capture_index_base_offset =
-            FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS * std::mem::size_of::<i32>();
-        let mut capture_header =
-            [0_u8; FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS * std::mem::size_of::<i32>() * 2];
-        for query_index in 0..query_rows {
-            let byte_offset = query_index * std::mem::size_of::<i32>();
-            capture_header[byte_offset..byte_offset + capture_length.len()]
-                .copy_from_slice(&capture_length);
-            let base_offset = capture_index_base_offset + byte_offset;
-            capture_header[base_offset..base_offset + capture_index_base.len()]
-                .copy_from_slice(&capture_index_base);
-        }
-        slot.workspace
+            let capture_index_base = i32::try_from(capture_index_base)
+                .context("packed FP8 MLA capture physical index base exceeds i32")?
+                .to_ne_bytes();
+            let capture_index_base_offset =
+                FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS * std::mem::size_of::<i32>();
+            let mut capture_header =
+                [0_u8; FLASHINFER_PACKED_FP8_MLA_MAX_QUERY_ROWS * std::mem::size_of::<i32>() * 2];
+            for query_index in 0..query_rows {
+                let byte_offset = query_index * std::mem::size_of::<i32>();
+                capture_header[byte_offset..byte_offset + capture_length.len()]
+                    .copy_from_slice(&capture_length);
+                let base_offset = capture_index_base_offset + byte_offset;
+                capture_header[base_offset..base_offset + capture_index_base.len()]
+                    .copy_from_slice(&capture_index_base);
+            }
+            slot.workspace
             .copy_h2d_to_slot_async(
                 library,
                 CoordinatorCudaScratchSlot::P,
@@ -6817,43 +6816,19 @@ fn ensure_flashinfer_packed_fp8_mla_decode_graphs(
                     "staging packed FP8 MLA capture metadata for bucket={bucket_rows} query_rows={query_rows}"
                 )
             })?;
-        slot.stream_synchronize().with_context(|| {
-            format!("synchronizing packed FP8 MLA bucket={bucket_rows} before prepare")
-        })?;
-        let python_buffers = flashinfer_packed_fp8_mla_python_buffers(buffers.flashinfer);
-        launch_python_graph_capture(PythonGraphCaptureLaunch {
-            module: B12X_MLA_CAPTURE_MODULE,
-            function: FLASHINFER_PACKED_FP8_MLA_PREPARE_FUNCTION,
-            cuda_stream: slot.stream_ptr(),
-            buffers: &python_buffers,
-            kwargs: &kwargs,
-        })
-        .with_context(|| {
-            format!("preparing packed FP8 MLA bucket={bucket_rows} query_rows={query_rows}")
-        })?;
-        unsafe {
-            if let Some(physical_pages) = buffers.physical_page_table {
-                library
-                    .cuda_target_kv_page_table_expand_indices_async(
-                        buffers.flashinfer.indices,
-                        physical_pages,
-                        query_rows,
-                        bucket_rows,
-                        bucket_rows,
-                        slot.stream_ptr(),
-                    )
-                    .context("initializing paged packed FP8 MLA physical indices")?;
-            } else if !initialize_kv {
-                library
-                    .cuda_glm_dsa_page_table_init_offsets_async(
-                        buffers.flashinfer.indices,
-                        buffers.flashinfer.index_base,
-                        query_rows,
-                        bucket_rows,
-                        slot.stream_ptr(),
-                    )
-                    .context("initializing packed FP8 MLA physical indices")?;
-            }
+            slot.stream_synchronize().with_context(|| {
+                format!("synchronizing packed FP8 MLA bucket={bucket_rows} before prepare")
+            })?;
+            launch_python_graph_capture(PythonGraphCaptureLaunch {
+                module: B12X_MLA_CAPTURE_MODULE,
+                function: FLASHINFER_PACKED_FP8_MLA_PREPARE_FUNCTION,
+                cuda_stream: slot.stream_ptr(),
+                buffers: &python_buffers,
+                kwargs: &kwargs,
+            })
+            .with_context(|| {
+                format!("preparing packed FP8 MLA bucket={bucket_rows} query_rows={query_rows}")
+            })?;
             if use_sparkinfer_h64_query_projection {
                 launch_sparkinfer_glm_h64_query_projection(
                     SPARKINFER_GLM_H64_QUERY_PREPARE_FUNCTION,
@@ -6870,35 +6845,10 @@ fn ensure_flashinfer_packed_fp8_mla_decode_graphs(
                     geometry.weight_head_stride,
                 )?;
             }
-            enqueue_flashinfer_packed_fp8_mla_query_routed(
-                library,
-                slot.stream_ptr(),
-                buffers,
-                geometry,
-                use_sparkinfer_h64_query_projection,
-            )?;
+            slot.stream_synchronize().with_context(|| {
+                format!("synchronizing prepared packed FP8 MLA bucket={bucket_rows}")
+            })?;
         }
-        launch_python_graph_capture(PythonGraphCaptureLaunch {
-            module: B12X_MLA_CAPTURE_MODULE,
-            function: FLASHINFER_PACKED_FP8_MLA_CAPTURE_FUNCTION,
-            cuda_stream: slot.stream_ptr(),
-            buffers: &python_buffers,
-            kwargs: &kwargs,
-        })
-        .with_context(|| {
-            format!("warming packed FP8 MLA decode bucket={bucket_rows} query_rows={query_rows}")
-        })?;
-        unsafe {
-            enqueue_flashinfer_packed_fp8_mla_output(
-                library,
-                slot.stream_ptr(),
-                buffers,
-                geometry,
-            )?;
-        }
-        slot.stream_synchronize().with_context(|| {
-            format!("synchronizing prepared packed FP8 MLA bucket={bucket_rows}")
-        })?;
         slot.capture_or_update_graph_exec(
             library,
             program,

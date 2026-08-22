@@ -205,7 +205,7 @@ def main() -> None:
     ).view(torch.float8_e4m3fn)
     global_scale = torch.ones(args.weight_sets, dtype=torch.float32, device=device)
 
-    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
+    from b12x.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
     )
 
@@ -230,8 +230,8 @@ def main() -> None:
     max_m_blocks = capacity_rows
     fused = None
     if not args.native_only:
-        from sparkinfer.moe._shared.kernels.w4a16 import kernel as w4a16_kernel
-        from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+        from b12x.moe._shared.kernels.w4a16 import kernel as w4a16_kernel
+        from b12x.moe._shared.kernels.w4a16.kernel import (
             compile_w4a16_fused_moe,
         )
 
@@ -432,7 +432,7 @@ def main() -> None:
     launch_candidate = None
     candidate_output = None
     if not args.native_only:
-        from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+        from b12x.moe._shared.kernels.w4a16.kernel import (
             _cutlass_element_dtype,
             cuda,
             cute,

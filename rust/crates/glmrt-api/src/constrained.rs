@@ -14,34 +14,26 @@ const GLM_THINK_CLOSE_TOKEN_ID: usize = 154_842;
 pub(crate) fn request_constraint(
     request: &ChatCompletionRequest,
 ) -> Result<Option<Arc<RealFullConstraint>>, ApiError> {
-    if let Some(response_format) = request.response_format.as_ref() {
-        if !matches!(response_format, ResponseFormat::Text) {
-            let grammar = match response_format {
-                ResponseFormat::Text => unreachable!("text response format handled above"),
-                ResponseFormat::JsonObject => RealFullConstraintGrammar::Json,
-                ResponseFormat::JsonSchema { json_schema } => {
-                    RealFullConstraintGrammar::JsonSchema {
-                        schema_json: serde_json::to_string(&json_schema.schema).map_err(
-                            |error| {
-                                invalid_request(
-                                    format!(
-                                        "response_format JSON Schema cannot be serialized: {error}"
-                                    ),
-                                    Some("response_format.json_schema.schema"),
-                                )
-                            },
-                        )?,
-                        strict: json_schema.strict.unwrap_or(false),
-                    }
-                }
-            };
+    let selected_tools = selected_tools(request);
+    if let Some(grammar) = response_format_grammar(request)? {
+        if selected_tools.is_empty() {
             return Ok(Some(Arc::new(RealFullConstraint {
                 grammar: wrap_reasoning_prefix(request, grammar)?,
             })));
         }
+        let structural_tag =
+            combined_response_tool_structural_tag(request, &selected_tools, &grammar)?;
+        return Ok(Some(Arc::new(RealFullConstraint {
+            grammar: RealFullConstraintGrammar::StructuralTag {
+                structural_tag_json: serde_json::to_string(&structural_tag).map_err(|error| {
+                    invalid_request(
+                        format!("combined response/tool grammar cannot be serialized: {error}"),
+                        Some("response_format"),
+                    )
+                })?,
+            },
+        })));
     }
-
-    let selected_tools = selected_tools(request);
     if selected_tools.is_empty()
         || !selected_tools
             .iter()
@@ -60,6 +52,28 @@ pub(crate) fn request_constraint(
             })?,
         },
     })))
+}
+
+fn response_format_grammar(
+    request: &ChatCompletionRequest,
+) -> Result<Option<RealFullConstraintGrammar>, ApiError> {
+    let Some(response_format) = request.response_format.as_ref() else {
+        return Ok(None);
+    };
+    let grammar = match response_format {
+        ResponseFormat::Text => return Ok(None),
+        ResponseFormat::JsonObject => RealFullConstraintGrammar::Json,
+        ResponseFormat::JsonSchema { json_schema } => RealFullConstraintGrammar::JsonSchema {
+            schema_json: serde_json::to_string(&json_schema.schema).map_err(|error| {
+                invalid_request(
+                    format!("response_format JSON Schema cannot be serialized: {error}"),
+                    Some("response_format.json_schema.schema"),
+                )
+            })?,
+            strict: json_schema.strict.unwrap_or(false),
+        },
+    };
+    Ok(Some(grammar))
 }
 
 fn wrap_reasoning_prefix(
@@ -123,6 +137,43 @@ fn strict_tool_structural_tag(
     request: &ChatCompletionRequest,
     tools: &[&ChatTool],
 ) -> Result<Value, ApiError> {
+    let format = tool_structural_format(request, tools, false);
+    Ok(json!({
+        "type": "structural_tag",
+        "format": wrap_reasoning_format(request, format)
+    }))
+}
+
+fn combined_response_tool_structural_tag(
+    request: &ChatCompletionRequest,
+    tools: &[&ChatTool],
+    response_grammar: &RealFullConstraintGrammar,
+) -> Result<Value, ApiError> {
+    // The response-schema branch represents ordinary assistant content, so
+    // the sibling tool branch must be an actual tool block. A triggered tag
+    // would also accept arbitrary text and make the response schema optional.
+    let tool_format = tool_structural_format(request, tools, true);
+    let format = match &request.tool_choice {
+        // A required or specifically selected tool cannot share one assistant
+        // turn with final response content. Preserve tool_choice precedence.
+        Some(ToolChoice::Mode(mode)) if mode == "required" => tool_format,
+        Some(ToolChoice::Specific { .. }) => tool_format,
+        _ => json!({
+            "type": "or",
+            "elements": [grammar_format_json(response_grammar)?, tool_format]
+        }),
+    };
+    Ok(json!({
+        "type": "structural_tag",
+        "format": wrap_reasoning_format(request, format)
+    }))
+}
+
+fn tool_structural_format(
+    request: &ChatCompletionRequest,
+    tools: &[&ChatTool],
+    exact_tool_branch: bool,
+) -> Value {
     let tags = tools
         .iter()
         .map(|tool| {
@@ -163,6 +214,13 @@ fn strict_tool_structural_tag(
             "at_least_one": true,
             "stop_after_first": stop_after_first
         }),
+        _ if exact_tool_branch => json!({
+            "type": "tags_with_separator",
+            "tags": tags,
+            "separator": "",
+            "at_least_one": true,
+            "stop_after_first": stop_after_first
+        }),
         _ => json!({
             "type": "triggered_tags",
             "triggers": ["<tool_call>"],
@@ -171,22 +229,24 @@ fn strict_tool_structural_tag(
             "stop_after_first": stop_after_first
         }),
     };
-    let format = if request_thinking_enabled(request) {
-        json!({
-            "type": "sequence",
-            "elements": [
-                {
-                    "type": "any_tokens",
-                    "exclude_tokens": [GLM_THINK_CLOSE_TOKEN_ID]
-                },
-                {"type": "token", "token": GLM_THINK_CLOSE_TOKEN_ID},
-                format
-            ]
-        })
-    } else {
-        format
-    };
-    Ok(json!({"type": "structural_tag", "format": format}))
+    format
+}
+
+fn wrap_reasoning_format(request: &ChatCompletionRequest, format: Value) -> Value {
+    if !request_thinking_enabled(request) {
+        return format;
+    }
+    json!({
+        "type": "sequence",
+        "elements": [
+            {
+                "type": "any_tokens",
+                "exclude_tokens": [GLM_THINK_CLOSE_TOKEN_ID]
+            },
+            {"type": "token", "token": GLM_THINK_CLOSE_TOKEN_ID},
+            format
+        ]
+    })
 }
 
 fn selected_tools(request: &ChatCompletionRequest) -> Vec<&ChatTool> {
@@ -322,6 +382,98 @@ mod tests {
             request_constraint(&request).unwrap().unwrap().grammar,
             RealFullConstraintGrammar::StructuralTag { .. }
         ));
+    }
+
+    #[test]
+    fn response_schema_and_auto_tools_compile_as_alternative_outputs() {
+        let request = request(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "look up and summarize"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": ["answer"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "tools": [{
+                "type": "function",
+                "function": {"name": "lookup", "strict": true}
+            }],
+            "tool_choice": "auto"
+        }));
+        let constraint = request_constraint(&request).unwrap().unwrap();
+        let RealFullConstraintGrammar::StructuralTag {
+            structural_tag_json,
+        } = &constraint.grammar
+        else {
+            panic!("expected combined structural tag grammar")
+        };
+        let grammar: Value = serde_json::from_str(structural_tag_json).unwrap();
+        assert_eq!(grammar["format"]["type"], "or");
+        assert_eq!(
+            grammar["format"]["elements"][0]["json_schema"]["required"],
+            json!(["answer"])
+        );
+        assert_eq!(
+            grammar["format"]["elements"][1]["tags"][0]["begin"],
+            "<tool_call>lookup"
+        );
+    }
+
+    #[test]
+    fn required_tool_takes_precedence_over_final_response_schema() {
+        let request = request(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "look up"}],
+            "response_format": {"type": "json_object"},
+            "tools": [{
+                "type": "function",
+                "function": {"name": "lookup", "strict": true}
+            }],
+            "tool_choice": "required"
+        }));
+        let constraint = request_constraint(&request).unwrap().unwrap();
+        let RealFullConstraintGrammar::StructuralTag {
+            structural_tag_json,
+        } = &constraint.grammar
+        else {
+            panic!("expected required-tool structural tag grammar")
+        };
+        let grammar: Value = serde_json::from_str(structural_tag_json).unwrap();
+        assert_eq!(grammar["format"]["type"], "tags_with_separator");
+        assert_eq!(grammar["format"]["at_least_one"], true);
+    }
+
+    #[test]
+    fn combined_response_and_tools_share_one_reasoning_prefix() {
+        let request = request(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "look up and summarize"}],
+            "thinking": {"type": "enabled"},
+            "response_format": {"type": "json_object"},
+            "tools": [{
+                "type": "function",
+                "function": {"name": "lookup"}
+            }]
+        }));
+        let constraint = request_constraint(&request).unwrap().unwrap();
+        let RealFullConstraintGrammar::StructuralTag {
+            structural_tag_json,
+        } = &constraint.grammar
+        else {
+            panic!("expected reasoning-prefixed combined grammar")
+        };
+        let grammar: Value = serde_json::from_str(structural_tag_json).unwrap();
+        assert_eq!(grammar["format"]["type"], "sequence");
+        assert_eq!(grammar["format"]["elements"][1]["token"], 154_842);
+        assert_eq!(grammar["format"]["elements"][2]["type"], "or");
     }
 
     #[test]

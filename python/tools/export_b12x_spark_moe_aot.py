@@ -16,8 +16,8 @@ TOP1_MULTIROW_GRID_X = 48
 
 def prepare_export(output_dir: Path):
     # A disk-cache hit is executable-only and has no IR for export_to_c().
-    os.environ["SPARKINFER_COMPILE_DISK_CACHE"] = "0"
-    os.environ["SPARKINFER_COMPILE_MEMORY_CACHE"] = "0"
+    os.environ["B12X_COMPILE_DISK_CACHE"] = "0"
+    os.environ["B12X_COMPILE_MEMORY_CACHE"] = "0"
 
     import cuda.bindings.driver as cuda
     import torch
@@ -31,11 +31,11 @@ def prepare_export(output_dir: Path):
 
 def export_kernels(output_dir: Path, target_sms: int) -> None:
     cuda, torch, device = prepare_export(output_dir)
-    from sparkinfer.moe._shared.kernels.w4a16.host import (
+    from b12x.moe._shared.kernels.w4a16.host import (
         max_packed_route_slots,
         select_route_block_size_m,
     )
-    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+    from b12x.moe._shared.kernels.w4a16.kernel import (
         W4A16FusedMoeKernel,
         _w4a16_fused_persistent_grid_x,
         compile_w4a16_fused_moe,

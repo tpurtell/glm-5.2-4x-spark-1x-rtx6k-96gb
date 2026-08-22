@@ -446,10 +446,9 @@ struct GlmrtRdmaRcEndpointHandle {
 
 constexpr auto kRdmaRcEndpointBusyPollBudget = std::chrono::milliseconds(1);
 // Four execution lanes can leave one QP unused for roughly a second during c1
-// decode. Keep that active lane rotation polling; true idle has no outstanding
-// poll and still falls back to CQ events on the next request.
+// decode. Keep that active lane rotation polling; callers use a short explicit
+// timeout when they are truly idle.
 constexpr auto kRdmaRcEndpointRecentActivityBusyPollWindow = std::chrono::seconds(5);
-constexpr int kRdmaRcEndpointIdleEventPollTimeoutMs = 1000;
 
 void drain_rdma_rc_cq_events(ibv_comp_channel* channel) {
   if (channel == nullptr) {
@@ -3134,14 +3133,11 @@ extern "C" glmrt_status_t glmrt_rdma_rc_endpoint_poll_with_timeout(
   out->expected_recv_completions = expected_recv_completions;
 #if GLMRT_NATIVE_ENABLE_RDMA
   auto* endpoint = static_cast<GlmrtRdmaRcEndpointHandle*>(handle);
-  const bool idle_wait = expected_send_completions == 0 && expected_recv_completions > 0;
   const int effective_active_event_poll_timeout_ms =
       static_cast<int>(std::min<uint32_t>(
           std::max<uint32_t>(active_event_poll_timeout_ms, 1),
           static_cast<uint32_t>(std::numeric_limits<int>::max())));
-  const int event_poll_timeout_ms =
-      idle_wait ? kRdmaRcEndpointIdleEventPollTimeoutMs
-                : effective_active_event_poll_timeout_ms;
+  const int event_poll_timeout_ms = effective_active_event_poll_timeout_ms;
   auto mark_recent_activity = [&]() {
     endpoint->busy_poll_until =
         std::chrono::steady_clock::now() + kRdmaRcEndpointRecentActivityBusyPollWindow;

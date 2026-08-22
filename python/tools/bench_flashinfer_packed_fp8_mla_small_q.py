@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import torch
-from sparkinfer.attention._shared.mla.reference import (
+from b12x.attention._shared.mla.reference import (
     pack_mla_kv_cache_reference,
 )
 from flashinfer.mla._sparse_mla_sm120 import (

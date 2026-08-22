@@ -1,0 +1,1299 @@
+{
+  "curves": {
+    "1": [
+      {
+        "corpus": {
+          "maximum_ms": 56.926,
+          "median_ms": 48.324,
+          "minimum_ms": 47.425,
+          "p25_ms": 48.06,
+          "p75_ms": 48.62125,
+          "samples": 2228
+        },
+        "latency_ms": 48.324,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 47.986,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 1
+      },
+      {
+        "corpus": {
+          "maximum_ms": 89.142,
+          "median_ms": 71.096,
+          "minimum_ms": 65.566,
+          "p25_ms": 70.07975,
+          "p75_ms": 72.09075,
+          "samples": 2080
+        },
+        "latency_ms": 71.096,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 73.675,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 2
+      },
+      {
+        "corpus": {
+          "maximum_ms": 97.666,
+          "median_ms": 88.841,
+          "minimum_ms": 82.989,
+          "p25_ms": 87.271,
+          "p75_ms": 90.2975,
+          "samples": 315
+        },
+        "latency_ms": 88.841,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 87.224,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 3
+      },
+      {
+        "corpus": {
+          "maximum_ms": 106.929,
+          "median_ms": 99.426,
+          "minimum_ms": 90.966,
+          "p25_ms": 97.47,
+          "p75_ms": 101.419,
+          "samples": 425
+        },
+        "latency_ms": 99.426,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 94.669,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 4
+      },
+      {
+        "corpus": {
+          "maximum_ms": 124.402,
+          "median_ms": 111.264,
+          "minimum_ms": 101.11,
+          "p25_ms": 108.005,
+          "p75_ms": 114.1,
+          "samples": 167
+        },
+        "latency_ms": 111.264,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 101.023,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 5
+      },
+      {
+        "corpus": {
+          "maximum_ms": 131.265,
+          "median_ms": 122.538,
+          "minimum_ms": 113.095,
+          "p25_ms": 119.738,
+          "p75_ms": 125.667,
+          "samples": 117
+        },
+        "latency_ms": 122.538,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 107.294,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 6
+      },
+      {
+        "corpus": {
+          "maximum_ms": 142.499,
+          "median_ms": 135.038,
+          "minimum_ms": 125.746,
+          "p25_ms": 132.70125000000002,
+          "p75_ms": 138.02249999999998,
+          "samples": 24
+        },
+        "latency_ms": 135.038,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 114.145,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 7
+      },
+      {
+        "corpus": {
+          "maximum_ms": 152.616,
+          "median_ms": 142.76049999999998,
+          "minimum_ms": 131.216,
+          "p25_ms": 139.47275,
+          "p75_ms": 146.7935,
+          "samples": 76
+        },
+        "latency_ms": 142.7605,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 116.917,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 8
+      }
+    ],
+    "2": [
+      {
+        "corpus": {
+          "maximum_ms": 72.374,
+          "median_ms": 69.419,
+          "minimum_ms": 65.951,
+          "p25_ms": 69.2705,
+          "p75_ms": 69.601,
+          "samples": 207
+        },
+        "latency_ms": 69.419,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 69.437,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 2
+      },
+      {
+        "corpus": {
+          "maximum_ms": 90.033,
+          "median_ms": 84.881,
+          "minimum_ms": 80.525,
+          "p25_ms": 84.383,
+          "p75_ms": 85.462,
+          "samples": 601
+        },
+        "latency_ms": 84.881,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 86.221,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 3
+      },
+      {
+        "corpus": {
+          "maximum_ms": 110.955,
+          "median_ms": 96.3565,
+          "minimum_ms": 91.872,
+          "p25_ms": 95.70949999999999,
+          "p75_ms": 100.71625,
+          "samples": 588
+        },
+        "latency_ms": 96.3565,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 96.209,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 4
+      },
+      {
+        "corpus": {
+          "maximum_ms": 125.702,
+          "median_ms": 108.012,
+          "minimum_ms": 101.776,
+          "p25_ms": 105.908,
+          "p75_ms": 115.98599999999999,
+          "samples": 859
+        },
+        "latency_ms": 108.012,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 105.78,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 5
+      },
+      {
+        "corpus": {
+          "maximum_ms": 491.106,
+          "median_ms": 115.836,
+          "minimum_ms": 108.824,
+          "p25_ms": 112.6625,
+          "p75_ms": 125.5655,
+          "samples": 251
+        },
+        "latency_ms": 115.836,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 113.651,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 6
+      },
+      {
+        "corpus": {
+          "maximum_ms": 139.54,
+          "median_ms": 136.713,
+          "minimum_ms": 133.925,
+          "p25_ms": 134.08325000000002,
+          "p75_ms": 139.3525,
+          "samples": 4
+        },
+        "latency_ms": 115.745,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 115.745,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 7
+      },
+      {
+        "corpus": {
+          "maximum_ms": 157.548,
+          "median_ms": 144.775,
+          "minimum_ms": 132.248,
+          "p25_ms": 140.097,
+          "p75_ms": 150.155,
+          "samples": 21
+        },
+        "latency_ms": 144.775,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 117.155,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 8
+      },
+      {
+        "corpus": {
+          "maximum_ms": 171.853,
+          "median_ms": 160.923,
+          "minimum_ms": 133.877,
+          "p25_ms": 152.445,
+          "p75_ms": 166.645,
+          "samples": 17
+        },
+        "latency_ms": 160.923,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 121.067,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 9
+      },
+      {
+        "corpus": {
+          "maximum_ms": 170.95,
+          "median_ms": 165.68,
+          "minimum_ms": 154.682,
+          "p25_ms": 163.841,
+          "p75_ms": 168.624,
+          "samples": 9
+        },
+        "latency_ms": 165.68,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 122.08,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 10
+      },
+      {
+        "corpus": {
+          "maximum_ms": 173.267,
+          "median_ms": 170.203,
+          "minimum_ms": 162.153,
+          "p25_ms": 168.539,
+          "p75_ms": 170.437,
+          "samples": 5
+        },
+        "latency_ms": 170.203,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 124.977,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 11
+      },
+      {
+        "corpus": {
+          "maximum_ms": 172.992,
+          "median_ms": 165.498,
+          "minimum_ms": 157.975,
+          "p25_ms": 160.16699999999997,
+          "p75_ms": 169.39875,
+          "samples": 10
+        },
+        "latency_ms": 165.498,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 125.852,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 12
+      },
+      {
+        "corpus": null,
+        "latency_ms": 130.52,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 130.52,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 13
+      },
+      {
+        "corpus": null,
+        "latency_ms": 131.837,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 131.837,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 14
+      },
+      {
+        "corpus": null,
+        "latency_ms": 138.279,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 138.279,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 15
+      },
+      {
+        "corpus": {
+          "maximum_ms": 181.362,
+          "median_ms": 175.623,
+          "minimum_ms": 169.884,
+          "p25_ms": 172.75349999999997,
+          "p75_ms": 178.4925,
+          "samples": 2
+        },
+        "latency_ms": 141.827,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 141.827,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 16
+      }
+    ],
+    "3": [
+      {
+        "corpus": null,
+        "latency_ms": 103.366,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 103.366,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 3
+      },
+      {
+        "corpus": {
+          "maximum_ms": 124.528,
+          "median_ms": 118.699,
+          "minimum_ms": 117.927,
+          "p25_ms": 118.0615,
+          "p75_ms": 119.47149999999999,
+          "samples": 11
+        },
+        "latency_ms": 118.699,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 119.424,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 4
+      },
+      {
+        "corpus": {
+          "maximum_ms": 135.54,
+          "median_ms": 130.176,
+          "minimum_ms": 127.218,
+          "p25_ms": 128.147,
+          "p75_ms": 132.2,
+          "samples": 489
+        },
+        "latency_ms": 130.176,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 132.44,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 5
+      },
+      {
+        "corpus": {
+          "maximum_ms": 475.157,
+          "median_ms": 143.171,
+          "minimum_ms": 132.063,
+          "p25_ms": 141.2005,
+          "p75_ms": 144.108,
+          "samples": 19
+        },
+        "latency_ms": 143.171,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 145.261,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 6
+      },
+      {
+        "corpus": {
+          "maximum_ms": 496.252,
+          "median_ms": 153.038,
+          "minimum_ms": 140.894,
+          "p25_ms": 147.90449999999998,
+          "p75_ms": 155.921,
+          "samples": 16
+        },
+        "latency_ms": 153.038,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 154.131,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 7
+      },
+      {
+        "corpus": {
+          "maximum_ms": 166.574,
+          "median_ms": 158.435,
+          "minimum_ms": 151.533,
+          "p25_ms": 154.329,
+          "p75_ms": 162.85025000000002,
+          "samples": 4
+        },
+        "latency_ms": 162.843,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 162.843,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 8
+      },
+      {
+        "corpus": {
+          "maximum_ms": 165.835,
+          "median_ms": 165.835,
+          "minimum_ms": 165.835,
+          "p25_ms": 165.835,
+          "p75_ms": 165.835,
+          "samples": 1
+        },
+        "latency_ms": 171.286,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 171.286,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 9
+      },
+      {
+        "corpus": {
+          "maximum_ms": 185.153,
+          "median_ms": 165.163,
+          "minimum_ms": 154.485,
+          "p25_ms": 161.923,
+          "p75_ms": 170.301,
+          "samples": 169
+        },
+        "latency_ms": 165.163,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 173.473,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 10
+      },
+      {
+        "corpus": {
+          "maximum_ms": 502.673,
+          "median_ms": 175.315,
+          "minimum_ms": 168.361,
+          "p25_ms": 170.58625,
+          "p75_ms": 260.14475,
+          "samples": 4
+        },
+        "latency_ms": 175.191,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 175.191,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 11
+      },
+      {
+        "corpus": null,
+        "latency_ms": 176.301,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 176.301,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 12
+      },
+      {
+        "corpus": null,
+        "latency_ms": 179.692,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 179.692,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 13
+      },
+      {
+        "corpus": null,
+        "latency_ms": 182.215,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 182.215,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 14
+      },
+      {
+        "corpus": null,
+        "latency_ms": 184.583,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 184.583,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 15
+      },
+      {
+        "corpus": {
+          "maximum_ms": 193.697,
+          "median_ms": 193.697,
+          "minimum_ms": 193.697,
+          "p25_ms": 193.697,
+          "p75_ms": 193.697,
+          "samples": 1
+        },
+        "latency_ms": 186.328,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 186.328,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 16
+      },
+      {
+        "corpus": null,
+        "latency_ms": 187.708,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 187.708,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 17
+      },
+      {
+        "corpus": {
+          "maximum_ms": 206.825,
+          "median_ms": 205.10750000000002,
+          "minimum_ms": 201.312,
+          "p25_ms": 203.99025,
+          "p75_ms": 205.70524999999998,
+          "samples": 4
+        },
+        "latency_ms": 188.413,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 188.413,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 18
+      },
+      {
+        "corpus": {
+          "maximum_ms": 225.245,
+          "median_ms": 210.01,
+          "minimum_ms": 202.569,
+          "p25_ms": 207.466,
+          "p75_ms": 213.162,
+          "samples": 73
+        },
+        "latency_ms": 210.01,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 191.564,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 19
+      },
+      {
+        "corpus": null,
+        "latency_ms": 194.361,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 194.361,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 20
+      },
+      {
+        "corpus": null,
+        "latency_ms": 196.596,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 196.596,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 21
+      },
+      {
+        "corpus": null,
+        "latency_ms": 200.201,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 200.201,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 22
+      },
+      {
+        "corpus": null,
+        "latency_ms": 203.28,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 203.28,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 23
+      },
+      {
+        "corpus": null,
+        "latency_ms": 205.938,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 205.938,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 24
+      }
+    ],
+    "4": [
+      {
+        "corpus": null,
+        "latency_ms": 132.733,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 132.733,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 4
+      },
+      {
+        "corpus": null,
+        "latency_ms": 147.506,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 147.506,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 5
+      },
+      {
+        "corpus": {
+          "maximum_ms": 161.447,
+          "median_ms": 158.463,
+          "minimum_ms": 158.038,
+          "p25_ms": 158.2505,
+          "p75_ms": 159.95499999999998,
+          "samples": 3
+        },
+        "latency_ms": 160.697,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 160.697,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 6
+      },
+      {
+        "corpus": {
+          "maximum_ms": 172.69,
+          "median_ms": 170.737,
+          "minimum_ms": 168.285,
+          "p25_ms": 169.143,
+          "p75_ms": 172.20625,
+          "samples": 4
+        },
+        "latency_ms": 172.53,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 172.53,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 7
+      },
+      {
+        "corpus": {
+          "maximum_ms": 186.224,
+          "median_ms": 180.872,
+          "minimum_ms": 174.119,
+          "p25_ms": 180.54,
+          "p75_ms": 183.855,
+          "samples": 9
+        },
+        "latency_ms": 180.872,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 183.822,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 8
+      },
+      {
+        "corpus": {
+          "maximum_ms": 195.591,
+          "median_ms": 195.2,
+          "minimum_ms": 183.27,
+          "p25_ms": 190.34449999999998,
+          "p75_ms": 195.33800000000002,
+          "samples": 7
+        },
+        "latency_ms": 195.2,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 194.391,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 9
+      },
+      {
+        "corpus": {
+          "maximum_ms": 215.335,
+          "median_ms": 197.5795,
+          "minimum_ms": 185.681,
+          "p25_ms": 195.9365,
+          "p75_ms": 204.75725,
+          "samples": 14
+        },
+        "latency_ms": 197.5795,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 204.213,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 10
+      },
+      {
+        "corpus": {
+          "maximum_ms": 235.929,
+          "median_ms": 202.9195,
+          "minimum_ms": 185.039,
+          "p25_ms": 198.81150000000002,
+          "p75_ms": 210.6735,
+          "samples": 136
+        },
+        "latency_ms": 202.9195,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 214.086,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 11
+      },
+      {
+        "corpus": {
+          "maximum_ms": 227.392,
+          "median_ms": 221.8505,
+          "minimum_ms": 216.309,
+          "p25_ms": 219.07975,
+          "p75_ms": 224.62124999999997,
+          "samples": 2
+        },
+        "latency_ms": 224.516,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 224.516,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 12
+      },
+      {
+        "corpus": null,
+        "latency_ms": 227.412,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 227.412,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 13
+      },
+      {
+        "corpus": null,
+        "latency_ms": 229.374,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 229.374,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 14
+      },
+      {
+        "corpus": null,
+        "latency_ms": 231.803,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 231.803,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 15
+      },
+      {
+        "corpus": {
+          "maximum_ms": 287.426,
+          "median_ms": 237.749,
+          "minimum_ms": 210.805,
+          "p25_ms": 228.854,
+          "p75_ms": 254.411,
+          "samples": 73
+        },
+        "latency_ms": 237.749,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 233.746,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 16
+      },
+      {
+        "corpus": null,
+        "latency_ms": 238.048,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 238.048,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 17
+      },
+      {
+        "corpus": {
+          "maximum_ms": 300.895,
+          "median_ms": 248.918,
+          "minimum_ms": 234.329,
+          "p25_ms": 242.632,
+          "p75_ms": 280.391,
+          "samples": 9
+        },
+        "latency_ms": 248.918,
+        "source": "routed-corpus-median",
+        "startup": {
+          "latency_ms": 240.741,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 18
+      },
+      {
+        "corpus": {
+          "maximum_ms": 282.266,
+          "median_ms": 262.975,
+          "minimum_ms": 243.684,
+          "p25_ms": 253.3295,
+          "p75_ms": 272.6205,
+          "samples": 2
+        },
+        "latency_ms": 243.663,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 243.663,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 19
+      },
+      {
+        "corpus": null,
+        "latency_ms": 246.062,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 246.062,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 20
+      },
+      {
+        "corpus": null,
+        "latency_ms": 249.057,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 249.057,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 21
+      },
+      {
+        "corpus": null,
+        "latency_ms": 250.858,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 250.858,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 22
+      },
+      {
+        "corpus": null,
+        "latency_ms": 253.091,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 253.091,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 23
+      },
+      {
+        "corpus": null,
+        "latency_ms": 254.242,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 254.242,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 24
+      },
+      {
+        "corpus": null,
+        "latency_ms": 258.939,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 258.939,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 25
+      },
+      {
+        "corpus": null,
+        "latency_ms": 262.103,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 262.103,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 26
+      },
+      {
+        "corpus": null,
+        "latency_ms": 265.392,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 265.392,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 27
+      },
+      {
+        "corpus": null,
+        "latency_ms": 267.934,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 267.934,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 28
+      },
+      {
+        "corpus": null,
+        "latency_ms": 271.453,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 271.453,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 29
+      },
+      {
+        "corpus": null,
+        "latency_ms": 269.231,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 269.231,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 30
+      },
+      {
+        "corpus": null,
+        "latency_ms": 272.355,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 272.355,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 31
+      },
+      {
+        "corpus": null,
+        "latency_ms": 269.321,
+        "source": "startup-sweep-fallback",
+        "startup": {
+          "latency_ms": 269.321,
+          "samples_per_sweep": [
+            32
+          ],
+          "sweeps": 1
+        },
+        "target_rows": 32
+      }
+    ]
+  },
+  "identity": {
+    "dspark_model": "RedHatAI/GLM-5.2-speculator.dspark",
+    "dspark_revision": "8bc9ac46fbf507f3ee3ad82304116a1f63e9edb4",
+    "engine_commit": "13472e164a35289ec38f25026dd0201b6f2a4d79",
+    "max_concurrency": 4,
+    "max_drafts": 7,
+    "power_limit_watts": 400,
+    "sparkinfer_revision": "584c52a6d4779f7771dfc3f327cf3f338e2c0b1f",
+    "target_model": "lukealonso/GLM-5.2-NVFP4",
+    "target_revision": "49cd31b758371719e0a1e0988ca08867fe303c55",
+    "topology": "1x-rtx-pro-6000-sm120+4x-gb10-sm121-tp4-w4a16-fp8-rdma"
+  },
+  "profile_id": "glm52-luke49cd-redhat8bc9-1rtx4spark-w4a16-tp4-400w-corpus-v1",
+  "qualification": {
+    "sparkinfer_revision_revalidation": {
+      "coordinator_sass_lines": 432186,
+      "coordinator_sass_sha256": "8407a2b5197b328432774f862de18b016a4d32ed4d5e5de96b1c8323bc90efbc",
+      "from_revision": "51ae901913f393f7524c425c9d27da15177c3ec6",
+      "method": "normalized full-library cuobjdump --dump-sass byte comparison",
+      "spark_sass_lines": 422083,
+      "spark_sass_sha256": "8dfe375a357613e34e2c7d76b0152eb10c7e88b196d68ea8763c1710e2f9599f",
+      "to_revision": "584c52a6d4779f7771dfc3f327cf3f338e2c0b1f"
+    },
+    "corpus_logs": [
+      ".glmrt-cache/benchmarks/dspark-profile-20260813/control-coordinator-trace.log",
+      ".glmrt-cache/benchmarks/dspark-profile-20260813/control-deep-c4-trace.log"
+    ],
+    "corpus_qualified_cells": 30,
+    "corpus_samples_used": 9025,
+    "ignored_nonzero_context_samples": 0,
+    "minimum_corpus_samples_per_cell": 5,
+    "startup_logs": [
+      ".glmrt-cache/benchmarks/dspark-profile-20260813/offline32-coordinator.log"
+    ],
+    "startup_samples_per_cell_filter": 32
+  },
+  "schema": "glmrt-dspark-cost-profile-v1",
+  "source_sha256": "667774a0113c1481e120d16f90cbdc881a5fab91465ccfb9096d974eb7cae913"
+}

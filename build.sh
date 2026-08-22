@@ -63,7 +63,7 @@ prepare_pinned_source_dependencies() {
       3rdparty/dlpack
   fi
 
-  [[ -f "$repo_root/third_party/sparkinfer/sparkinfer/__init__.py" ]] ||
+  [[ -f "$repo_root/third_party/sparkinfer/b12x/__init__.py" ]] ||
     release_die "SparkInfer source is missing; initialize third_party/sparkinfer"
   [[ -f "$repo_root/third_party/xgrammar/include/xgrammar/compiler.h" ]] ||
     release_die "XGrammar source is missing; initialize third_party/xgrammar"

@@ -3081,15 +3081,13 @@ pub(in crate::commands::real_full) fn real_full_device_kv_block_ios(
 }
 
 fn real_full_device_main_mla_row_bytes(config: &KvCacheConfig) -> Result<usize> {
-    match config.layout {
-        KvLayout::Glm52CompressedBf16 => config
-            .key_value_width
-            .checked_mul(std::mem::size_of::<u16>())
-            .context("device main BF16 MLA row bytes overflow usize"),
-        KvLayout::Glm52CompressedFp8 => Ok(GLM52_MLA_FP8_DS_BYTES_PER_TOKEN),
-        KvLayout::Glm52CompressedNvfp4 => Ok(GLM52_MLA_MXFP4_DS_BYTES_PER_TOKEN),
-        KvLayout::ExpandedDebugOnly => Ok(config.layer_bytes_per_token(LayerId(0))),
-    }
+    config
+        .main_mla_row_bytes()
+        .or_else(|| {
+            (config.layout == KvLayout::ExpandedDebugOnly)
+                .then(|| config.layer_bytes_per_token(LayerId(0)))
+        })
+        .context("device main MLA cache format has no row geometry")
 }
 
 fn real_full_device_main_kv_block_io(
@@ -7953,7 +7951,7 @@ impl<'a> RealFullDeviceKvCache<'a> {
                 sequence_id: "target-kv-radix-boundary-source".to_owned(),
                 layer_id: LayerId(layer as u32),
                 token_start: page_token(source_page)?,
-                token_count: GLMRT_CUDA_GLM_DSA_PAGE_SIZE,
+                token_count: valid_tokens,
             };
             let destination_descriptor = KvBlockDescriptor {
                 token_start: page_token(destination_page)?,
@@ -12285,6 +12283,91 @@ mod tests {
         assert_eq!(summary.reads, 2);
         assert_eq!(summary.bytes, expected_payload_bytes * 3);
         assert!(summary.uses_device_kv_cache);
+        Ok(())
+    }
+
+    #[test]
+    fn nvfp4_radix_boundary_copy_preserves_rows_past_valid_prefix_when_available() -> Result<()> {
+        let config = KvCacheConfig::glm52_compressed_nvfp4(128);
+        let source = KvBlockDescriptor {
+            reservation_id: 1,
+            sequence_id: "radix-source".to_owned(),
+            layer_id: LayerId(3),
+            token_start: PositionId(0),
+            token_count: GLMRT_CUDA_GLM_DSA_PAGE_SIZE,
+        };
+        let destination = KvBlockDescriptor {
+            reservation_id: 2,
+            sequence_id: "radix-destination".to_owned(),
+            layer_id: LayerId(3),
+            token_start: PositionId(GLMRT_CUDA_GLM_DSA_PAGE_SIZE as u64),
+            token_count: GLMRT_CUDA_GLM_DSA_PAGE_SIZE,
+        };
+        let row_bytes = config
+            .main_mla_row_bytes()
+            .context("NVFP4 format must expose row geometry")?;
+        let page_bytes = config
+            .main_mla_page_bytes(GLMRT_CUDA_GLM_DSA_PAGE_SIZE)
+            .context("NVFP4 format must expose page geometry")?;
+        let source_payload = (0..page_bytes)
+            .map(|index| (index.wrapping_mul(17) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let destination_payload = vec![0xa5_u8; page_bytes];
+
+        let mut mirror = RealFullDeviceKvExecutionMirror::new(config)?;
+        if !mirror.summary().uses_device_kv_cache {
+            return Ok(());
+        }
+        mirror.write_host_blocks(
+            &[source.clone(), destination.clone()],
+            &[source_payload.clone(), destination_payload.clone()],
+        )?;
+
+        let valid_tokens = 7;
+        mirror.copy_target_kv_boundary_page(0, 1, valid_tokens)?;
+        let readback = mirror
+            .read_descriptor_payloads_to_host(std::slice::from_ref(&destination))?
+            .context("CUDA-enabled mirror should read the cloned boundary page")?
+            .pop()
+            .context("boundary page readback is missing")?;
+        let valid_bytes = valid_tokens * row_bytes;
+        assert_eq!(&readback[..valid_bytes], &source_payload[..valid_bytes]);
+        assert_eq!(
+            &readback[valid_bytes..],
+            &destination_payload[valid_bytes..]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nvfp4_device_kv_roundtrip_addresses_records_past_int32_byte_range_when_available(
+    ) -> Result<()> {
+        let config = KvCacheConfig::glm52_compressed_nvfp4(65_536);
+        let descriptor = KvBlockDescriptor {
+            reservation_id: 1,
+            sequence_id: "nvfp4-high-address".to_owned(),
+            layer_id: LayerId((config.layers - 1) as u32),
+            token_start: PositionId((config.max_tokens - 1) as u64),
+            token_count: 1,
+        };
+        let io = real_full_device_main_kv_block_io(&config, &descriptor)?;
+        assert!(io.offset_bytes > i32::MAX as usize);
+        let payload = (0..io.payload_bytes)
+            .map(|index| (index.wrapping_mul(29).wrapping_add(7) & 0xff) as u8)
+            .collect::<Vec<_>>();
+
+        let mut mirror = RealFullDeviceKvExecutionMirror::new(config)?;
+        if !mirror.summary().uses_device_kv_cache {
+            return Ok(());
+        }
+        mirror.write_host_blocks(
+            std::slice::from_ref(&descriptor),
+            std::slice::from_ref(&payload),
+        )?;
+        let readback = mirror
+            .read_descriptor_payloads_to_host(std::slice::from_ref(&descriptor))?
+            .context("CUDA-enabled mirror should read the high-address NVFP4 record")?;
+        assert_eq!(readback, vec![payload]);
         Ok(())
     }
 

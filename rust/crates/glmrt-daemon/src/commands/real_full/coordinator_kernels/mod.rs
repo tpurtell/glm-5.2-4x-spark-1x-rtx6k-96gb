@@ -179,6 +179,13 @@ impl DeviceBf16Output {
         self.buffer.ready_event.clone()
     }
 
+    pub(in crate::commands::real_full) fn retain_input_until_ready(
+        &mut self,
+        input: DeviceBf16Output,
+    ) {
+        self.buffer.retain_dependencies_until_ready([input.buffer]);
+    }
+
     pub(in crate::commands::real_full) fn wait_ready_on_stream(
         &self,
         stream: *mut c_void,
@@ -2742,6 +2749,7 @@ struct OwnedCoordinatorDeviceBuffer {
     buffer: GlmrtDeviceBuffer,
     pool_key: CoordinatorOwnedDeviceBufferPoolKey,
     ready_event: Option<Arc<CoordinatorCudaEvent>>,
+    retained_dependencies: Vec<OwnedCoordinatorDeviceBuffer>,
 }
 
 type CoordinatorOwnedDeviceBufferPoolKey = (&'static str, usize, usize);
@@ -2828,18 +2836,6 @@ impl OwnedCoordinatorDeviceBuffer {
         }
         let bank = COORDINATOR_OWNED_DEVICE_BUFFER_BANK.with(Cell::get);
         let pool_key = (label, bytes, bank);
-        if bank > 0 && COORDINATOR_OWNED_DEVICE_BUFFER_POOL_SEALED.with(Cell::get) {
-            COORDINATOR_OWNED_DEVICE_BUFFER_PERMANENT_KEYS.with(|permanent| {
-                if let Ok(mut permanent) = permanent.try_borrow_mut() {
-                    // Nonzero banks are used only by the bounded paired
-                    // recurrent scheduler. Keep their exact working sets
-                    // stable across requests so captured graphs do not churn
-                    // on new device-pointer identities. Bank zero remains
-                    // governed by startup's shape allow-list.
-                    permanent.insert(pool_key);
-                }
-            });
-        }
         let pooled = COORDINATOR_OWNED_DEVICE_BUFFER_POOL.with(|pool| {
             pool.try_borrow_mut()
                 .ok()
@@ -2852,6 +2848,7 @@ impl OwnedCoordinatorDeviceBuffer {
                 buffer,
                 pool_key,
                 ready_event: None,
+                retained_dependencies: Vec::new(),
             });
         }
         let mut buffer = library
@@ -2873,6 +2870,7 @@ impl OwnedCoordinatorDeviceBuffer {
             buffer,
             pool_key,
             ready_event: None,
+            retained_dependencies: Vec::new(),
         })
     }
 
@@ -2903,7 +2901,15 @@ impl OwnedCoordinatorDeviceBuffer {
                 COORDINATOR_OWNED_DEVICE_BUFFER_BANK.with(Cell::get),
             ),
             ready_event: None,
+            retained_dependencies: Vec::new(),
         })
+    }
+
+    fn retain_dependencies_until_ready(
+        &mut self,
+        dependencies: impl IntoIterator<Item = OwnedCoordinatorDeviceBuffer>,
+    ) {
+        self.retained_dependencies.extend(dependencies);
     }
 
     fn wait_ready_on_stream(&self, stream: *mut c_void) -> Result<()> {
@@ -3228,6 +3234,7 @@ mod tests {
         silu_gated_mlp_rows_bf16_preloaded_gate_up_down_resident_weight_device_input_device_output_only,
         silu_gated_mlp_rows_bf16_preloaded_gate_up_resident_weight,
         silu_gated_mlp_rows_bf16_resident_weight, sparse_b_scatter_residual_add_bf16,
+        sparse_b_scatter_shared_residual_add_bf16_async_owned_device_output,
         sparse_b_scatter_shared_residual_add_bf16_device_output, u32_vec_from_bytes,
         validate_linear_bf16_preloaded_resident_padded_device_input,
         with_coordinator_cuda_graph_slot, with_coordinator_cuda_graph_workspace_slot,
@@ -3305,6 +3312,7 @@ mod tests {
             pool.clear();
             pool.insert(("test permanent small shape", 16, 0), Vec::new());
             pool.insert(("test permanent large shape", 16 << 20, 0), Vec::new());
+            pool.insert(("test permanent lane shape", 16 << 20, 3), Vec::new());
         });
         super::COORDINATOR_OWNED_DEVICE_BUFFER_PERMANENT_KEYS
             .with(|permanent| permanent.borrow_mut().clear());
@@ -3315,6 +3323,7 @@ mod tests {
             let mut pool = pool.borrow_mut();
             pool.insert(("test transient small shape", 32, 0), Vec::new());
             pool.insert(("test transient large shape", 32 << 20, 0), Vec::new());
+            pool.insert(("test transient lane shape", 32 << 20, 3), Vec::new());
         });
         super::clear_transient_coordinator_owned_device_buffers().unwrap();
 
@@ -3322,9 +3331,54 @@ mod tests {
             let pool = pool.borrow();
             assert!(pool.contains_key(&("test permanent small shape", 16, 0)));
             assert!(pool.contains_key(&("test permanent large shape", 16 << 20, 0)));
+            assert!(pool.contains_key(&("test permanent lane shape", 16 << 20, 3)));
             assert!(!pool.contains_key(&("test transient small shape", 32, 0)));
             assert!(!pool.contains_key(&("test transient large shape", 32 << 20, 0)));
+            assert!(!pool.contains_key(&("test transient lane shape", 32 << 20, 3)));
         });
+    }
+
+    #[test]
+    fn owned_device_buffer_pool_does_not_promote_post_seal_lane_shapes() -> Result<()> {
+        let Some(_) = native_library_path() else {
+            return Ok(());
+        };
+        let library = cuda_native_library()?;
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_POOL.with(|pool| pool.borrow_mut().clear());
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_PERMANENT_KEYS
+            .with(|permanent| permanent.borrow_mut().clear());
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_POOL_SEALED.with(|sealed| sealed.set(false));
+
+        let startup_key = ("test allocated permanent lane shape", 4 << 10, 3);
+        let startup_buffer = super::with_coordinator_owned_device_buffer_bank(3, || {
+            super::OwnedCoordinatorDeviceBuffer::new(library, startup_key.1, startup_key.0)
+        })?;
+        drop(startup_buffer);
+        super::seal_coordinator_owned_device_buffer_pool()?;
+
+        let transient_key = ("test allocated transient lane shape", 8 << 10, 3);
+        let transient_buffer = super::with_coordinator_owned_device_buffer_bank(3, || {
+            super::OwnedCoordinatorDeviceBuffer::new(library, transient_key.1, transient_key.0)
+        })?;
+        drop(transient_buffer);
+
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_PERMANENT_KEYS.with(|permanent| {
+            let permanent = permanent.borrow();
+            assert!(permanent.contains(&startup_key));
+            assert!(!permanent.contains(&transient_key));
+        });
+        super::clear_transient_coordinator_owned_device_buffers()?;
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_POOL.with(|pool| {
+            let pool = pool.borrow();
+            assert!(pool.contains_key(&startup_key));
+            assert!(!pool.contains_key(&transient_key));
+        });
+
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_POOL.with(|pool| pool.borrow_mut().clear());
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_PERMANENT_KEYS
+            .with(|permanent| permanent.borrow_mut().clear());
+        super::COORDINATOR_OWNED_DEVICE_BUFFER_POOL_SEALED.with(|sealed| sealed.set(false));
+        Ok(())
     }
 
     #[test]
@@ -4639,6 +4693,29 @@ mod tests {
             assert_eq!(output.copy_to_host_bytes()?, expected);
             assert_eq!(output.rows, 3);
             assert_eq!(output.values_per_row, 2);
+
+            let async_residual = device_bf16_output_from_bf16_bytes(
+                &residual_bytes,
+                3,
+                2,
+                "test asynchronous Sparse-B shared residual input",
+            )?;
+            let async_shared_delta = device_bf16_output_from_bf16_bytes(
+                &shared_bytes,
+                3,
+                2,
+                "test asynchronous Sparse-B shared delta input",
+            )?;
+            let async_output = sparse_b_scatter_shared_residual_add_bf16_async_owned_device_output(
+                async_residual,
+                async_shared_delta,
+                partials,
+                row_maps,
+                3,
+                2,
+            )?;
+            assert!(async_output.ready_event().is_some());
+            assert_eq!(async_output.copy_to_host_bytes()?, expected);
 
             let slot = registry.slots[graph_index]
                 .lock()

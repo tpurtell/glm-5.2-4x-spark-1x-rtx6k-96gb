@@ -60,7 +60,7 @@ def capture_dense_gemm(ctx: dict[str, Any], **kwargs: Any) -> None:
         return
 
     import torch
-    from sparkinfer._lib.dense_gemm import dense_gemm
+    from b12x._lib.dense_gemm import dense_gemm
 
     rows = int(kwargs["rows"])
     n = int(kwargs["n"])
@@ -179,8 +179,8 @@ def _state_for(
         return cached
 
     import torch
-    from sparkinfer._lib.intrinsics import quantize_grouped_nvfp4_torch
-    from sparkinfer._lib.dense_gemm import dense_gemm
+    from b12x._lib.intrinsics import quantize_grouped_nvfp4_torch
+    from b12x._lib.dense_gemm import dense_gemm
 
     with torch.cuda.device(device_id), torch.inference_mode():
         generator = torch.Generator(device=f"cuda:{device_id}")
@@ -294,7 +294,7 @@ def _mlp_state_for(
 
     import torch
     import torch.nn.functional as F
-    from sparkinfer._lib.intrinsics import quantize_grouped_nvfp4_torch
+    from b12x._lib.intrinsics import quantize_grouped_nvfp4_torch
 
     with torch.cuda.device(device_id):
         generator = torch.Generator(device=f"cuda:{device_id}")
@@ -448,11 +448,11 @@ def _mlp_state_for(
 
 
 def _launch_single_expert_mlp(state: dict[str, Any], output: Any) -> None:
-    from sparkinfer._lib.intrinsics import (
+    from b12x._lib.intrinsics import (
         quantize_grouped_nvfp4_torch,
         silu_mul_quantize_grouped_nvfp4_torch,
     )
-    from sparkinfer._lib.dense_gemm import dense_gemm
+    from b12x._lib.dense_gemm import dense_gemm
 
     if state["input_source"] is not None:
         input_packed, input_scale = quantize_grouped_nvfp4_torch(
@@ -665,7 +665,7 @@ def _grouped_scale_view_storage(scale: Any, rows: int, cols: int) -> Any:
 
 def _modelopt_scale_bytes_to_grouped_scale_view(modelopt_scale: Any, rows: int, cols: int) -> Any:
     import torch
-    from sparkinfer._lib.intrinsics import (
+    from b12x._lib.intrinsics import (
         as_grouped_scale_view,
         swizzle_block_scale,
     )

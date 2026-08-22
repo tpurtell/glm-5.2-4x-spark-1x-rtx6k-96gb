@@ -86,6 +86,12 @@ pub(super) struct TargetKvRadixStats {
     pub(super) evicted_pages: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TargetKvExactSubtreeEviction {
+    Evicted { pages: usize },
+    AlreadyAbsent { matched_tokens: usize },
+}
+
 #[derive(Debug)]
 pub(super) struct TargetKvRadixManager {
     total_pages: usize,
@@ -307,6 +313,36 @@ impl TargetKvRadixManager {
         let evicted_pages = evict_leaf(&mut inner, matched.terminal)?;
         debug_validate(&inner, self.total_pages);
         Ok(evicted_pages)
+    }
+
+    /// Removes an exact inactive prefix and every cached descendant. Startup
+    /// uses this for synthetic capture trees whose surviving branches depend
+    /// on how much physical KV capacity was available during prewarm.
+    pub(super) fn evict_exact_inactive_subtree_if_present(
+        &self,
+        token_ids: &[usize],
+    ) -> Result<TargetKvExactSubtreeEviction> {
+        anyhow::ensure!(
+            !token_ids.is_empty(),
+            "cannot evict the target KV radix root"
+        );
+        let token_ids = token_ids_u32(token_ids)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|error| anyhow::anyhow!("locking target KV radix manager failed: {error}"))?;
+        let matched = match_prefix(&mut inner, &token_ids)?;
+        if matched.tokens != token_ids.len() {
+            debug_validate(&inner, self.total_pages);
+            return Ok(TargetKvExactSubtreeEviction::AlreadyAbsent {
+                matched_tokens: matched.tokens,
+            });
+        }
+        let evicted_pages = evict_subtree(&mut inner, matched.terminal)?;
+        debug_validate(&inner, self.total_pages);
+        Ok(TargetKvExactSubtreeEviction::Evicted {
+            pages: evicted_pages,
+        })
     }
 }
 
@@ -862,6 +898,36 @@ fn evict_leaf(inner: &mut TargetKvRadixInner, candidate: NodeId) -> Result<usize
     Ok(node.page_delta.pages.len())
 }
 
+fn evict_subtree(inner: &mut TargetKvRadixInner, candidate: NodeId) -> Result<usize> {
+    anyhow::ensure!(
+        candidate != ROOT_NODE_ID,
+        "cannot evict the target KV radix root"
+    );
+    let mut traversal = vec![candidate];
+    let mut parent_first = Vec::new();
+    while let Some(node_id) = traversal.pop() {
+        let node = inner
+            .nodes
+            .get(node_id)
+            .and_then(Option::as_ref)
+            .context("target KV radix subtree node is absent")?;
+        anyhow::ensure!(
+            node.lock_ref == 0,
+            "target KV radix eviction subtree contains an active prefix"
+        );
+        parent_first.push(node_id);
+        traversal.extend(node.children.values().copied());
+    }
+
+    let mut evicted_pages = 0_usize;
+    for node_id in parent_first.into_iter().rev() {
+        evicted_pages = evicted_pages
+            .checked_add(evict_leaf(inner, node_id)?)
+            .context("target KV radix subtree eviction page count overflow")?;
+    }
+    Ok(evicted_pages)
+}
+
 fn insert_node(inner: &mut TargetKvRadixInner, node: RadixNode) -> NodeId {
     if let Some(node_id) = inner.free_node_ids.pop() {
         debug_assert!(inner.nodes[node_id].is_none());
@@ -907,7 +973,7 @@ fn debug_validate(inner: &TargetKvRadixInner, total_pages: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{TargetKvRadixManager, TARGET_KV_PAGE_TOKENS};
+    use super::{TargetKvExactSubtreeEviction, TargetKvRadixManager, TARGET_KV_PAGE_TOKENS};
     use std::sync::Arc;
 
     fn tokens(count: usize, seed: usize) -> Vec<usize> {
@@ -1047,6 +1113,52 @@ mod tests {
         assert!(manager.evict_exact_inactive_leaf(&prompt).is_err());
         drop(active);
         assert_eq!(manager.evict_exact_inactive_leaf(&prompt).unwrap(), 1);
+    }
+
+    #[test]
+    fn exact_subtree_eviction_removes_every_inactive_branch() {
+        let manager = Arc::new(TargetKvRadixManager::new(8 * 64, 16).unwrap());
+        let common = tokens(TARGET_KV_PAGE_TOKENS, 1);
+        let mut left = common.clone();
+        left.extend(tokens(TARGET_KV_PAGE_TOKENS, 2));
+        let mut right = common.clone();
+        right.extend(tokens(TARGET_KV_PAGE_TOKENS, 3));
+        cache(&manager, &left);
+        cache(&manager, &right);
+
+        assert_eq!(manager.stats().radix_nodes, 3);
+        assert_eq!(
+            manager
+                .evict_exact_inactive_subtree_if_present(&common)
+                .unwrap(),
+            TargetKvExactSubtreeEviction::Evicted { pages: 3 }
+        );
+        let stats = manager.stats();
+        assert_eq!(stats.cached_pages, 0);
+        assert_eq!(stats.free_pages, 8);
+        assert_eq!(stats.radix_nodes, 0);
+    }
+
+    #[test]
+    fn exact_subtree_eviction_is_atomic_when_a_descendant_is_active() {
+        let manager = Arc::new(TargetKvRadixManager::new(8 * 64, 16).unwrap());
+        let common = tokens(TARGET_KV_PAGE_TOKENS, 1);
+        let mut long = common.clone();
+        long.extend(tokens(TARGET_KV_PAGE_TOKENS, 2));
+        cache(&manager, &long);
+        let active = manager.reserve(&long, long.len()).unwrap();
+
+        assert!(manager
+            .evict_exact_inactive_subtree_if_present(&common)
+            .is_err());
+        assert_eq!(manager.stats().cached_pages, 2);
+        drop(active);
+        assert!(matches!(
+            manager
+                .evict_exact_inactive_subtree_if_present(&common)
+                .unwrap(),
+            TargetKvExactSubtreeEviction::Evicted { pages: 2 }
+        ));
     }
 
     #[test]

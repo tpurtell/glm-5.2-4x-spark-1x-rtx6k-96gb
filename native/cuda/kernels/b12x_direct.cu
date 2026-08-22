@@ -479,15 +479,9 @@ glmrt_status_t check_aot_launch(int result, const char* label) {
 #define GLMRT_DEFINE_W4A16_LAUNCH(function_name, prefix, module_name, default_grid_x)          \
   int function_name##_grid(const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers,                \
                            size_t active_m, int grid_x, cudaStream_t stream) {                  \
-    prefix##_Tensor_w13_i32_flat_t w13{buffers->w13_weight.ptr};                               \
-    prefix##_Tensor_w2_i32_flat_t w2{buffers->w2_weight.ptr};                                  \
     prefix##_Tensor_fc1_bf16_flat_t fc1{buffers->fc1_output.ptr};                              \
     prefix##_Tensor_activated_bf16_flat_t activated{buffers->activated.ptr};                   \
     prefix##_Tensor_fc2_bf16_flat_t fc2{buffers->output.ptr};                                  \
-    prefix##_Tensor_w13_scales_i32_flat_t w13_scale{buffers->w13_scale.ptr};                   \
-    prefix##_Tensor_w2_scales_i32_flat_t w2_scale{buffers->w2_scale.ptr};                      \
-    prefix##_Tensor_w13_global_scale_t w13_global{buffers->w13_global_scale.ptr};              \
-    prefix##_Tensor_w2_global_scale_t w2_global{buffers->w2_global_scale.ptr};                 \
     prefix##_Tensor_packed_route_indices_t packed_routes{buffers->packed_route_indices.ptr};   \
     prefix##_Tensor_block_expert_ids_t block_experts{buffers->block_expert_ids.ptr};           \
     prefix##_Tensor_packed_route_count_t route_count{buffers->packed_route_count.ptr};          \
@@ -495,15 +489,17 @@ glmrt_status_t check_aot_launch(int result, const char* label) {
     prefix##_Tensor_fc1_c_tmp_f32_flat_t fc1_scratch{buffers->fc1_scratch.ptr};                \
     prefix##_Tensor_fc2_c_tmp_f32_flat_t fc2_scratch{buffers->fc2_scratch.ptr};                \
     prefix##_Tensor_locks_i32_flat_t locks{buffers->locks.ptr};                                \
-    prefix##_Tensor_rot_scales_flat_t rot_scales{buffers->w13_global_scale.ptr};               \
-    prefix##_Tensor_suh_gate_flat_t suh_gate{buffers->w13_global_scale.ptr};                   \
-    prefix##_Tensor_suh_up_flat_t suh_up{buffers->w13_global_scale.ptr};                       \
     return cute_dsl_##prefix##_wrapper(                                                         \
-        &module_name, buffers->input.ptr, buffers->input.ptr, buffers->input.ptr, &w13, &w2,    \
-        &fc1, &activated, &fc2, &w13_scale, &w2_scale, &w13_global, &w2_global,                 \
+        &module_name, buffers->input.ptr, buffers->input.ptr, buffers->input.ptr,               \
+        buffers->w13_weight.ptr, buffers->w2_weight.ptr, &fc1, &activated, &fc2,                \
+        buffers->w13_scale.ptr, buffers->w2_scale.ptr, buffers->w13_global_scale.ptr,           \
+        buffers->w2_global_scale.ptr,                                                           \
         &packed_routes, &block_experts, &route_count, &activation_amax, 0,                     \
-        buffers->topk_weights.ptr, &fc1_scratch, &fc2_scratch, &locks, &rot_scales,            \
-        &suh_gate, &suh_up,                                                                     \
+        buffers->topk_weights.ptr, &fc1_scratch, &fc2_scratch, &locks,                         \
+        buffers->w13_global_scale.ptr, buffers->w13_global_scale.ptr,                           \
+        buffers->w13_global_scale.ptr, buffers->packed_route_indices.ptr,                      \
+        buffers->w13_scale.ptr, buffers->w2_scale.ptr,                                         \
+        static_cast<int32_t>(kB12xExperts), 0,                                                  \
         static_cast<int32_t>(active_m), static_cast<int32_t>(grid_x), stream);                  \
   }                                                                                            \
   int function_name(const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers, size_t active_m,      \

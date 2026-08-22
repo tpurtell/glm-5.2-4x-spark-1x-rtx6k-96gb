@@ -322,6 +322,8 @@ impl RealFullDecodeCycle {
 pub struct RealFullSequenceRequest {
     pub request: RealFullRequest,
     pub max_output_tokens: usize,
+    pub min_output_tokens: usize,
+    pub ignore_eos: bool,
     pub stop_token_ids: Vec<usize>,
     pub stop_texts: Vec<String>,
 }
@@ -412,7 +414,9 @@ impl ActiveRealFullSequence {
                     .any(|stop| !stop.is_empty() && text.contains(stop))
             });
             cycle.generated_tokens.push(generated);
-            if stop_by_token || stop_by_text {
+            let stop_allowed = !self.request.ignore_eos
+                && self.request.request.generated_token_ids.len() >= self.request.min_output_tokens;
+            if stop_allowed && (stop_by_token || stop_by_text) {
                 stopped = true;
                 break;
             }
@@ -515,6 +519,8 @@ mod active_sequence_tests {
                 4,
             ),
             max_output_tokens: 4,
+            min_output_tokens: 0,
+            ignore_eos: false,
             stop_token_ids: Vec::new(),
             stop_texts: Vec::new(),
         };

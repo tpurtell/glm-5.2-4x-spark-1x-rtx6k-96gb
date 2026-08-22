@@ -78,7 +78,7 @@ images.
 
 ### NVIDIA dense GEMM component in SparkInfer
 
-SparkInfer's `sparkinfer/_lib/dense_gemm.py`, which GLMRT uses to generate
+SparkInfer's `b12x/_lib/dense_gemm.py`, which GLMRT uses to generate
 Spark-side AOT kernels, is adapted from an NVIDIA CUTLASS dense block-scaled
 GEMM example and carries this notice:
 
@@ -115,7 +115,7 @@ POSSIBILITY OF SUCH DAMAGE.
 ### FlashAttention-derived contiguous attention component in SparkInfer
 
 SparkInfer's
-`sparkinfer/attention/_shared/contiguous/forward.py` is adapted from the
+`b12x/attention/_shared/contiguous/forward.py` is adapted from the
 FlashAttention CuTe forward implementation and carries this notice:
 
 Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar,

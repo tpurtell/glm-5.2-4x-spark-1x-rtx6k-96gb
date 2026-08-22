@@ -991,9 +991,9 @@ kernel_cache_identity="$("$GLMRT_PYTHON" "$repo_root/scripts/kernel-cache-identi
   --environment-id "$kernel_cache_environment_id")"
 kernel_cache_identity_root="$kernel_cache_base/$kernel_cache_identity"
 export FLASHINFER_WORKSPACE_BASE="$kernel_cache_identity_root/flashinfer"
-export SPARKINFER_COMPILE_CACHE_DIR="${GLMRT_SPARKINFER_COMPILE_CACHE_DIR:-$kernel_cache_identity_root/sparkinfer/compile}"
-mkdir -p "$FLASHINFER_WORKSPACE_BASE" "$SPARKINFER_COMPILE_CACHE_DIR"
-echo "kernel_cache_identity identity=$kernel_cache_identity base=$kernel_cache_base flashinfer=$FLASHINFER_WORKSPACE_BASE sparkinfer=$SPARKINFER_COMPILE_CACHE_DIR"
+export B12X_COMPILE_CACHE_DIR="${GLMRT_SPARKINFER_COMPILE_CACHE_DIR:-$kernel_cache_identity_root/sparkinfer/compile}"
+mkdir -p "$FLASHINFER_WORKSPACE_BASE" "$B12X_COMPILE_CACHE_DIR"
+echo "kernel_cache_identity identity=$kernel_cache_identity base=$kernel_cache_base flashinfer=$FLASHINFER_WORKSPACE_BASE sparkinfer=$B12X_COMPILE_CACHE_DIR"
 report_shell_startup_phase kernel-cache-identity
 
 if [ -z "$expert_hosts" ]; then

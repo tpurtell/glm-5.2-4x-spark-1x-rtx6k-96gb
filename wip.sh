@@ -197,7 +197,7 @@ ensure_local_container() {
     return
   fi
   local -a args=(
-    run -d --name "$coordinator_container" --restart unless-stopped
+    run -d --name "$coordinator_container" --restart no
     --gpus device=0 --net=host --ipc=host --security-opt seccomp=unconfined
     --ulimit memlock=-1:-1 --cap-add IPC_LOCK
     -v "$hf_home:$hf_home:ro" -v "$hf_home:/root/.cache/huggingface:ro"
@@ -228,7 +228,7 @@ if docker container inspect "$container" >/dev/null 2>&1; then
 fi
 hf_home="${HF_HOME:-$HOME/.cache/huggingface}"
 args=(
-  run -d --name "$container" --restart unless-stopped
+  run -d --name "$container" --restart no
   --gpus all --net=host --ipc=host --security-opt seccomp=unconfined
   --ulimit memlock=-1:-1 --cap-add IPC_LOCK
   -v "$hf_home:$hf_home:ro" -v "$hf_home:/root/.cache/huggingface:ro"
@@ -354,7 +354,8 @@ build_coordinator() {
   image_id="$(docker image inspect -f '{{.Id}}' "$COORDINATOR_DOCKER_DEV")"
   docker exec "$coordinator_container" \
     /wip/source/scripts/build-wip-artifacts.sh \
-    /wip/source coordinator 120 /wip/build/coordinator /wip/output/coordinator
+    /wip/source coordinator 120 /wip/build/coordinator /wip/output/coordinator \
+    || return $?
   docker exec "$coordinator_container" \
     /wip/source/scripts/finalize-wip-slot.sh \
     /wip/source coordinator "$slot" /wip/output/coordinator \
@@ -368,7 +369,8 @@ build_expert() {
   image_id="$(ssh -o BatchMode=yes "$seed_host" "docker image inspect -f '{{.Id}}' '$SPARK_EXPERT_DOCKER_DEV'")"
   ssh -o BatchMode=yes "$seed_host" docker exec "$spark_container" \
     /wip/source/scripts/build-wip-artifacts.sh \
-    /wip/source expert 121 /wip/build/expert /wip/output/expert
+    /wip/source expert 121 /wip/build/expert /wip/output/expert \
+    || return $?
   ssh -o BatchMode=yes "$seed_host" docker exec "$spark_container" \
     /wip/source/scripts/finalize-wip-slot.sh \
     /wip/source spark-expert "$slot" /wip/output/expert \

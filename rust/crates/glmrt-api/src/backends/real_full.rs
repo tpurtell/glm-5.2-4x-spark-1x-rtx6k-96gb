@@ -9,9 +9,9 @@ use crate::request::{
     request_sampling_params, stop_strings, tool_calls_enabled, unix_timestamp, validate_request,
 };
 use crate::streaming::{
-    chat_stream_content_event, chat_stream_done_event, chat_stream_finish_event,
-    chat_stream_reasoning_event, chat_stream_role_event, chat_stream_tool_call_event,
-    chat_stream_usage_event,
+    chat_stream_content_event, chat_stream_done_event, chat_stream_error_event,
+    chat_stream_finish_event, chat_stream_reasoning_event, chat_stream_role_event,
+    chat_stream_tool_call_event, chat_stream_usage_event,
 };
 use crate::tooling::{
     render_glm_tool_call, GlmToolCallStreamParser, GlmToolStreamDelta, GLM_TOOL_CALL_END,
@@ -220,11 +220,15 @@ fn validate_real_full_request_profile_limits(
 fn persistent_real_full_sequence_request(
     request: RealFullRequest,
     max_output_tokens: usize,
+    min_output_tokens: usize,
+    ignore_eos: bool,
     allow_tool_calls: bool,
 ) -> RealFullSequenceRequest {
     RealFullSequenceRequest {
         request,
         max_output_tokens,
+        min_output_tokens,
+        ignore_eos,
         stop_token_ids: GLM_CHAT_STOP_TOKEN_IDS
             .iter()
             .copied()
@@ -312,6 +316,8 @@ pub(crate) fn try_real_glm_full_streaming_response(
 
     let prompt = real_glm_full_request_prompt_text(request);
     let max_tokens = request_max_tokens(request);
+    let min_tokens = request.min_tokens.unwrap_or(0);
+    let ignore_eos = request.ignore_eos.unwrap_or(false);
     let sampling = request_sampling_params(request);
     let constraint = request_constraint(request)?;
     let image_sources = request_image_sources(request)?;
@@ -349,6 +355,8 @@ pub(crate) fn try_real_glm_full_streaming_response(
         resolved_prompt_token_ids,
         vision_embeddings,
         max_tokens,
+        min_tokens,
+        ignore_eos,
         sampling,
         id,
         created,
@@ -369,6 +377,8 @@ fn real_glm_full_decode_stream_response(
     prompt_token_ids: Option<Arc<Vec<usize>>>,
     vision_embeddings: Option<Arc<Vec<RealFullVisionEmbedding>>>,
     max_tokens: usize,
+    min_tokens: usize,
+    ignore_eos: bool,
     sampling: RealFullSamplingParams,
     id: String,
     created: u64,
@@ -433,10 +443,12 @@ fn real_glm_full_decode_stream_response(
             .start_real_full_sequence(persistent_real_full_sequence_request(
                 initial_request,
                 max_tokens,
+                min_tokens,
+                ignore_eos,
                 allow_tool_calls,
             ))
             .ok();
-        let _sequence_guard = persistent
+        let mut sequence_guard = persistent
             .is_none()
             .then(|| OwnedRealFullSequenceGuard {
                 executor: Arc::clone(&executor),
@@ -504,9 +516,6 @@ fn real_glm_full_decode_stream_response(
             let (cycle, step_ms) = match cycle_result {
                 Ok(result) => result,
                 Err(error) => {
-                    if first_step_ms.is_none() {
-                        first_step_ms = Some(total_step_ms);
-                    }
                     eprintln!(
                         "real_full_stream_decode_step_error step={}/{} elapsed_ms={:.3} error={}",
                         decode_step_index + 1,
@@ -514,26 +523,17 @@ fn real_glm_full_decode_stream_response(
                         total_step_ms,
                         error
                     );
-                    let content = format!("real-full streaming executor error: {error}");
-                    yield Ok::<Event, Infallible>(chat_stream_content_event(
-                        &id,
-                        created,
-                        &model,
-                        content.clone(),
-                    ));
-                    diagnostic_completion = Some(BackendCompletion {
-                        content,
-                        reasoning_content: None,
-                        completion_tokens: None,
-                        stream_chunks: None,
-                        metrics: BackendMetrics {
-                            prefill_ms: first_step_ms.unwrap_or(0.0),
-                            time_to_first_token_ms: first_step_ms,
-                            decode_ms: (total_step_ms - first_step_ms.unwrap_or(0.0)).max(0.0),
-                            ..BackendMetrics::default()
-                        },
-                    });
-                    break;
+                    // A post-header streaming failure cannot change the HTTP
+                    // status, but it must never masquerade as generated model
+                    // content. The fallback executor guard is synchronous;
+                    // release its scheduler/KV lane before publishing the
+                    // terminal error, matching the persistent worker contract.
+                    drop(sequence_guard.take());
+                    yield Ok::<Event, Infallible>(chat_stream_error_event(format!(
+                        "real-full streaming executor error: {error}"
+                    )));
+                    yield Ok::<Event, Infallible>(chat_stream_done_event());
+                    return;
                 }
             };
             executed_decode_steps += 1;
@@ -601,10 +601,15 @@ fn real_glm_full_decode_stream_response(
             };
 
             let mut should_stop = false;
-            for sample in samples
+            for mut sample in samples
                 .into_iter()
                 .take(max_tokens - generated_token_ids.len())
             {
+                let stop_allowed = !ignore_eos
+                    && generated_token_ids.len().saturating_add(1) >= min_tokens;
+                if !stop_allowed {
+                    sample.stop = false;
+                }
                 if sample.stop {
                     if !sample.content.is_empty() {
                         continuation_cacheable = false;
@@ -615,7 +620,10 @@ fn real_glm_full_decode_stream_response(
                     raw_generated_text.push_str(&sample.content);
                 }
                 generated_token_ids.push(sample.token_id);
-                let sample = output_filter.apply(sample);
+                let mut sample = output_filter.apply(sample);
+                if !stop_allowed {
+                    sample.stop = false;
+                }
                 if sample.clear_prior_content {
                     continuation_reasoning_content.clear();
                     continuation_visible_content.clear();
@@ -862,6 +870,8 @@ pub(crate) async fn real_glm_full_completion(
     prompt_token_ids: Option<Arc<Vec<usize>>>,
     vision_embeddings: Option<Arc<Vec<RealFullVisionEmbedding>>>,
     max_tokens: usize,
+    min_tokens: usize,
+    ignore_eos: bool,
     sampling: RealFullSamplingParams,
     allow_tool_calls: bool,
     constraint: Option<Arc<RealFullConstraint>>,
@@ -882,6 +892,8 @@ pub(crate) async fn real_glm_full_completion(
                 prompt_token_ids,
                 vision_embeddings,
                 max_tokens,
+                min_tokens,
+                ignore_eos,
                 sampling,
                 allow_tool_calls,
                 constraint,
@@ -1027,6 +1039,8 @@ async fn execute_real_full_decode_loop(
     prompt_token_ids: Option<Arc<Vec<usize>>>,
     vision_embeddings: Option<Arc<Vec<RealFullVisionEmbedding>>>,
     max_tokens: usize,
+    min_tokens: usize,
+    ignore_eos: bool,
     sampling: RealFullSamplingParams,
     allow_tool_calls: bool,
     constraint: Option<Arc<RealFullConstraint>>,
@@ -1072,6 +1086,8 @@ async fn execute_real_full_decode_loop(
         .start_real_full_sequence(persistent_real_full_sequence_request(
             initial_request,
             max_tokens,
+            min_tokens,
+            ignore_eos,
             allow_tool_calls,
         ))
         .ok();
@@ -1174,12 +1190,20 @@ async fn execute_real_full_decode_loop(
         };
 
         let mut should_stop = false;
-        for sample in samples
+        for mut sample in samples
             .into_iter()
             .take(max_tokens - generated_token_ids.len())
         {
+            let stop_allowed =
+                !ignore_eos && generated_token_ids.len().saturating_add(1) >= min_tokens;
+            if !stop_allowed {
+                sample.stop = false;
+            }
             generated_token_ids.push(sample.token_id);
-            let sample = output_filter.apply(sample);
+            let mut sample = output_filter.apply(sample);
+            if !stop_allowed {
+                sample.stop = false;
+            }
             if sample.clear_prior_content {
                 content.clear();
                 reasoning_content.clear();

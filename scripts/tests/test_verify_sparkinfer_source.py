@@ -20,15 +20,15 @@ SPEC.loader.exec_module(VERIFIER)
 
 def make_source(root: Path) -> Path:
     source = root / "sparkinfer"
-    package = source / "sparkinfer"
+    package = source / "b12x"
     package.mkdir(parents=True)
     (source / "LICENSE").write_text("Apache-2.0 fixture\n", encoding="utf-8")
     (source / "pyproject.toml").write_text(
-        '[project]\nname = "sparkinfer"\nversion = "1.0.1"\n',
+        '[project]\nname = "b12x"\nversion = "1.1.0"\n',
         encoding="utf-8",
     )
     (package / "__init__.py").write_text(
-        '__version__ = "1.0.1"\n', encoding="utf-8"
+        '__version__ = "1.1.0"\n', encoding="utf-8"
     )
     (package / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
     return source
@@ -101,7 +101,7 @@ def test_metadata_free_tree_matches_lock_and_rejects_mutation(tmp_path: Path) ->
     verified = VERIFIER.verify(source, lock)
     assert verified["revision"] == "1" * 40
 
-    (source / "sparkinfer" / "kernel.py").write_text(
+    (source / "b12x" / "kernel.py").write_text(
         "VALUE = 2\n", encoding="utf-8"
     )
     with pytest.raises(VERIFIER.VerificationError, match="does not match"):
@@ -111,7 +111,7 @@ def test_metadata_free_tree_matches_lock_and_rejects_mutation(tmp_path: Path) ->
 def test_native_extension_cannot_hide_from_archive_digest(tmp_path: Path) -> None:
     source = make_source(tmp_path)
     before = VERIFIER.source_tree_sha256(source)
-    (source / "sparkinfer" / "kernel.so").write_bytes(b"untrusted extension")
+    (source / "b12x" / "kernel.so").write_bytes(b"untrusted extension")
     assert VERIFIER.source_tree_sha256(source) != before
 
 
@@ -120,7 +120,7 @@ def test_generated_directory_names_are_ignored_only_at_the_root(
 ) -> None:
     source = make_source(tmp_path)
     before = VERIFIER.source_tree_sha256(source)
-    nested = source / "sparkinfer" / "build"
+    nested = source / "b12x" / "build"
     nested.mkdir()
     (nested / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
     assert VERIFIER.source_tree_sha256(source) != before
@@ -129,7 +129,7 @@ def test_generated_directory_names_are_ignored_only_at_the_root(
 def test_generated_cache_directories_do_not_change_digest(tmp_path: Path) -> None:
     source = make_source(tmp_path)
     before = VERIFIER.source_tree_sha256(source)
-    cache = source / "sparkinfer" / "__pycache__"
+    cache = source / "b12x" / "__pycache__"
     cache.mkdir()
     (cache / "kernel.cpython-312.pyc").write_bytes(b"generated")
     egg_info = source / "sparkinfer.egg-info"
@@ -141,11 +141,11 @@ def test_generated_cache_directories_do_not_change_digest(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "relative",
     (
-        Path("sparkinfer/__pycache__/kernel.cpython-312.pyc"),
-        Path("sparkinfer/.mypy_cache/kernel.json"),
-        Path("sparkinfer/.pytest_cache/nodeids"),
-        Path("sparkinfer/.ruff_cache/cache"),
-        Path("sparkinfer/kernel.pyo"),
+        Path("b12x/__pycache__/kernel.cpython-312.pyc"),
+        Path("b12x/.mypy_cache/kernel.json"),
+        Path("b12x/.pytest_cache/nodeids"),
+        Path("b12x/.ruff_cache/cache"),
+        Path("b12x/kernel.pyo"),
     ),
 )
 def test_metadata_free_source_rejects_python_caches(
@@ -165,9 +165,9 @@ def test_metadata_free_source_rejects_python_caches(
 
 def test_digest_tracks_executable_mode_and_symlink_target(tmp_path: Path) -> None:
     source = make_source(tmp_path)
-    kernel = source / "sparkinfer" / "kernel.py"
+    kernel = source / "b12x" / "kernel.py"
     link = source / "selected.py"
-    link.symlink_to("sparkinfer/kernel.py")
+    link.symlink_to("b12x/kernel.py")
     initial = VERIFIER.source_tree_sha256(source)
 
     kernel.chmod(0o755)
@@ -175,7 +175,7 @@ def test_digest_tracks_executable_mode_and_symlink_target(tmp_path: Path) -> Non
     assert executable != initial
 
     link.unlink()
-    link.symlink_to("sparkinfer/__init__.py")
+    link.symlink_to("b12x/__init__.py")
     assert VERIFIER.source_tree_sha256(source) != executable
 
 
@@ -214,7 +214,7 @@ def test_git_checkout_requires_locked_revision_cleanliness_and_origin(
     write_lock(source, lock, revision=revision)
     VERIFIER.verify(source, lock)
 
-    nested_gitfile = source / "sparkinfer" / "nested" / ".git"
+    nested_gitfile = source / "b12x" / "nested" / ".git"
     nested_gitfile.parent.mkdir()
     nested_gitfile.write_text(
         "gitdir: /host-only/submodule/metadata\n", encoding="utf-8"
@@ -241,12 +241,12 @@ def test_git_checkout_requires_locked_revision_cleanliness_and_origin(
         input=tar_payload,
     )
     assert not (archive / ".git").exists()
-    assert not (archive / "sparkinfer" / "nested" / ".git").exists()
+    assert not (archive / "b12x" / "nested" / ".git").exists()
     VERIFIER.verify(archive, lock)
     nested_gitfile.unlink()
     nested_gitfile.parent.rmdir()
 
-    cache = source / "sparkinfer" / "__pycache__"
+    cache = source / "b12x" / "__pycache__"
     cache.mkdir()
     (cache / "untracked.pyc").write_bytes(b"dirty")
     with pytest.raises(VERIFIER.VerificationError, match="source changes"):
@@ -294,14 +294,14 @@ def test_cli_can_require_import_from_verified_source(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert f"import={source / 'sparkinfer' / '__init__.py'}" in result.stdout
+    assert f"import={source / 'b12x' / '__init__.py'}" in result.stdout
 
 
 def test_cli_can_require_cache_free_metadata_source(tmp_path: Path) -> None:
     source = make_source(tmp_path / "verified")
     lock = tmp_path / "sparkinfer.lock.json"
     write_lock(source, lock)
-    cache = source / "sparkinfer" / "__pycache__"
+    cache = source / "b12x" / "__pycache__"
     cache.mkdir()
     (cache / "kernel.cpython-312.pyc").write_bytes(b"ignored bytecode")
 

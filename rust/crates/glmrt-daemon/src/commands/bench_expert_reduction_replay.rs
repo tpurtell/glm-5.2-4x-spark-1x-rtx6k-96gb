@@ -115,6 +115,7 @@ pub(crate) async fn run_bench_expert_reduction_replay(
             "status": "started",
             "plan": args.plan.canonicalize()?.display().to_string(),
             "cohort": args.cohort,
+            "coordinator_only": args.coordinator_only,
             "chains": chains.len(),
             "physical_ms": chains.iter().map(|chain| chain.physical_m).collect::<BTreeSet<_>>(),
             "warmup_chains_per_m": args.warmup_chains_per_m,
@@ -133,9 +134,14 @@ pub(crate) async fn run_bench_expert_reduction_replay(
 
     let mut request_id = REPLAY_REQUEST_ID_START;
     let grouped = chains_by_m(&chains);
+    let requested_paths: &[ReductionPath] = if args.coordinator_only {
+        &[ReductionPath::Coordinator]
+    } else {
+        &[ReductionPath::Coordinator, ReductionPath::SparkRowSharded]
+    };
     for (physical_m, group) in &grouped {
         for chain in group.iter().take(args.warmup_chains_per_m) {
-            for path in [ReductionPath::Coordinator, ReductionPath::SparkRowSharded] {
+            for path in requested_paths.iter().copied() {
                 let _ = replay_chain(&client, &hosts, chain, path, 0, &mut request_id)
                     .await
                     .with_context(|| {
@@ -164,7 +170,12 @@ pub(crate) async fn run_bench_expert_reduction_replay(
                 ReductionPath::SparkRowSharded => ReductionPath::Coordinator,
             };
             let layer_rotation = chain_index % chain.layers.len();
-            for (path_order, path) in [first, second].into_iter().enumerate() {
+            let ordered_paths = if args.coordinator_only {
+                vec![ReductionPath::Coordinator]
+            } else {
+                vec![first, second]
+            };
+            for (path_order, path) in ordered_paths.into_iter().enumerate() {
                 let measurement = replay_chain(
                     &client,
                     &hosts,

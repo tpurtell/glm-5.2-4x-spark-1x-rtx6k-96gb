@@ -15,7 +15,7 @@ pub(crate) const GLMRT_SPARK_LAYER_BLOCK_ATTENTION_CAPTURE_ENV: &str =
     "GLMRT_SPARK_LAYER_BLOCK_ATTENTION_PYTHON_CAPTURE";
 
 const COORDINATOR_PYTHON_CAPTURE_MODULES: &[&str] = &[
-    "sparkinfer",
+    "b12x",
     "flashinfer",
     "triton",
     "b12x_mla_capture",
@@ -27,7 +27,7 @@ const COORDINATOR_PYTHON_CAPTURE_MODULES: &[&str] = &[
 ];
 const SPARK_PYTHON_CAPTURE_MODULES: &[&str] = &["b12x_spark_capture"];
 const SPARK_LAYER_BLOCK_ATTENTION_CAPTURE_MODULES: &[&str] =
-    &["sparkinfer", "flashinfer", "b12x_mla_capture"];
+    &["b12x", "flashinfer", "b12x_mla_capture"];
 static COORDINATOR_PYTHON_CAPTURE_STARTUP_OPEN: AtomicBool = AtomicBool::new(true);
 
 #[cfg(test)]
@@ -425,6 +425,21 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn python_capture_modules_use_the_b12x_namespace() {
+        for modules in [
+            COORDINATOR_PYTHON_CAPTURE_MODULES,
+            SPARK_PYTHON_CAPTURE_MODULES,
+            SPARK_LAYER_BLOCK_ATTENTION_CAPTURE_MODULES,
+        ] {
+            assert!(modules
+                .iter()
+                .all(|module| { *module != "sparkinfer" && !module.starts_with("sparkinfer.") }));
+        }
+        assert!(COORDINATOR_PYTHON_CAPTURE_MODULES.contains(&"b12x"));
+        assert!(SPARK_LAYER_BLOCK_ATTENTION_CAPTURE_MODULES.contains(&"b12x"));
+    }
 
     #[test]
     fn env_gate_defaults_to_disabled() {

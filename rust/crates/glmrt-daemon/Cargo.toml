@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+bincode.workspace = true
 clap.workspace = true
 glmrt-api = { path = "../glmrt-api" }
 glmrt-core = { path = "../glmrt-core" }

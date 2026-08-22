@@ -18,11 +18,11 @@ PROJECTIONS = (
 
 
 def export_kernels(output_dir: Path) -> None:
-    os.environ["SPARKINFER_COMPILE_DISK_CACHE"] = "0"
-    os.environ["SPARKINFER_COMPILE_MEMORY_CACHE"] = "0"
+    os.environ["B12X_COMPILE_DISK_CACHE"] = "0"
+    os.environ["B12X_COMPILE_MEMORY_CACHE"] = "0"
 
     import torch
-    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+    from b12x.moe._shared.kernels.w4a16.kernel import (
         _select_tile_config,
         compile_w4a16_gemm,
     )

@@ -111,3 +111,31 @@ def test_run_fingerprints_and_explicitly_sets_both_ab_controls() -> None:
         "GLMRT_REAL_FULL_DSPARK_FIXED_DRAFTS=$DSPARK_FIXED_DRAFTS"
         in env_file
     )
+    assert "GLMRT_SPARKINFER_COMMIT=$coordinator_sparkinfer_commit" in env_file
+    assert (
+        "GLMRT_COORDINATOR_POWER_LIMIT_WATTS=$coordinator_power_limit_watts"
+        in env_file
+    )
+
+
+def test_release_and_wip_containers_never_auto_start_on_boot() -> None:
+    release_launcher = (ROOT / "run.sh").read_text(encoding="utf-8")
+    wip_builder = (ROOT / "wip.sh").read_text(encoding="utf-8")
+
+    assert "--restart unless-stopped" not in release_launcher
+    assert "--restart unless-stopped" not in wip_builder
+    assert release_launcher.count("--restart no") == 1
+    assert wip_builder.count("--restart no") == 2
+
+
+def test_parallel_wip_builds_fail_before_finalizing_stale_outputs() -> None:
+    wip_builder = (ROOT / "wip.sh").read_text(encoding="utf-8")
+
+    assert wip_builder.count("|| return $?") == 2
+    assert (
+        "/wip/source coordinator 120 /wip/build/coordinator "
+        "/wip/output/coordinator \\\n    || return $?"
+    ) in wip_builder
+    assert (
+        "/wip/source expert 121 /wip/build/expert /wip/output/expert \\\n    || return $?"
+    ) in wip_builder

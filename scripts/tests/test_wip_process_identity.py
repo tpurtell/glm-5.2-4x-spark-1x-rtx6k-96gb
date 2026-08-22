@@ -80,6 +80,12 @@ def test_wip_launcher_has_separate_expert_and_deployment_identities() -> None:
     assert "bind-identity" in launcher
     assert "'$expert_process' '$expert_runtime_fingerprint'" in launcher
     assert "reusing four fingerprint-matched resident WIP Spark experts" in launcher
+    assert '["sparkinfer_revision"]' in launcher
+    assert "GLMRT_SPARKINFER_COMMIT=$coordinator_sparkinfer_commit" in launcher
+    assert (
+        "GLMRT_COORDINATOR_POWER_LIMIT_WATTS=$coordinator_power_limit_watts"
+        in launcher
+    )
 
 
 def test_wip_builder_streams_every_local_heredoc_into_docker() -> None:

@@ -188,7 +188,7 @@ def _verify_package_identity(source: Path) -> None:
     required = (
         source / "LICENSE",
         source / "pyproject.toml",
-        source / "sparkinfer" / "__init__.py",
+        source / "b12x" / "__init__.py",
     )
     missing = [os.fspath(path) for path in required if not path.is_file()]
     if missing:
@@ -203,9 +203,9 @@ def _verify_package_identity(source: Path) -> None:
             f"cannot read SparkInfer package metadata {source / 'pyproject.toml'}: "
             f"{exc}"
         ) from exc
-    if project.get("name") != "sparkinfer":
+    if project.get("name") != "b12x":
         raise VerificationError(
-            f"{source / 'pyproject.toml'} does not declare project.name=sparkinfer"
+            f"{source / 'pyproject.toml'} does not declare project.name=b12x"
         )
 
 
@@ -268,23 +268,23 @@ def verify(source: Path, lock_path: Path) -> dict[str, object]:
 
 
 def verify_import_source(source: Path) -> Path:
-    """Require the runtime ``sparkinfer`` import to come from ``source``."""
+    """Require the runtime ``b12x`` import to come from ``source``."""
 
     source = source.resolve()
     try:
-        import sparkinfer
+        import b12x
     except Exception as exc:
-        raise VerificationError(f"cannot import sparkinfer: {exc}") from exc
+        raise VerificationError(f"cannot import b12x: {exc}") from exc
 
-    module_file = getattr(sparkinfer, "__file__", None)
+    module_file = getattr(b12x, "__file__", None)
     if not module_file:
-        raise VerificationError("imported sparkinfer has no __file__")
+        raise VerificationError("imported b12x has no __file__")
     imported_path = Path(module_file).resolve()
     try:
         imported_path.relative_to(source)
     except ValueError as exc:
         raise VerificationError(
-            "imported sparkinfer resolves outside the verified source tree: "
+            "imported b12x resolves outside the verified source tree: "
             f"module={imported_path}, source={source}"
         ) from exc
     return imported_path
@@ -297,7 +297,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--assert-import-source",
         action="store_true",
-        help="also require the runtime sparkinfer import to resolve inside --source",
+        help="also require the runtime b12x import to resolve inside --source",
     )
     parser.add_argument(
         "--require-no-python-cache",

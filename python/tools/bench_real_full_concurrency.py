@@ -262,6 +262,9 @@ def summarize_lane(
             int(value)
             for value in real_full.get("mtp_accepted_draft_lengths") or []
         ],
+        "verify_cycle_ms": [
+            float(value) for value in real_full.get("mtp_verify_cycle_ms") or []
+        ],
         "correct": correct,
         "verdict": verdict,
         "content_sha256": hashlib.sha256(content.encode()).hexdigest(),

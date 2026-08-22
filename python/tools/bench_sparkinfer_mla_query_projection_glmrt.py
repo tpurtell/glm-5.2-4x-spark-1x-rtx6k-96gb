@@ -35,7 +35,7 @@ from typing import Callable, Literal
 
 import torch
 
-from sparkinfer.gemm import mla_query_projection
+from b12x.gemm import mla_query_projection
 
 
 HEADS = 64

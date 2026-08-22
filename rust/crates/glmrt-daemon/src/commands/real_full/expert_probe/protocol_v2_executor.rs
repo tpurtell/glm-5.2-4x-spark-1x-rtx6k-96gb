@@ -22,7 +22,7 @@ use std::{
     net::SocketAddr,
     sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock},
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::commands::model_artifacts::ExpertOwnerLookup;
@@ -73,6 +73,7 @@ const STRIPED_SPARK_COLLECTIVE_QUORUM_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 const REGULAR_SPARK_REDUCTION_MAX_GROUP_ROWS: usize = 256;
 const SPARK_OWNER_RING_SLOT_BYTES: usize = 128 * 1024;
+const SPARK_OWNER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const SPARK_OWNER_RING_DEPTH: usize = 8;
 
 pub(crate) fn real_nvfp4_cuda_reference_kernels_enabled() -> bool {
@@ -1179,10 +1180,9 @@ impl RealNvfp4ProtocolV2Executor {
                     "real NVFP4 ProtocolV2 route row_index {} did not match row {row_index}",
                     route.row_index
                 );
-                let owner = self.owner_for_route(layer_id, route.expert_id as usize)?;
+                self.validate_route_owner(layer_id, route.expert_id as usize)?;
                 let scored_route = ScoredRoute {
                     expert_id: route.expert_id as usize,
-                    owner,
                     score: route.gate_weight,
                     corrected_score: route.gate_weight,
                     normalized_weight: route.gate_weight,
@@ -1222,10 +1222,9 @@ impl RealNvfp4ProtocolV2Executor {
                     "streamed expert ingress route row {} did not match {row_index}",
                     route.row_index
                 );
-                let owner = self.owner_for_route(layer_id, route.expert_id as usize)?;
+                self.validate_route_owner(layer_id, route.expert_id as usize)?;
                 let scored_route = ScoredRoute {
                     expert_id: route.expert_id as usize,
-                    owner,
                     score: route.gate_weight,
                     corrected_score: route.gate_weight,
                     normalized_weight: route.gate_weight,
@@ -1637,9 +1636,11 @@ impl RealNvfp4ProtocolV2Executor {
                 let ring = ring_guard
                     .as_mut()
                     .context("mapped Spark owner ring disappeared while awaiting response")?;
-                let slot = ring.wait_recv_slot().with_context(|| {
-                    format!("waiting for mapped Spark owner response from shard rank {rank}")
-                })?;
+                let slot = ring
+                    .wait_recv_slot_with_timeout(SPARK_OWNER_RESPONSE_TIMEOUT)
+                    .with_context(|| {
+                        format!("waiting for mapped Spark owner response from shard rank {rank}")
+                    })?;
                 let storage = unsafe {
                     std::slice::from_raw_parts(slot.host_ptr.cast_const(), slot.capacity_bytes)
                 };
@@ -2806,11 +2807,11 @@ impl ProjectionRowsCache {
 }
 
 impl RealNvfp4ProtocolV2Executor {
-    fn owner_for_route(&self, layer_id: usize, expert_id: usize) -> Result<String> {
-        if let Some(shard) = self.intermediate_shard {
-            return Ok(self.role_hostname.clone().unwrap_or_else(|| {
-                format!("intermediate-shard-{}-of-{}", shard.rank, shard.count)
-            }));
+    fn validate_route_owner(&self, layer_id: usize, expert_id: usize) -> Result<()> {
+        if self.intermediate_shard.is_some() {
+            // Strict TP shards all execute every selected expert. Placement
+            // ownership is neither consulted nor materialized on this path.
+            return Ok(());
         }
         let owner = if let Some(owner_lookup) = &self.owner_lookup {
             owner_lookup
@@ -2836,7 +2837,7 @@ impl RealNvfp4ProtocolV2Executor {
                 );
             }
         }
-        Ok(owner)
+        Ok(())
     }
 
     fn projection_rows_cached(
@@ -4814,13 +4815,11 @@ mod tests {
                 for route in &host_batch.routes
                     [host_row.route_offset..host_row.route_offset + host_row.route_count]
                 {
-                    let owner = owner_lookup
+                    owner_lookup
                         .owner_for(host_batch.layer_id.0 as usize, route.expert_id)
-                        .unwrap()
-                        .to_owned();
+                        .unwrap();
                     let scored = ScoredRoute {
                         expert_id: route.expert_id,
-                        owner,
                         score: route.gate_weight,
                         corrected_score: route.gate_weight,
                         normalized_weight: route.gate_weight,

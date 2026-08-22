@@ -330,10 +330,12 @@ int launch_q_b(const glmrt_b12x_coordinator_w4a16_buffers_t* buffers,
       buffers->c_tmp.ptr};
   glmrt_b12x_coordinator_w4a16_q_b_m8_Tensor_locks_i32_flat_t locks{
       buffers->locks.ptr};
+  glmrt_b12x_coordinator_w4a16_q_b_m8_Tensor_trellis_lut_flat_t trellis_lut{
+      buffers->scale.ptr};
   return cute_dsl_glmrt_b12x_coordinator_w4a16_q_b_m8_wrapper(
       &q_b_module, buffers->input.ptr, buffers->input.ptr, &weight,
       buffers->output.ptr, &scale, &global_scale, &routes,
-      &block_experts, &route_count, &topk_weights, &scratch, &locks,
+      &block_experts, &route_count, &topk_weights, &scratch, &locks, &trellis_lut,
       static_cast<int32_t>(active_rows), GLMRT_B12X_COORDINATOR_Q_B_M8_GRID_X,
       stream);
 }
@@ -359,10 +361,13 @@ int launch_q_b_m16_candidate(
       buffers->c_tmp.ptr};
   glmrt_b12x_coordinator_w4a16_q_b_m16_candidate_Tensor_locks_i32_flat_t locks{
       buffers->locks.ptr};
+  glmrt_b12x_coordinator_w4a16_q_b_m16_candidate_Tensor_trellis_lut_flat_t trellis_lut{
+      buffers->scale.ptr};
   return cute_dsl_glmrt_b12x_coordinator_w4a16_q_b_m16_candidate_wrapper(
       &q_b_m16_candidate_module, buffers->input.ptr, buffers->input.ptr, &weight,
       buffers->output.ptr, &scale, &global_scale,
       &routes, &block_experts, &route_count, &topk_weights, &scratch, &locks,
+      &trellis_lut,
       static_cast<int32_t>(active_rows),
       GLMRT_B12X_COORDINATOR_Q_B_M16_CANDIDATE_GRID_X, stream);
 }
@@ -388,11 +393,13 @@ int launch_o_proj_m16_candidate(
       buffers->c_tmp.ptr};
   glmrt_b12x_coordinator_w4a16_o_proj_m16_candidate_Tensor_locks_i32_flat_t locks{
       buffers->locks.ptr};
+  glmrt_b12x_coordinator_w4a16_o_proj_m16_candidate_Tensor_trellis_lut_flat_t
+      trellis_lut{buffers->scale.ptr};
   return cute_dsl_glmrt_b12x_coordinator_w4a16_o_proj_m16_candidate_wrapper(
       &o_proj_m16_candidate_module, buffers->input.ptr, buffers->input.ptr,
       &weight, buffers->output.ptr, &scale,
       &global_scale, &routes, &block_experts, &route_count, &topk_weights,
-      &scratch, &locks, static_cast<int32_t>(active_rows),
+      &scratch, &locks, &trellis_lut, static_cast<int32_t>(active_rows),
       GLMRT_B12X_COORDINATOR_O_PROJ_M16_CANDIDATE_GRID_X, stream);
 }
 
@@ -415,10 +422,12 @@ int launch_o_proj(const glmrt_b12x_coordinator_w4a16_buffers_t* buffers,
       buffers->c_tmp.ptr};
   glmrt_b12x_coordinator_w4a16_o_proj_m1_Tensor_locks_i32_flat_t locks{
       buffers->locks.ptr};
+  glmrt_b12x_coordinator_w4a16_o_proj_m1_Tensor_trellis_lut_flat_t trellis_lut{
+      buffers->scale.ptr};
   return cute_dsl_glmrt_b12x_coordinator_w4a16_o_proj_m1_wrapper(
       &o_proj_module, buffers->input.ptr, buffers->input.ptr, &weight,
       buffers->output.ptr, &scale, &global_scale, &routes,
-      &block_experts, &route_count, &topk_weights, &scratch, &locks, 1,
+      &block_experts, &route_count, &topk_weights, &scratch, &locks, &trellis_lut, 1,
       GLMRT_B12X_COORDINATOR_O_PROJ_M1_GRID_X, stream);
 }
 
@@ -442,10 +451,12 @@ int launch_o_proj_tn64_candidate(
       buffers->c_tmp.ptr};
   glmrt_b12x_coordinator_w4a16_o_proj_m1_tn64_candidate_Tensor_locks_i32_flat_t locks{
       buffers->locks.ptr};
+  glmrt_b12x_coordinator_w4a16_o_proj_m1_tn64_candidate_Tensor_trellis_lut_flat_t
+      trellis_lut{buffers->scale.ptr};
   return cute_dsl_glmrt_b12x_coordinator_w4a16_o_proj_m1_tn64_candidate_wrapper(
       &o_proj_tn64_candidate_module, buffers->input.ptr, buffers->input.ptr,
       &weight, buffers->output.ptr, &scale, &global_scale, &routes,
-      &block_experts, &route_count, &topk_weights, &scratch, &locks, 1,
+      &block_experts, &route_count, &topk_weights, &scratch, &locks, &trellis_lut, 1,
       GLMRT_B12X_COORDINATOR_O_PROJ_M1_TN64_CANDIDATE_GRID_X, stream);
 }
 

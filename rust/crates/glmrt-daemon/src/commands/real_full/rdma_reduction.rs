@@ -14,6 +14,7 @@ use std::{
 const SPARK_RDMA_PAIR_COUNT: usize = 6;
 const SPARK_RDMA_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 const SPARK_RDMA_CONNECT_RETRY: Duration = Duration::from_millis(100);
+const SPARK_RDMA_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(60);
 const SPARK_RDMA_FRAME_MAGIC: &[u8; 8] = b"GLMRDMA1";
 const SPARK_RDMA_FRAME_VERSION: u16 = 1;
 const SPARK_RDMA_TIMING_ENV: &str = "GLMRT_REAL_FULL_NVFP4_ROUTE_TIMING";
@@ -561,7 +562,7 @@ impl SparkExpertRdmaReduction {
                     .context("Spark RDMA receive rail payload byte count overflow")?;
                 let slot = if self.timing {
                     let (slot, stats) = peer.rings[rail_index]
-                        .wait_recv_slot_with_stats()
+                        .wait_recv_slot_with_timeout_and_stats(SPARK_RDMA_EXCHANGE_TIMEOUT)
                         .with_context(|| {
                             format!(
                                 "waiting for Spark RDMA rank {rank} receive from rank {} rail {rail_index} request {request_id}",
@@ -573,12 +574,14 @@ impl SparkExpertRdmaReduction {
                         .context("Spark RDMA timing receive poll count overflow")?;
                     slot
                 } else {
-                    peer.rings[rail_index].wait_recv_slot().with_context(|| {
-                        format!(
-                            "waiting for Spark RDMA rank {rank} receive from rank {} rail {rail_index} request {request_id}",
-                            peer.rank
-                        )
-                    })?
+                    peer.rings[rail_index]
+                        .wait_recv_slot_with_timeout(SPARK_RDMA_EXCHANGE_TIMEOUT)
+                        .with_context(|| {
+                            format!(
+                                "waiting for Spark RDMA rank {rank} receive from rank {} rail {rail_index} request {request_id}",
+                                peer.rank
+                            )
+                        })?
                 };
                 let header_bytes = unsafe {
                     std::slice::from_raw_parts(slot.host_ptr, SPARK_RDMA_FRAME_HEADER_BYTES)

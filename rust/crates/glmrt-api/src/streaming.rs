@@ -57,6 +57,20 @@ struct ChatStreamToolCallFunction {
     arguments: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ChatStreamErrorResponse {
+    error: ChatStreamError,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatStreamError {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: &'static str,
+    param: Option<String>,
+    code: &'static str,
+}
+
 pub(crate) fn chat_stream_response(output: CompletionOutput, include_usage: bool) -> Response {
     let id = output.id;
     let created = output.created;
@@ -361,6 +375,20 @@ pub(crate) fn chat_stream_usage_event(
 
 pub(crate) fn chat_stream_done_event() -> Event {
     Event::default().data("[DONE]")
+}
+
+pub(crate) fn chat_stream_error_event(message: String) -> Event {
+    let response = ChatStreamErrorResponse {
+        error: ChatStreamError {
+            message,
+            error_type: "server_error",
+            param: None,
+            code: "backend_error",
+        },
+    };
+    Event::default()
+        .event("error")
+        .data(serde_json::to_string(&response).unwrap())
 }
 
 fn whitespace_stream_chunks(content: &str) -> Vec<String> {

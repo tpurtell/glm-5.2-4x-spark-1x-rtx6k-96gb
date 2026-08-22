@@ -54,11 +54,13 @@ def active_python_sources() -> list[Path]:
     )
 
 
-def is_external_b12x_module(module: str | None) -> bool:
-    return module == "b12x" or bool(module and module.startswith("b12x."))
+def is_retired_sparkinfer_module(module: str | None) -> bool:
+    return module == "sparkinfer" or bool(
+        module and module.startswith("sparkinfer.")
+    )
 
 
-def test_active_python_does_not_import_retired_b12x_package() -> None:
+def test_active_python_does_not_import_retired_sparkinfer_package() -> None:
     violations: list[str] = []
     for path in active_python_sources():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -70,17 +72,17 @@ def test_active_python_does_not_import_retired_b12x_package() -> None:
             else:
                 continue
             for module in modules:
-                if is_external_b12x_module(module):
+                if is_retired_sparkinfer_module(module):
                     relative = path.relative_to(ROOT)
                     violations.append(f"{relative}:{node.lineno}: {module}")
 
     assert not violations, (
-        "active Python sources must import sparkinfer, not the retired b12x "
+        "active Python sources must import b12x, not the retired sparkinfer "
         "package:\n" + "\n".join(violations)
     )
 
 
-def test_standalone_tools_bootstrap_pinned_source_before_sparkinfer_imports() -> None:
+def test_standalone_tools_bootstrap_pinned_source_before_b12x_imports() -> None:
     violations: list[str] = []
     tools_root = ROOT / "python" / "tools"
     for path in sorted(tools_root.glob("*.py")):
@@ -93,16 +95,16 @@ def test_standalone_tools_bootstrap_pinned_source_before_sparkinfer_imports() ->
             if (
                 isinstance(node, ast.Import)
                 and any(
-                    alias.name == "sparkinfer"
-                    or alias.name.startswith("sparkinfer.")
+                    alias.name == "b12x"
+                    or alias.name.startswith("b12x.")
                     for alias in node.names
                 )
             )
             or (
                 isinstance(node, ast.ImportFrom)
                 and (
-                    node.module == "sparkinfer"
-                    or bool(node.module and node.module.startswith("sparkinfer."))
+                    node.module == "b12x"
+                    or bool(node.module and node.module.startswith("b12x."))
                 )
             )
         ]
@@ -129,7 +131,7 @@ def test_standalone_tools_bootstrap_pinned_source_before_sparkinfer_imports() ->
             )
 
     assert not violations, (
-        "standalone tools must verify and prepend GLMRT's pinned SparkInfer "
+        "standalone tools must verify and prepend GLMRT's pinned b12x/SparkInfer "
         "tree before importing it:\n" + "\n".join(violations)
     )
 
@@ -154,7 +156,7 @@ def test_build_metadata_does_not_pin_retired_b12x_package() -> None:
                 )
 
     assert not violations, (
-        "build metadata must not install or pin the retired b12x package:\n"
+        "build metadata must not install or pin an external b12x package:\n"
         + "\n".join(violations)
     )
 
@@ -287,7 +289,7 @@ def test_standalone_bootstrap_imports_verified_submodule() -> None:
         (ROOT / "third_party" / "sparkinfer").resolve()
     )
     assert re.fullmatch(r"[0-9a-f]{40}", revision)
-    assert Version(version) == Version("1.0.1")
+    assert Version(version) == Version("1.1.0")
 
 
 def test_live_launchers_override_stale_cmake_sparkinfer_cache_entries() -> None:

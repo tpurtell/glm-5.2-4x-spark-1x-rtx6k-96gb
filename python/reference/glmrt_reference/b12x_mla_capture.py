@@ -38,7 +38,9 @@ _SPARKINFER_NVFP4_MLA_DECODE_PREPARED: set[tuple[Any, ...]] = set()
 _SPARKINFER_NVFP4_MLA_PREFILL_PREPARED: set[tuple[Any, ...]] = set()
 _SPARKINFER_GLM_H64_QUERY_PREPARED: set[tuple[int, int]] = set()
 _SPARKINFER_GLM_H64_QUERY_LOGGED_PLANS: set[tuple[Any, ...]] = set()
+_B12X_GLM_DSA_INDEXER_PLANS: dict[tuple[Any, ...], Any] = {}
 _B12X_GLM_DSA_INDEXER_STATES: dict[tuple[Any, ...], Any] = {}
+_B12X_GLM_DSA_INDEXER_PREPARED: set[tuple[Any, ...]] = set()
 _SPARKINFER_GLM_H64_QUERY_POLICY_ENV = (
     "GLMRT_SPARKINFER_GLM_H64_BF16_QUERY_PROJECTION"
 )
@@ -58,7 +60,7 @@ def plan_sparkinfer_glm_h64_bf16_query_projection(
     import sys
 
     import torch
-    from sparkinfer.gemm.mla_query_projection import plan_glm_h64_bf16
+    from b12x.gemm.mla_query_projection import plan_glm_h64_bf16
 
     policy = os.environ.get(
         _SPARKINFER_GLM_H64_QUERY_POLICY_ENV, "auto"
@@ -121,7 +123,7 @@ def _run_sparkinfer_glm_h64_bf16_query_projection(
     ctx: dict[str, Any], *, prepare_only: bool, **kwargs: Any
 ) -> None:
     import torch
-    from sparkinfer.gemm.mla_query_projection import (
+    from b12x.gemm.mla_query_projection import (
         prewarm_glm_h64_bf16,
         run_glm_h64_bf16,
     )
@@ -171,6 +173,11 @@ def _run_sparkinfer_glm_h64_bf16_query_projection(
                 f"got {available}"
             )
 
+    block_m = 16 if query_rows <= 16 else 32
+    prepared_key = (device_id, block_m)
+    if prepare_only and prepared_key in _SPARKINFER_GLM_H64_QUERY_PREPARED:
+        return
+
     stream = torch.cuda.ExternalStream(int(ctx["cuda_stream"]), device=device_id)
     with torch.cuda.device(device_id), torch.cuda.stream(stream):
         resident_weight = _bf16_tensor(
@@ -178,16 +185,13 @@ def _run_sparkinfer_glm_h64_bf16_query_projection(
         )
         weight = resident_weight[:, :nope_dim, :]
         if prepare_only:
-            block_m = 16 if query_rows <= 16 else 32
-            prepared_key = (device_id, block_m)
-            if prepared_key not in _SPARKINFER_GLM_H64_QUERY_PREPARED:
-                prewarm_glm_h64_bf16(
-                    weight,
-                    (query_rows,),
-                    stream=stream,
-                    synchronize=False,
-                )
-                _SPARKINFER_GLM_H64_QUERY_PREPARED.add(prepared_key)
+            prewarm_glm_h64_bf16(
+                weight,
+                (query_rows,),
+                stream=stream,
+                synchronize=False,
+            )
+            _SPARKINFER_GLM_H64_QUERY_PREPARED.add(prepared_key)
             return
 
         q_nope = _bf16_tensor(
@@ -285,9 +289,9 @@ def _run_b12x_glm_dsa_indexer_prefill(
     ctx: dict[str, Any], *, prepare_only: bool, **kwargs: Any
 ) -> None:
     import torch
-    from sparkinfer.attention.nsa_indexer.paged import index_topk_fp8
-    from sparkinfer.attention.nsa_indexer.scratch import (
-        SPARKINFERIndexerPagedScratchCaps,
+    from b12x.attention.nsa_indexer.paged import index_topk_fp8
+    from b12x.attention.nsa_indexer.scratch import (
+        B12XIndexerPagedScratchCaps,
         plan_indexer_paged_scratch,
     )
 
@@ -346,6 +350,17 @@ def _run_b12x_glm_dsa_indexer_prefill(
         selector_route,
         plan_shared_page_table,
     )
+    plan_key = (
+        device_id,
+        query_rows,
+        page_table_width,
+        cache_pages,
+        topk,
+        supertile_k,
+        selector_mode,
+        selector_route,
+        plan_shared_page_table,
+    )
 
     with torch.cuda.device(device_id), torch.cuda.stream(stream):
         q_fp8 = _u8_tensor(
@@ -383,7 +398,7 @@ def _run_b12x_glm_dsa_indexer_prefill(
 
         state = _B12X_GLM_DSA_INDEXER_STATES.get(state_key)
         if state is None:
-            caps = SPARKINFERIndexerPagedScratchCaps(
+            caps = B12XIndexerPagedScratchCaps(
                 device=q_fp8.device,
                 num_q_heads=_GLM_DSA_INDEX_HEADS,
                 max_q_rows=query_rows,
@@ -398,7 +413,13 @@ def _run_b12x_glm_dsa_indexer_prefill(
                 shared_page_table=plan_shared_page_table,
                 route=selector_route,
             )
-            plan = plan_indexer_paged_scratch(caps)
+            # Plans are immutable shape contracts. Bindings still remain
+            # pointer-specific through state_key so every captured graph owns
+            # the correct scratch and metadata addresses.
+            plan = _B12X_GLM_DSA_INDEXER_PLANS.get(plan_key)
+            if plan is None:
+                plan = plan_indexer_paged_scratch(caps)
+                _B12X_GLM_DSA_INDEXER_PLANS[plan_key] = plan
             required_scratch_bytes = int(plan.scratch_specs()[0].nbytes)
             if scratch.numel() < required_scratch_bytes:
                 raise ValueError(
@@ -418,11 +439,15 @@ def _run_b12x_glm_dsa_indexer_prefill(
             _B12X_GLM_DSA_INDEXER_STATES[state_key] = state
 
         binding, _ = state
+        # Once a shape has executed, later pointer bindings only need to be
+        # constructed before their independent CUDA graph capture.
+        if prepare_only and plan_key in _B12X_GLM_DSA_INDEXER_PREPARED:
+            return
         if query_rows == 1:
-            from sparkinfer.attention.nsa_indexer.fused_indexer import (
+            from b12x.attention.nsa_indexer.fused_indexer import (
                 run_fused_paged_indexer,
             )
-            from sparkinfer.attention.nsa_indexer.kernel import (
+            from b12x.attention.nsa_indexer.kernel import (
                 _split_index_k_cache_runtime_views,
             )
 
@@ -472,6 +497,8 @@ def _run_b12x_glm_dsa_indexer_prefill(
                 out_indices=output_indices,
                 supertile_k=supertile_k,
             )
+        if prepare_only:
+            _B12X_GLM_DSA_INDEXER_PREPARED.add(plan_key)
 
 
 def prepare_flashinfer_packed_fp8_mla_prefill(
@@ -538,6 +565,8 @@ def _run_flashinfer_packed_fp8_mla_prefill(
         rope_dim,
         scale,
     )
+    if prepare_only and prepared_key in _FLASHINFER_PACKED_FP8_MLA_PREFILL_PREPARED:
+        return
     with torch.cuda.device(device_id), torch.cuda.stream(stream):
         q = _bf16_tensor(buffers["q"], (query_rows, heads, nope_dim + rope_dim))
         kv = _u8_tensor(buffers["kv"], (kv_pages, _GLM_DSA_PAGE_SIZE, 656))
@@ -693,9 +722,6 @@ def _run_flashinfer_packed_fp8_mla_decode(
     splits = bucket_rows // 64
     prepared_key = (
         device_id,
-        int(buffers["kv"]["ptr"]),
-        int(buffers["indices"]["ptr"]),
-        int(buffers["topk_length"]["ptr"]),
         bucket_rows,
         kv_capacity_rows,
         query_rows,
@@ -706,6 +732,8 @@ def _run_flashinfer_packed_fp8_mla_decode(
         initialize_kv,
         exact_grouped_chunks,
     )
+    if prepare_only and prepared_key in _FLASHINFER_PACKED_FP8_MLA_PREPARED:
+        return
     with torch.cuda.device(device_id), torch.cuda.stream(stream):
         q = _bf16_tensor(
             buffers["q"], (query_rows, heads, nope_dim + rope_dim)
@@ -826,9 +854,9 @@ def _run_sparkinfer_nvfp4_mla(
     """Consume the canonical 432-byte NVFP4 cache without an FP8 mirror."""
 
     import torch
-    from sparkinfer.attention._shared.mla.kernel import run_unified_decode
-    from sparkinfer.attention._shared.mla.prefill import run_unified_prefill
-    from sparkinfer.attention._shared.mla.traits import ScaleFormat
+    from b12x.attention._shared.mla.kernel import run_unified_decode
+    from b12x.attention._shared.mla.prefill import run_unified_prefill
+    from b12x.attention._shared.mla.traits import ScaleFormat
 
     query_rows = int(kwargs["query_rows"])
     kv_pages = int(kwargs["kv_pages"])
@@ -865,9 +893,6 @@ def _run_sparkinfer_nvfp4_mla(
     stream = torch.cuda.ExternalStream(int(ctx["cuda_stream"]), device=device_id)
     prepared_key = (
         device_id,
-        int(buffers["kv"]["ptr"]),
-        int(buffers["indices"]["ptr"]),
-        int(buffers["topk_length"]["ptr"]),
         query_rows,
         kv_pages,
         topk,
@@ -877,6 +902,15 @@ def _run_sparkinfer_nvfp4_mla(
         scale,
         decode,
     )
+    prepared = (
+        _SPARKINFER_NVFP4_MLA_DECODE_PREPARED
+        if decode
+        else _SPARKINFER_NVFP4_MLA_PREFILL_PREPARED
+    )
+    # The low-level SparkInfer launch has no pointer-bound plan. Compile and
+    # execute one warmup per shape; each pointer identity is still captured.
+    if prepare_only and prepared_key in prepared:
+        return
     with torch.cuda.device(device_id), torch.cuda.stream(stream):
         q = _bf16_tensor(
             buffers["q"], (query_rows, heads, nope_dim + rope_dim)
@@ -938,11 +972,6 @@ def _run_sparkinfer_nvfp4_mla(
             )
 
         if prepare_only:
-            prepared = (
-                _SPARKINFER_NVFP4_MLA_DECODE_PREPARED
-                if decode
-                else _SPARKINFER_NVFP4_MLA_PREFILL_PREPARED
-            )
             prepared.add(prepared_key)
 
 
@@ -1285,11 +1314,11 @@ def capture_mla_rope_attention(ctx: dict[str, Any], **kwargs: Any) -> None:
         return
 
     import torch
-    from sparkinfer.attention._shared.mla.prefill_mg import run_unified_prefill_mg
-    from sparkinfer.attention._shared.mla.reference import (
+    from b12x.attention._shared.mla.prefill_mg import run_unified_prefill_mg
+    from b12x.attention._shared.mla.reference import (
         pack_mla_kv_cache_reference,
     )
-    from sparkinfer.attention._shared.mla.traits import (
+    from b12x.attention._shared.mla.traits import (
         ComputeMode,
         ModelType,
         ScaleFormat,

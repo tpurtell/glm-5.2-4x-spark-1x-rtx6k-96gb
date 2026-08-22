@@ -37,13 +37,13 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 
-from sparkinfer._lib.utils import make_ptr
-from sparkinfer.moe._shared.kernels.w4a16.host import (
+from b12x._lib.utils import make_ptr
+from b12x.moe._shared.kernels.w4a16.host import (
     W4A16PackedBuffers,
     make_w4a16_packed_buffers,
 )
-import sparkinfer.moe._shared.kernels.w4a16.kernel as w4a16_kernel
-from sparkinfer.moe._shared.kernels.w4a16.prepare import (
+import b12x.moe._shared.kernels.w4a16.kernel as w4a16_kernel
+from b12x.moe._shared.kernels.w4a16.prepare import (
     PreparedW4A16MoeWeights,
     prepare_w4a16_modelopt_nvfp4_weights,
 )

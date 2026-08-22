@@ -315,7 +315,7 @@ def main() -> None:
     if min(args.warmup, args.iterations, args.repeats) < 1:
         parser.error("warmup, iterations, and repeats must be positive")
 
-    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+    from b12x.moe._shared.kernels.w4a16.kernel import (
         _cutlass_element_dtype,
         compile_w4a16_gemm,
         cuda,

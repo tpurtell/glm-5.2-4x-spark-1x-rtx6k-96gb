@@ -24,7 +24,7 @@ def make_release_fixture(
     revision: str = "2" * 40,
 ) -> tuple[Path, Path, Path, Path]:
     source = root / "sparkinfer"
-    package = source / "sparkinfer"
+    package = source / "b12x"
     package.mkdir(parents=True)
     license_text = """Apache License
 Version 2.0, January 2004
@@ -34,7 +34,7 @@ fixture remainder
     (source / "LICENSE").write_text(license_text, encoding="utf-8")
     (source / "pyproject.toml").write_text(
         """[project]
-name = "sparkinfer"
+name = "b12x"
 version = "9.9.9"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

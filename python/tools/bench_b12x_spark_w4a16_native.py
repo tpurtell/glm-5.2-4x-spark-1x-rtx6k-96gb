@@ -471,7 +471,7 @@ def main() -> None:
         ):
             parser.error("expert-route-counts activates an unallocated expert")
 
-    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
+    from b12x.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
     )
 

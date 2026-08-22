@@ -344,7 +344,46 @@ pub(in crate::commands::real_full) fn sparse_b_scatter_shared_residual_add_bf16_
         &partials,
         dst_rows,
         row_width,
+        true,
     )
+}
+
+pub(in crate::commands::real_full) fn sparse_b_scatter_shared_residual_add_bf16_async_owned_device_output(
+    residual: DeviceBf16Output,
+    shared_delta: DeviceBf16Output,
+    partial_outputs_bf16_by_host: Vec<Vec<u8>>,
+    global_row_indices_by_host: Vec<Vec<usize>>,
+    dst_rows: usize,
+    row_width: usize,
+) -> Result<DeviceBf16Output> {
+    if !cuda_reference_kernels_enabled() {
+        anyhow::bail!(
+            "asynchronous BF16 Sparse-B scatter shared residual-add requires {REAL_FULL_CUDA_REFERENCE_KERNELS_ENV}=1"
+        );
+    }
+    validate_sparse_b_device_residual_inputs(&residual, &shared_delta, dst_rows, row_width)?;
+    let partials = validate_sparse_b_bf16_partial_layout(
+        &partial_outputs_bf16_by_host,
+        &global_row_indices_by_host,
+        dst_rows,
+        row_width,
+    )?;
+    anyhow::ensure!(
+        !partials.row_indices.is_empty(),
+        "asynchronous raw TP4 Sparse-B reduction requires at least one partial row"
+    );
+    let mut output = cuda_sparse_b_scatter_shared_residual_add_bf16_device_output(
+        &residual,
+        &shared_delta,
+        &partial_outputs_bf16_by_host,
+        &partials,
+        dst_rows,
+        row_width,
+        false,
+    )?;
+    output.retain_input_until_ready(residual);
+    output.retain_input_until_ready(shared_delta);
+    Ok(output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1897,6 +1936,7 @@ pub(in crate::commands::real_full) fn cuda_sparse_b_scatter_shared_residual_add_
     partials: &SparseBBf16PartialLayout,
     dst_rows: usize,
     row_width: usize,
+    synchronize: bool,
 ) -> Result<DeviceBf16Output> {
     let values = dst_rows
         .checked_mul(row_width)
@@ -1949,86 +1989,103 @@ pub(in crate::commands::real_full) fn cuda_sparse_b_scatter_shared_residual_add_
         .context("CUDA Sparse-B fused device residual-add f32 bucket byte count overflows usize")?;
     let signature =
         CoordinatorCudaGraphSignature::coord_sparse_b_envelope_bf16(row_capacity, row_width);
-    let device_output_buffer = with_coordinator_cuda_graph_slot(&graph_key, |library, slot| {
-        let cuda_stream = slot.stream_ptr();
-        let src_buffer = slot.buffer(
-            library,
-            CoordinatorCudaScratchSlot::A,
-            src_capacity_bytes,
-            "Sparse-B fused BF16 partials",
-        )?;
-        let index_buffer = slot.buffer(
-            library,
-            CoordinatorCudaScratchSlot::B,
-            index_capacity_bytes,
-            "Sparse-B fused row indices",
-        )?;
-        let dst_f32_buffer = slot.buffer(
-            library,
-            CoordinatorCudaScratchSlot::C,
-            bucket_f32_bytes,
-            "Sparse-B fused f32 accumulator",
-        )?;
-        let device_output_buffer = OwnedCoordinatorDeviceBuffer::new(
-            library,
-            bf16_bytes,
-            "Sparse-B fused owned BF16 output",
-        )?;
+    let (device_output_buffer, ready_event) =
+        with_coordinator_cuda_graph_slot(&graph_key, |library, slot| {
+            let cuda_stream = slot.stream_ptr();
+            let result = (|| {
+                let src_buffer = slot.buffer(
+                    library,
+                    CoordinatorCudaScratchSlot::A,
+                    src_capacity_bytes,
+                    "Sparse-B fused BF16 partials",
+                )?;
+                let index_buffer = slot.buffer(
+                    library,
+                    CoordinatorCudaScratchSlot::B,
+                    index_capacity_bytes,
+                    "Sparse-B fused row indices",
+                )?;
+                let dst_f32_buffer = slot.buffer(
+                    library,
+                    CoordinatorCudaScratchSlot::C,
+                    bucket_f32_bytes,
+                    "Sparse-B fused f32 accumulator",
+                )?;
+                let device_output_buffer = OwnedCoordinatorDeviceBuffer::new(
+                    library,
+                    bf16_bytes,
+                    "Sparse-B fused owned BF16 output",
+                )?;
 
-        slot.workspace
-            .copy_h2d_segments_to_slot_async(
-                library,
-                CoordinatorCudaScratchSlot::A,
-                partial_outputs_bf16_by_host,
-                partials.src_bytes,
-                "Sparse-B fused BF16 partials",
-                cuda_stream,
-            )
-            .context("async copying fused Sparse-B BF16 partials to device")?;
-        slot.workspace
-            .copy_h2d_to_slot_async(
-                library,
-                CoordinatorCudaScratchSlot::B,
-                u32_bytes(&partials.row_indices),
-                "Sparse-B fused row indices",
-                cuda_stream,
-            )
-            .context("async copying fused Sparse-B row indices to device")?;
-        unsafe {
-            library
-                .cuda_zero_f32_async(dst_f32_buffer, values, cuda_stream)
-                .context("async zeroing fused Sparse-B f32 accumulator")?;
-        }
-        capture_or_update_sparse_b_scatter_shared_residual_add_bf16_graph(
-            library,
-            slot,
-            signature,
-            src_buffer,
-            index_buffer,
-            dst_f32_buffer,
-            shared_delta.buffer(),
-            residual.buffer(),
-            device_output_buffer.buffer,
-            dst_rows,
-            partials.row_indices.len(),
-            row_width,
-            values,
-        )?;
-        unsafe {
-            library
-                .cuda_stream_synchronize(cuda_stream)
-                .context("synchronizing fused Sparse-B device residual-add graph slot stream")?;
-        }
-        Ok(device_output_buffer)
-    })?;
+                slot.workspace
+                    .copy_h2d_segments_to_slot_async(
+                        library,
+                        CoordinatorCudaScratchSlot::A,
+                        partial_outputs_bf16_by_host,
+                        partials.src_bytes,
+                        "Sparse-B fused BF16 partials",
+                        cuda_stream,
+                    )
+                    .context("async copying fused Sparse-B BF16 partials to device")?;
+                slot.workspace
+                    .copy_h2d_to_slot_async(
+                        library,
+                        CoordinatorCudaScratchSlot::B,
+                        u32_bytes(&partials.row_indices),
+                        "Sparse-B fused row indices",
+                        cuda_stream,
+                    )
+                    .context("async copying fused Sparse-B row indices to device")?;
+                unsafe {
+                    library
+                        .cuda_zero_f32_async(dst_f32_buffer, values, cuda_stream)
+                        .context("async zeroing fused Sparse-B f32 accumulator")?;
+                }
+                capture_or_update_sparse_b_scatter_shared_residual_add_bf16_graph(
+                    library,
+                    slot,
+                    signature,
+                    src_buffer,
+                    index_buffer,
+                    dst_f32_buffer,
+                    shared_delta.buffer(),
+                    residual.buffer(),
+                    device_output_buffer.buffer,
+                    dst_rows,
+                    partials.row_indices.len(),
+                    row_width,
+                    values,
+                )?;
+                let ready_event = if synchronize {
+                    slot.stream_synchronize().context(
+                        "synchronizing fused Sparse-B device residual-add graph slot stream",
+                    )?;
+                    None
+                } else {
+                    Some(slot.record_output_ready_event(library)?)
+                };
+                Ok((device_output_buffer, ready_event))
+            })();
+            if result.is_err() && !synchronize {
+                // If enqueueing fails after an H2D or graph launch, do not allow
+                // the owned inputs to return to their pools while this stream may
+                // still reference them.
+                let _ = slot.stream_synchronize();
+            }
+            result
+        })?;
 
-    Ok(DeviceBf16Output {
+    let mut output = DeviceBf16Output {
         buffer: device_output_buffer,
         bytes: bf16_bytes,
         rows: dst_rows,
         values_per_row: row_width,
         backend: CUDA_REFERENCE_RESIDUAL_ADD_BF16_BACKEND,
-    })
+    };
+    if let Some(ready_event) = ready_event {
+        output.set_ready_event(ready_event);
+    }
+    Ok(output)
 }
 
 #[allow(clippy::too_many_arguments)]

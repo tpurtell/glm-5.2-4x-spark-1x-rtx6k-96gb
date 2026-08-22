@@ -204,12 +204,29 @@ impl KvCacheConfig {
         self.dtype.label()
     }
 
-    pub fn main_mla_bytes_per_token(&self) -> usize {
-        if self.layout == KvLayout::Glm52CompressedFp8 {
-            return self.layers * GLM52_MLA_FP8_DS_BYTES_PER_TOKEN;
+    /// Bytes in one physical, row-major main-MLA cache record.
+    ///
+    /// Keeping this geometry on the cache format prevents producers,
+    /// consumers, and radix boundary copies from independently reconstructing
+    /// the BF16/FP8/NVFP4 record stride.
+    pub fn main_mla_row_bytes(&self) -> Option<usize> {
+        match self.layout {
+            KvLayout::Glm52CompressedBf16 => {
+                self.key_value_width.checked_mul(std::mem::size_of::<u16>())
+            }
+            KvLayout::Glm52CompressedFp8 => Some(GLM52_MLA_FP8_DS_BYTES_PER_TOKEN),
+            KvLayout::Glm52CompressedNvfp4 => Some(GLM52_MLA_MXFP4_DS_BYTES_PER_TOKEN),
+            KvLayout::ExpandedDebugOnly => None,
         }
-        if self.layout == KvLayout::Glm52CompressedNvfp4 {
-            return self.layers * GLM52_MLA_MXFP4_DS_BYTES_PER_TOKEN;
+    }
+
+    pub fn main_mla_page_bytes(&self, page_tokens: usize) -> Option<usize> {
+        self.main_mla_row_bytes()?.checked_mul(page_tokens)
+    }
+
+    pub fn main_mla_bytes_per_token(&self) -> usize {
+        if let Some(row_bytes) = self.main_mla_row_bytes() {
+            return self.layers * row_bytes;
         }
         self.dtype
             .packed_bytes_for_elements(self.layers * self.key_value_width)

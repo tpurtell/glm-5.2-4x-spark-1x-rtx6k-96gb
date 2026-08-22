@@ -58,6 +58,80 @@ jq -e '
   }
 ' "$smoke_tmp/schema.json" >/dev/null
 
+combined_payload="$(
+  jq -cn --arg model "$model" '{
+    model: $model,
+    messages: [
+      {role: "user", content: "Look up the Taipei weather, then return the requested JSON."},
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: "call_weather",
+          type: "function",
+          function: {
+            name: "lookup_weather",
+            arguments: "{\"city\":\"Taipei\",\"units\":\"metric\"}"
+          }
+        }]
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_weather",
+        name: "lookup_weather",
+        content: "{\"city\":\"Taipei\",\"temperature\":27,\"condition\":\"sunny\"}"
+      }
+    ],
+    temperature: 0,
+    max_tokens: 96,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "weather",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            city: {type: "string", enum: ["Taipei"]},
+            temperature: {type: "integer", enum: [27]},
+            condition: {type: "string", enum: ["sunny"]}
+          },
+          required: ["city", "temperature", "condition"],
+          additionalProperties: false
+        }
+      }
+    },
+    tools: [{
+      type: "function",
+      function: {
+        name: "lookup_weather",
+        description: "Look up weather",
+        strict: true,
+        parameters: {
+          type: "object",
+          properties: {
+            city: {type: "string"},
+            units: {type: "string", enum: ["metric", "imperial"]}
+          },
+          required: ["city", "units"],
+          additionalProperties: false
+        }
+      }
+    }],
+    tool_choice: "auto",
+    parallel_tool_calls: false
+  }'
+)"
+curl -fsS --max-time 300 "$url/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "$combined_payload" >"$smoke_tmp/combined.json"
+jq -e '
+  .choices[0].finish_reason == "stop" and
+  (.choices[0].message.content | fromjson) == {
+    city: "Taipei", temperature: 27, condition: "sunny"
+  }
+' "$smoke_tmp/combined.json" >/dev/null
+
 tool_payload="$(
   jq -cn --arg model "$model" '{
     model: $model,
@@ -130,4 +204,4 @@ jq -e '
   .error.param == "response_format.json_schema.schema"
 ' "$smoke_tmp/invalid.json" >/dev/null
 
-echo "api_constrained_smoke json_schema=true strict_tool_stream=true validation=true model=$model"
+echo "api_constrained_smoke json_schema=true combined_response_tools=true strict_tool_stream=true validation=true model=$model"

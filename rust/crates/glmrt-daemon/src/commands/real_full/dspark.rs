@@ -15,6 +15,18 @@ use glmrt_loader::{
 };
 use serde::{Deserialize, Serialize};
 
+#[path = "dspark_cost_profile.rs"]
+mod dspark_cost_profile;
+use dspark_cost_profile::{
+    GLM52_REDHAT_DSPARK_COST_PROFILE_DSPARK_REVISION, GLM52_REDHAT_DSPARK_COST_PROFILE_ID,
+    GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_CONCURRENCY, GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_DRAFTS,
+    GLM52_REDHAT_DSPARK_COST_PROFILE_MS, GLM52_REDHAT_DSPARK_COST_PROFILE_POWER_LIMIT_WATTS,
+    GLM52_REDHAT_DSPARK_COST_PROFILE_SOURCE_SHA256,
+    GLM52_REDHAT_DSPARK_COST_PROFILE_SPARKINFER_REVISION,
+    GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_MODEL,
+    GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_REVISION, GLM52_REDHAT_DSPARK_COST_PROFILE_TOPOLOGY,
+};
+
 use super::coordinator_kernels::{
     preload_resident_weight_from_host_staging, preload_resident_weight_from_host_staging_profiled,
     preloaded_resident_weight_device_buffer, preloaded_resident_weight_device_buffer_view,
@@ -1478,6 +1490,7 @@ fn roll_dspark_swa_page_table(
 
 pub(super) struct DsparkRequestEngine {
     executor: DsparkStaticExecutor,
+    checkpoint_revision: &'static str,
     max_verify_drafts: usize,
     max_cache_context_tokens: usize,
     page_size: usize,
@@ -1898,6 +1911,44 @@ struct DsparkRuntimeGlobalCostKey {
     target_rows: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct DsparkRuntimeRouteCostCell {
+    samples: u64,
+    mean_ratio: f64,
+    mean_critical_unique_experts: f64,
+    critical_unique_experts_m2: f64,
+    minimum_critical_unique_experts: usize,
+    maximum_critical_unique_experts: usize,
+}
+
+impl DsparkRuntimeRouteCostCell {
+    fn observe(&mut self, ratio: f64, critical_unique_experts: usize) {
+        self.samples = self.samples.saturating_add(1);
+        self.mean_ratio += (ratio - self.mean_ratio) / self.samples as f64;
+        let unique = critical_unique_experts as f64;
+        let delta = unique - self.mean_critical_unique_experts;
+        self.mean_critical_unique_experts += delta / self.samples as f64;
+        self.critical_unique_experts_m2 += delta * (unique - self.mean_critical_unique_experts);
+        if self.samples == 1 {
+            self.minimum_critical_unique_experts = critical_unique_experts;
+            self.maximum_critical_unique_experts = critical_unique_experts;
+        } else {
+            self.minimum_critical_unique_experts = self
+                .minimum_critical_unique_experts
+                .min(critical_unique_experts);
+            self.maximum_critical_unique_experts = self
+                .maximum_critical_unique_experts
+                .max(critical_unique_experts);
+        }
+    }
+
+    fn representative(&self) -> bool {
+        self.samples >= 8
+            && self.maximum_critical_unique_experts > self.minimum_critical_unique_experts
+            && self.critical_unique_experts_m2 > 0.0
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DsparkRuntimeCostObservation {
     pub(super) request_count: usize,
@@ -1916,6 +1967,8 @@ pub(super) struct DsparkRuntimeCostModel {
     exact: BTreeMap<DsparkRuntimeCostKey, DsparkRuntimeCostCell>,
     row: BTreeMap<DsparkRuntimeGlobalCostKey, DsparkRuntimeCostCell>,
     concurrency: BTreeMap<usize, DsparkRuntimeCostCell>,
+    profiled_ms: BTreeMap<DsparkRuntimeGlobalCostKey, f64>,
+    route_conditioned: BTreeMap<DsparkRuntimeGlobalCostKey, DsparkRuntimeRouteCostCell>,
 }
 
 impl DsparkRuntimeCostModel {
@@ -1932,7 +1985,47 @@ impl DsparkRuntimeCostModel {
             exact: BTreeMap::new(),
             row: BTreeMap::new(),
             concurrency: BTreeMap::new(),
+            profiled_ms: BTreeMap::new(),
+            route_conditioned: BTreeMap::new(),
         })
+    }
+
+    pub(super) fn install_profile(
+        &mut self,
+        request_count: usize,
+        rows: &[(usize, f64)],
+    ) -> Result<()> {
+        let max_rows = self.max_target_rows(request_count)?;
+        anyhow::ensure!(
+            rows.len() == max_rows - request_count + 1,
+            "dSpark SPS profile for {request_count} requests has {} rows, expected {}",
+            rows.len(),
+            max_rows - request_count + 1,
+        );
+        for (expected_rows, (target_rows, observed_ms)) in
+            (request_count..=max_rows).zip(rows.iter().copied())
+        {
+            anyhow::ensure!(
+                target_rows == expected_rows,
+                "dSpark SPS profile for {request_count} requests expected target row {expected_rows}, got {target_rows}",
+            );
+            anyhow::ensure!(
+                observed_ms.is_finite() && observed_ms > 0.0,
+                "invalid profiled dSpark latency {observed_ms} ms at request count {request_count}, target rows {target_rows}",
+            );
+            let replaced = self.profiled_ms.insert(
+                DsparkRuntimeGlobalCostKey {
+                    request_count,
+                    target_rows,
+                },
+                observed_ms,
+            );
+            anyhow::ensure!(
+                replaced.is_none(),
+                "duplicate dSpark SPS profile cell at request count {request_count}, target rows {target_rows}",
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn context_buckets(context_tokens: &[usize]) -> Result<(usize, usize)> {
@@ -1979,6 +2072,22 @@ impl DsparkRuntimeCostModel {
         Ok(short_context_ms + context_bucket as f64 * DSPARK_RUNTIME_CONTEXT_BUCKET_PRIOR_MS)
     }
 
+    fn base_prior_ms(
+        &self,
+        request_count: usize,
+        target_rows: usize,
+        context_bucket: usize,
+    ) -> Result<f64> {
+        let row_key = DsparkRuntimeGlobalCostKey {
+            request_count,
+            target_rows,
+        };
+        if let Some(profiled_ms) = self.profiled_ms.get(&row_key).copied() {
+            return Ok(profiled_ms + context_bucket as f64 * DSPARK_RUNTIME_CONTEXT_BUCKET_PRIOR_MS);
+        }
+        Self::balanced_prior_ms(target_rows, context_bucket)
+    }
+
     fn predicted_ms_for_bucket(
         &self,
         request_count: usize,
@@ -1991,7 +2100,19 @@ impl DsparkRuntimeCostModel {
             (request_count..=max_rows).contains(&target_rows),
             "dSpark target rows {target_rows} are outside {request_count}..={max_rows}",
         );
-        let prior = Self::balanced_prior_ms(target_rows, context_work_bucket)?;
+        let prior = self.base_prior_ms(request_count, target_rows, context_work_bucket)?;
+        let row_key = DsparkRuntimeGlobalCostKey {
+            request_count,
+            target_rows,
+        };
+        if let Some(route) = self
+            .route_conditioned
+            .get(&row_key)
+            .filter(|route| route.representative())
+        {
+            let weight = route.samples as f64 / (route.samples as f64 + 8.0);
+            return Ok((prior * ((1.0 - weight) + weight * route.mean_ratio)).max(0.001));
+        }
         let concurrency = self
             .concurrency
             .get(&request_count)
@@ -1999,15 +2120,15 @@ impl DsparkRuntimeCostModel {
             .unwrap_or_default();
         let concurrency_weight = concurrency.samples as f64
             / (concurrency.samples as f64 + DSPARK_RUNTIME_COST_CONCURRENCY_PRIOR_WEIGHT);
-        let mut log_ratio = concurrency_weight * concurrency.mean_value;
-        let row_key = DsparkRuntimeGlobalCostKey {
-            request_count,
-            target_rows,
-        };
+        // Scheduling needs E[T], so residual aggregation stays in linear
+        // latency-ratio space.  Averaging log ratios would estimate a
+        // geometric mean and systematically underprice route/stall tails.
+        let mut mean_ratio =
+            (1.0 - concurrency_weight) + concurrency_weight * concurrency.mean_value;
         let row = self.row.get(&row_key).copied().unwrap_or_default();
         let row_weight =
             row.samples as f64 / (row.samples as f64 + DSPARK_RUNTIME_COST_ROW_PRIOR_WEIGHT);
-        log_ratio = (1.0 - row_weight) * log_ratio + row_weight * row.mean_value;
+        mean_ratio = (1.0 - row_weight) * mean_ratio + row_weight * row.mean_value;
         let exact_key = DsparkRuntimeCostKey {
             request_count,
             context_work_bucket,
@@ -2017,8 +2138,8 @@ impl DsparkRuntimeCostModel {
         let exact = self.exact.get(&exact_key).copied().unwrap_or_default();
         let exact_weight =
             exact.samples as f64 / (exact.samples as f64 + DSPARK_RUNTIME_COST_EXACT_PRIOR_WEIGHT);
-        log_ratio = (1.0 - exact_weight) * log_ratio + exact_weight * exact.mean_value;
-        Ok((prior * log_ratio.exp()).max(0.001))
+        mean_ratio = (1.0 - exact_weight) * mean_ratio + exact_weight * exact.mean_value;
+        Ok((prior * mean_ratio).max(0.001))
     }
 
     pub(super) fn profile(
@@ -2063,6 +2184,7 @@ impl DsparkRuntimeCostModel {
         context_tokens: &[usize],
         target_rows: usize,
         observed_ms: f64,
+        route_critical_unique_experts: Option<usize>,
     ) -> Result<DsparkRuntimeCostObservation> {
         anyhow::ensure!(
             observed_ms.is_finite() && observed_ms > 0.0,
@@ -2075,12 +2197,45 @@ impl DsparkRuntimeCostModel {
             max_context_bucket,
             target_rows,
         )?;
+        if self.profiled_ms.contains_key(&DsparkRuntimeGlobalCostKey {
+            request_count,
+            target_rows,
+        }) {
+            return Ok(DsparkRuntimeCostObservation {
+                request_count,
+                context_work_bucket,
+                max_context_bucket,
+                target_rows,
+                observed_ms,
+                predicted_ms_before,
+                exact_samples: 0,
+            });
+        }
         // Preserve real regime changes while preventing one host stall from
         // permanently poisoning a rarely visited row/context cell.
+        let prior = self.base_prior_ms(request_count, target_rows, context_work_bucket)?;
         let robust_observation =
             observed_ms.clamp(predicted_ms_before * 0.25, predicted_ms_before * 4.0);
-        let prior = Self::balanced_prior_ms(target_rows, context_work_bucket)?;
-        let log_ratio = (robust_observation / prior).ln();
+        if let Some(critical_unique_experts) = route_critical_unique_experts {
+            let route = self
+                .route_conditioned
+                .entry(DsparkRuntimeGlobalCostKey {
+                    request_count,
+                    target_rows,
+                })
+                .or_default();
+            route.observe(robust_observation / prior, critical_unique_experts);
+            return Ok(DsparkRuntimeCostObservation {
+                request_count,
+                context_work_bucket,
+                max_context_bucket,
+                target_rows,
+                observed_ms,
+                predicted_ms_before,
+                exact_samples: route.samples,
+            });
+        }
+        let latency_ratio = robust_observation / prior;
         let exact_key = DsparkRuntimeCostKey {
             request_count,
             context_work_bucket,
@@ -2088,7 +2243,7 @@ impl DsparkRuntimeCostModel {
             target_rows,
         };
         let exact = self.exact.entry(exact_key).or_default();
-        exact.observe(log_ratio);
+        exact.observe(latency_ratio);
         let exact_samples = exact.samples;
         self.row
             .entry(DsparkRuntimeGlobalCostKey {
@@ -2096,11 +2251,11 @@ impl DsparkRuntimeCostModel {
                 target_rows,
             })
             .or_default()
-            .observe(log_ratio);
+            .observe(latency_ratio);
         self.concurrency
             .entry(request_count)
             .or_default()
-            .observe(log_ratio);
+            .observe(latency_ratio);
         Ok(DsparkRuntimeCostObservation {
             request_count,
             context_work_bucket,
@@ -2113,12 +2268,62 @@ impl DsparkRuntimeCostModel {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DsparkCostProfileActivation {
+    pub(super) profile_id: &'static str,
+    pub(super) source_sha256: &'static str,
+    pub(super) sparkinfer_revision: &'static str,
+    pub(super) topology: &'static str,
+    pub(super) power_limit_watts: usize,
+}
+
+pub(super) fn install_qualified_dspark_cost_profile(
+    model: &mut DsparkRuntimeCostModel,
+    target_model: &str,
+    target_snapshot: &Path,
+    checkpoint_revision: &str,
+    sparkinfer_revision: Option<&str>,
+    coordinator_power_limit_watts: Option<usize>,
+    max_execution_lanes: usize,
+    max_verify_drafts: usize,
+) -> Result<Option<DsparkCostProfileActivation>> {
+    let target_revision = target_snapshot.file_name().and_then(|name| name.to_str());
+    if target_model != GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_MODEL
+        || target_revision != Some(GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_REVISION)
+        || checkpoint_revision != GLM52_REDHAT_DSPARK_COST_PROFILE_DSPARK_REVISION
+        || sparkinfer_revision != Some(GLM52_REDHAT_DSPARK_COST_PROFILE_SPARKINFER_REVISION)
+        || coordinator_power_limit_watts != Some(GLM52_REDHAT_DSPARK_COST_PROFILE_POWER_LIMIT_WATTS)
+        || max_execution_lanes > GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_CONCURRENCY
+        || max_verify_drafts != GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_DRAFTS
+    {
+        return Ok(None);
+    }
+    for (request_index, rows) in GLM52_REDHAT_DSPARK_COST_PROFILE_MS
+        .iter()
+        .take(max_execution_lanes)
+        .enumerate()
+    {
+        model.install_profile(request_index + 1, rows)?;
+    }
+    Ok(Some(DsparkCostProfileActivation {
+        profile_id: GLM52_REDHAT_DSPARK_COST_PROFILE_ID,
+        source_sha256: GLM52_REDHAT_DSPARK_COST_PROFILE_SOURCE_SHA256,
+        sparkinfer_revision: GLM52_REDHAT_DSPARK_COST_PROFILE_SPARKINFER_REVISION,
+        topology: GLM52_REDHAT_DSPARK_COST_PROFILE_TOPOLOGY,
+        power_limit_watts: GLM52_REDHAT_DSPARK_COST_PROFILE_POWER_LIMIT_WATTS,
+    }))
+}
+
 // The serving executor serializes this engine behind one mutex. CUDA streams,
 // graphs, and device buffers use the device primary context and may be handed
 // to the pinned request worker, but they are never replayed concurrently.
 unsafe impl Send for DsparkRequestEngine {}
 
 impl DsparkRequestEngine {
+    pub(super) fn checkpoint_revision(&self) -> &'static str {
+        self.checkpoint_revision
+    }
+
     pub(super) fn max_verify_drafts(&self) -> usize {
         self.max_verify_drafts
     }
@@ -2241,6 +2446,7 @@ impl DsparkRequestEngine {
         );
         Ok(Self {
             executor,
+            checkpoint_revision: fixture.revision,
             max_verify_drafts: fixture.max_verify_drafts,
             max_cache_context_tokens,
             page_size,
@@ -4180,6 +4386,41 @@ mod tests {
     }
 
     #[test]
+    fn embedded_runtime_profile_is_immutable_to_runtime_observations() {
+        let mut model = DsparkRuntimeCostModel::new(2, 1).unwrap();
+        model
+            .install_profile(2, &[(2, 20.0), (3, 30.0), (4, 40.0)])
+            .unwrap();
+        assert!(model.install_profile(2, &[(2, 20.0)]).is_err());
+        let before = 1_000.0 / model.profile(2, &[0, 0]).unwrap().get(2).unwrap();
+        assert!((before - 20.0).abs() < 1.0e-12);
+        let observation = model.observe(2, &[0, 0], 2, 1_000.0, Some(2_000)).unwrap();
+        let after = 1_000.0 / model.profile(2, &[0, 0]).unwrap().get(2).unwrap();
+        assert_eq!(observation.exact_samples, 0);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn route_conditioned_runtime_residual_waits_for_route_coverage() {
+        let mut model = DsparkRuntimeCostModel::new(2, 1).unwrap();
+        let contexts = [0, 0];
+        let before = 1_000.0 / model.profile(2, &contexts).unwrap().get(2).unwrap();
+        for sample in 0..7 {
+            let observation = model
+                .observe(2, &contexts, 2, before * 2.0, Some(2_000 + sample % 2))
+                .unwrap();
+            assert_eq!(observation.exact_samples, (sample + 1) as u64);
+        }
+        let before_coverage = 1_000.0 / model.profile(2, &contexts).unwrap().get(2).unwrap();
+        assert!((before_coverage - before).abs() < 1.0e-12);
+        model
+            .observe(2, &contexts, 2, before * 2.0, Some(2_001))
+            .unwrap();
+        let after_coverage = 1_000.0 / model.profile(2, &contexts).unwrap().get(2).unwrap();
+        assert!(after_coverage > before);
+    }
+
+    #[test]
     fn runtime_cost_model_covers_c16_m16_and_learns_context_cells() {
         let mut model = DsparkRuntimeCostModel::new(16, 15).unwrap();
         let redhat_model = DsparkRuntimeCostModel::new(16, 7).unwrap();
@@ -4206,7 +4447,7 @@ mod tests {
             1_000.0 / model.profile(2, &long_contexts).unwrap().get(12).unwrap();
         assert!(long_before > short_before);
         for _ in 0..4 {
-            model.observe(2, &long_contexts, 8, 300.0).unwrap();
+            model.observe(2, &long_contexts, 8, 300.0, None).unwrap();
         }
         let long_after = 1_000.0 / model.profile(2, &long_contexts).unwrap().get(8).unwrap();
         let unseen_row_after = 1_000.0 / model.profile(2, &long_contexts).unwrap().get(12).unwrap();

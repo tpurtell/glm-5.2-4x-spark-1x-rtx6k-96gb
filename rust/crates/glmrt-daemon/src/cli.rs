@@ -384,6 +384,10 @@ pub(crate) struct BenchExpertReductionReplayArgs {
     pub(crate) cohort: String,
     #[arg(long, default_value_t = 2)]
     pub(crate) warmup_chains_per_m: usize,
+    /// Measure only the production coordinator-reduction path.  This avoids
+    /// requiring workers launched for the distinct row-sharded protocol.
+    #[arg(long, default_value_t = false)]
+    pub(crate) coordinator_only: bool,
     #[arg(long, default_value_t = 30_000)]
     pub(crate) timeout_ms: u64,
 }

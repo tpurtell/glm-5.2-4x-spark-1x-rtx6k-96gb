@@ -122,6 +122,8 @@ pub(crate) async fn build_completion(
                 prepared_prompt_token_ids,
                 vision_embeddings,
                 max_tokens,
+                request.min_tokens.unwrap_or(0),
+                request.ignore_eos.unwrap_or(false),
                 request_sampling_params(&request),
                 tools_enabled,
                 constraint,

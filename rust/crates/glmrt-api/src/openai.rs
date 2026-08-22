@@ -36,6 +36,14 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub max_completion_tokens: Option<usize>,
+    /// vLLM-compatible generation floor. Stop tokens are ignored until this
+    /// many output tokens have been committed.
+    #[serde(default)]
+    pub min_tokens: Option<usize>,
+    /// vLLM-compatible benchmark/diagnostic extension: ignore model stop
+    /// tokens and continue until the requested output budget is exhausted.
+    #[serde(default)]
+    pub ignore_eos: Option<bool>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]

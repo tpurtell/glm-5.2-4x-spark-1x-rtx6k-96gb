@@ -48,6 +48,7 @@ use progression::{
     RealFullSchedulerSparseTcpRoutedMlpContext, RealFullSchedulerTargetHiddenTaps,
     SchedulerSparseRollingLayerApply, SchedulerSparseTcpCohortPendingDispatch,
     SchedulerSparseTcpPendingApply, SchedulerSparseTcpPreparedDispatch,
+    ROLLING_SPARSE_ACCUMULATOR_PAGE_ROWS,
 };
 pub(in crate::commands::real_full) use progression::{
     RealFullSchedulerSparseDispatchTransport, RealFullSchedulerSparseTcpDispatchWorker,
@@ -3555,10 +3556,17 @@ fn execute_scheduler_sparse_rolling_chunk_wavefront(
     Ok(())
 }
 
+fn rolling_sparse_reclaim_aligned_chunk_tokens(planned_chunk_tokens: usize) -> usize {
+    let capped = planned_chunk_tokens
+        .max(1)
+        .min(ROLLING_SPARSE_ACCUMULATOR_PAGE_ROWS);
+    1_usize << capped.ilog2()
+}
+
 fn real_full_scheduler_execution_for_shape_inner(
     kv_config: KvCacheConfig,
     catalog: &TensorCatalog,
-    shape: RealFullSchedulerExecutionShape,
+    mut shape: RealFullSchedulerExecutionShape,
     sparse_tcp_routed_mlp: Option<RealFullSchedulerSparseTcpRoutedMlpContext>,
     state: Option<&mut RealFullSchedulerExecutionState>,
     retain_final_target_device_hidden: bool,
@@ -3575,6 +3583,16 @@ fn real_full_scheduler_execution_for_shape_inner(
     let coordinator_graph_stats_before = coordinator_cuda_graph_stats().ok();
     let scheduler_timing = scheduler_execution_timing_enabled();
     let scheduler_verbose_timing = scheduler_execution_verbose_timing_enabled();
+    let rolling_rows = shape
+        .prefill_tokens
+        .saturating_add(shape.decode_rows)
+        .saturating_add(shape.mtp_rows);
+    if rolling_sparse_packs_supported_for_rows(rolling_rows)
+        && !bounded_long_prefill_wavefront_required(rolling_rows)
+    {
+        shape.prefill_chunk_tokens =
+            rolling_sparse_reclaim_aligned_chunk_tokens(shape.prefill_chunk_tokens);
+    }
     validate_scheduler_execution_shape(&shape)?;
     let record_sparse_host_partition = sparse_tcp_routed_mlp.is_none();
     let stateful_live_request = state.is_some();
@@ -3644,7 +3662,13 @@ fn real_full_scheduler_execution_for_shape_inner(
     let numeric_shape = RealFullSchedulerNumericProgressionShape::from_execution_shape(&shape);
     let mut numeric_progression = RealFullSchedulerNumericProgression::new(numeric_shape);
     if stateful_live_request {
-        numeric_progression = numeric_progression.with_live_request();
+        // The event-owned raw-TP4 closure wins for the scalar recurrent
+        // scheduler, but retaining its inputs through the event reduced C=4
+        // throughput. Batched recurrent runs therefore keep the synchronous
+        // closure selected by BatchedLiveSchedulerRun::new.
+        numeric_progression = numeric_progression
+            .with_live_request()
+            .with_event_owned_raw_tp4_reduction();
     }
     if retain_final_target_device_hidden {
         numeric_progression = numeric_progression.with_final_target_device_hidden();
@@ -5013,6 +5037,7 @@ mod tests {
     use super::next_ready_sparse_wavefront_task;
     use super::plan_scheduler_prefill_chunks;
     use super::real_full_scheduler_execution_for_shape_with_sparse_tcp;
+    use super::rolling_sparse_reclaim_aligned_chunk_tokens;
     use super::scheduler_device_attention_launch_range;
     use super::scheduler_execution_status_for_completion;
     use super::scheduler_expected_device_attention_rows;
@@ -5040,6 +5065,17 @@ mod tests {
     use crate::commands::real_full::sampling::{
         RealFullLmHeadSamplingOptions, RealLmHeadChunkScoreForHidden,
     };
+
+    #[test]
+    fn rolling_sparse_chunks_align_to_reclaim_page_divisors() {
+        assert_eq!(rolling_sparse_reclaim_aligned_chunk_tokens(1), 1);
+        assert_eq!(rolling_sparse_reclaim_aligned_chunk_tokens(512), 512);
+        assert_eq!(rolling_sparse_reclaim_aligned_chunk_tokens(1_026), 1_024);
+        assert_eq!(rolling_sparse_reclaim_aligned_chunk_tokens(1_290), 1_024);
+        assert_eq!(rolling_sparse_reclaim_aligned_chunk_tokens(2_032), 1_024);
+        assert_eq!(rolling_sparse_reclaim_aligned_chunk_tokens(2_048), 2_048);
+        assert_eq!(rolling_sparse_reclaim_aligned_chunk_tokens(4_096), 2_048);
+    }
 
     #[test]
     fn scheduler_attention_launch_range_accounts_for_fused_mtp_target_rows() {

@@ -8,8 +8,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-os.environ["SPARKINFER_COMPILE_DISK_CACHE"] = "0"
-os.environ["SPARKINFER_COMPILE_MEMORY_CACHE"] = "0"
+os.environ["B12X_COMPILE_DISK_CACHE"] = "0"
+os.environ["B12X_COMPILE_MEMORY_CACHE"] = "0"
 
 import cuda.bindings.driver as cuda
 import cutlass.cute as cute

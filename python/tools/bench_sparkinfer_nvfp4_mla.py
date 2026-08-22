@@ -23,9 +23,9 @@ from collections.abc import Callable
 
 import torch
 
-from sparkinfer.attention import sparse_mla
-from sparkinfer.attention._shared.mla.prefill import run_unified_prefill
-from sparkinfer.attention._shared.mla.traits import ScaleFormat
+from b12x.attention import sparse_mla
+from b12x.attention._shared.mla.prefill import run_unified_prefill
+from b12x.attention._shared.mla.traits import ScaleFormat
 
 
 PAGE_SIZE = 64

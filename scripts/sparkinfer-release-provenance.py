@@ -120,16 +120,16 @@ def _validate_notices(source: Path, notices: Path, repository: str) -> None:
         )
     derived_components = (
         (
-            source / "sparkinfer" / "_lib" / "dense_gemm.py",
+            source / "b12x" / "_lib" / "dense_gemm.py",
             (
                 "### NVIDIA dense GEMM component in SparkInfer",
-                "sparkinfer/_lib/dense_gemm.py",
+                "b12x/_lib/dense_gemm.py",
                 "Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.",
             ),
         ),
         (
             source
-            / "sparkinfer"
+            / "b12x"
             / "attention"
             / "_shared"
             / "contiguous"
@@ -137,7 +137,7 @@ def _validate_notices(source: Path, notices: Path, repository: str) -> None:
             (
                 "### FlashAttention-derived contiguous attention component "
                 "in SparkInfer",
-                "sparkinfer/attention/_shared/contiguous/forward.py",
+                "b12x/attention/_shared/contiguous/forward.py",
                 "Copyright (c) 2025, Jay Shah, Ganesh Bikshandi, Ying Zhang,",
             ),
         ),

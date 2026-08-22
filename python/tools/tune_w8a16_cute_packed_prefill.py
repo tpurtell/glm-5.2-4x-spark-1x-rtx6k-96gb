@@ -21,7 +21,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.cute.runtime import from_dlpack
 
-from sparkinfer._lib.intrinsics import (
+from b12x._lib.intrinsics import (
     bfloat2_mul,
     broadcast_f32_to_bfloat2,
     cp_async4_shared_global,
@@ -34,7 +34,7 @@ from sparkinfer._lib.intrinsics import (
     st_shared_v4_f32,
     st_shared_v4_u32,
 )
-from sparkinfer.moe._shared.kernels.w4a16.kernel import W4A16GemmKernel
+from b12x.moe._shared.kernels.w4a16.kernel import W4A16GemmKernel
 
 from tune_w8a16_projection import (
     CATALOG_PATH,
@@ -264,6 +264,10 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
             topk_weights_flat,
             c_tmp_f32_flat,
             locks_i32_flat,
+            # The upstream W4 kernel ABI now carries a trellis execution LUT.
+            # Packed W8 never dereferences it, so reuse an aligned resident
+            # tensor without widening this stable exported AOT interface.
+            scales_f32_flat,
             active_m,
         ).launch(
             grid=(grid_x, 1, 1),
@@ -619,6 +623,7 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
                 c_sh_rd,
                 c_sh_rd_delta,
                 block_valid_rows,
+                Int32(0),
                 store_iters,
             )
         else:
@@ -631,6 +636,7 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
                 c_sh_rd,
                 c_sh_rd_delta,
                 block_valid_rows,
+                Int32(0),
                 store_iters,
             )
 
@@ -1215,6 +1221,7 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
         topk_weights_flat: cute.Tensor,
         c_tmp_f32_flat: cute.Tensor,
         locks_i32_flat: cute.Tensor,
+        _trellis_lut_addr: Int64,
         smem_base: Int32,
         tid: Int32,
         route_block_idx: Int32,
@@ -1226,6 +1233,7 @@ class W8A16PackedGemmKernel(W4A16GemmKernel):
         reduce_slice_idx: Int32,
         lock_slot: Int32,
         active_size_m: Int32,
+        _dynamic_pair_override: cutlass.Constexpr[int],
     ):
         (
             global_scale_f32,
@@ -1512,6 +1520,7 @@ class W8A16GroupedMWarpKernel(W8A16PackedGemmKernel):
     def _run_persistent_gemm(
         self,
         a_bf16_flat: cute.Tensor,
+        _a_alt_bf16_flat: cute.Tensor,
         b_i32_flat: cute.Tensor,
         c_bf16_flat: cute.Tensor,
         scales_f32_flat: cute.Tensor,
@@ -1522,6 +1531,7 @@ class W8A16GroupedMWarpKernel(W8A16PackedGemmKernel):
         topk_weights_flat: cute.Tensor,
         c_tmp_f32_flat: cute.Tensor,
         locks_i32_flat: cute.Tensor,
+        _trellis_lut_addr: Int64,
         smem_base: Int32,
         tid: Int32,
         cta: Int32,
@@ -1929,6 +1939,7 @@ class W8A16GroupedMWarpKernel(W8A16PackedGemmKernel):
             c_sh_rd,
             c_sh_rd_delta,
             block_valid_rows,
+            Int32(0),
             store_iters,
         )
 

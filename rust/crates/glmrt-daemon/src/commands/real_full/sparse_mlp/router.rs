@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use glmrt_core::{
-    owner_for_expert, DType, PlacementPolicy, TensorCatalog, TensorInfo, EXPERT_HOSTS,
-};
+use glmrt_core::{DType, TensorCatalog, TensorInfo};
 use glmrt_loader::{load_tensor_bytes, read_tensor_bytes_into};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,7 +18,6 @@ use crate::commands::real_full::dense::math::bf16_bytes_from_f32;
 #[derive(Clone)]
 pub(in crate::commands::real_full) struct ScoredRoute {
     pub(in crate::commands::real_full) expert_id: usize,
-    pub(in crate::commands::real_full) owner: String,
     pub(in crate::commands::real_full) score: f32,
     pub(in crate::commands::real_full) corrected_score: f32,
     pub(in crate::commands::real_full) normalized_weight: f32,
@@ -1114,10 +1111,6 @@ fn routes_from_topk(
             weights.len()
         );
     }
-    let expert_hosts = EXPERT_HOSTS
-        .iter()
-        .map(|host| host.to_string())
-        .collect::<Vec<_>>();
     let mut routes = Vec::with_capacity(top_k);
     for rank in 0..top_k {
         let expert_id = indices[rank];
@@ -1127,8 +1120,6 @@ fn routes_from_topk(
                 correction_bias.len()
             )
         })?;
-        let owner = owner_for_expert(layer_id, expert_id, &expert_hosts, PlacementPolicy::Modulo)
-            .context("expert hosts are empty for real full router placement")?;
         let score = scores[rank];
         if !score.is_finite() {
             anyhow::bail!(
@@ -1149,7 +1140,6 @@ fn routes_from_topk(
         }
         routes.push(ScoredRoute {
             expert_id,
-            owner,
             score,
             corrected_score,
             normalized_weight,

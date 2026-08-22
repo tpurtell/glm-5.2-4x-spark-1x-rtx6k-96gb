@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use glmrt_core::{
-    DType, TensorCatalog, TensorInfo, GLM52_FIRST_K_DENSE_REPLACE, GLM52_HIDDEN_SIZE,
-    GLM52_NUM_HIDDEN_LAYERS, GLM52_TOP_K, GLM52_TOTAL_LAYERS_WITH_MTP,
+    owner_for_expert, DType, PlacementPolicy, TensorCatalog, TensorInfo, EXPERT_HOSTS,
+    GLM52_FIRST_K_DENSE_REPLACE, GLM52_HIDDEN_SIZE, GLM52_NUM_HIDDEN_LAYERS, GLM52_TOP_K,
+    GLM52_TOTAL_LAYERS_WITH_MTP,
 };
 use glmrt_loader::{load_tensor_bytes, read_tensor_bytes_into};
 
@@ -287,15 +288,18 @@ fn execute_real_sparse_mlp_shared_layer_from_hidden_with_plan_and_workspace(
         .routes
         .iter()
         .enumerate()
-        .map(|(rank, route)| RealFullSparseMoeRoute {
-            rank,
-            expert_id: route.expert_id,
-            owner: route.owner.clone(),
-            score: route.score,
-            corrected_score: route.corrected_score,
-            normalized_weight: route.normalized_weight,
+        .map(|(rank, route)| {
+            Ok(RealFullSparseMoeRoute {
+                rank,
+                expert_id: route.expert_id,
+                owner: diagnostic_route_owner(layer_id, route.expert_id)?,
+                score: route.score,
+                corrected_score: route.corrected_score,
+                normalized_weight: route.normalized_weight,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
+    let top_route_owner = diagnostic_route_owner(layer_id, top_route.expert_id)?;
     let passed = covers_full_top_k
         && scoring.router_weight_bytes_read > 0
         && scoring.router_bias_bytes_read > 0
@@ -314,7 +318,7 @@ fn execute_real_sparse_mlp_shared_layer_from_hidden_with_plan_and_workspace(
         layer_summary: RealFullExpertSparseMlpSharedChainLayerProbe {
             layer_id,
             expert_id: top_route.expert_id,
-            owner: top_route.owner,
+            owner: top_route_owner,
             score: top_route.score,
             corrected_score: top_route.corrected_score,
             routed_output_checksum,
@@ -348,6 +352,15 @@ fn execute_real_sparse_mlp_shared_layer_from_hidden_with_plan_and_workspace(
         covers_full_top_k,
         passed,
     })
+}
+
+fn diagnostic_route_owner(layer_id: usize, expert_id: usize) -> Result<String> {
+    let hosts = EXPERT_HOSTS
+        .iter()
+        .map(|host| (*host).to_owned())
+        .collect::<Vec<_>>();
+    owner_for_expert(layer_id, expert_id, &hosts, PlacementPolicy::Modulo)
+        .context("expert hosts are empty for sparse MLP diagnostic route placement")
 }
 
 fn sparse_residual_add_bf16(

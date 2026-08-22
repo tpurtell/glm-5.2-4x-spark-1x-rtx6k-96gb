@@ -94,6 +94,22 @@ fn kv_cache_compressed_nvfp4_uses_native_nvfp4_mla_and_bf16_rope_layout() {
     );
     assert_eq!(config.dsa_indexer_bytes_per_token(), 21 * 128 * 2);
     assert_eq!(config.bytes_per_token(), 39_072);
+    assert_eq!(config.main_mla_row_bytes(), Some(432));
+    assert_eq!(config.main_mla_page_bytes(64), Some(64 * 432));
+}
+
+#[test]
+fn compressed_main_mla_page_geometry_is_owned_by_each_format() {
+    let bf16 = KvCacheConfig::glm52_compressed_bf16(128);
+    let fp8 = KvCacheConfig::glm52_compressed_fp8(128);
+    let nvfp4 = KvCacheConfig::glm52_compressed_nvfp4(128);
+
+    assert_eq!(bf16.main_mla_row_bytes(), Some((512 + 64) * 2));
+    assert_eq!(bf16.main_mla_page_bytes(64), Some(64 * (512 + 64) * 2));
+    assert_eq!(fp8.main_mla_row_bytes(), Some(656));
+    assert_eq!(fp8.main_mla_page_bytes(64), Some(64 * 656));
+    assert_eq!(nvfp4.main_mla_row_bytes(), Some(432));
+    assert_eq!(nvfp4.main_mla_page_bytes(64), Some(64 * 432));
 }
 
 #[test]

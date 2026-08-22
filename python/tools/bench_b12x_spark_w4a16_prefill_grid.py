@@ -214,12 +214,12 @@ def main() -> None:
         if args.active_experts > args.weight_experts:
             parser.error("route-counts-json activates an unallocated expert")
 
-    from sparkinfer.moe._shared.kernels.w4a16.host import (
+    from b12x.moe._shared.kernels.w4a16.host import (
         max_packed_route_slots,
         packed_gemm_scratch_elements,
     )
-    from sparkinfer.moe._shared.kernels.w4a16 import kernel as w4a16_kernel
-    from sparkinfer.moe._shared.kernels.w4a16.kernel import (
+    from b12x.moe._shared.kernels.w4a16 import kernel as w4a16_kernel
+    from b12x.moe._shared.kernels.w4a16.kernel import (
         _cutlass_element_dtype,
         compile_w4a16_activation,
         compile_w4a16_fused_moe,
@@ -228,7 +228,7 @@ def main() -> None:
         cute,
         make_ptr,
     )
-    from sparkinfer.moe._shared.kernels.w4a16.prepare import (
+    from b12x.moe._shared.kernels.w4a16.prepare import (
         prepare_w4a16_modelopt_nvfp4_weights,
     )
 
