@@ -45,14 +45,14 @@
   <text x="72" y="181" class="small">includes validation and process dispatch</text>
   <text x="426" y="137" class="metric" fill="#46d7e8">51.46 s</text>
   <text x="426" y="162" class="metric-label">COORDINATOR STARTUP</text>
-  <text x="426" y="181" class="small">daemon validation through prewarm</text>
+  <text x="426" y="181" class="small">daemon validation through graph capture</text>
   <text x="780" y="137" class="metric" fill="#a978ff">24.87 s</text>
   <text x="780" y="162" class="metric-label">SPARK TARGETS READY</text>
   <text x="780" y="181" class="small">all four expert slabs loaded in parallel</text>
 
   <rect x="52" y="220" width="1096" height="350" rx="18" fill="#0b1829" stroke="#203a55" filter="url(#shadow)"/>
   <text x="78" y="258" class="section">CRITICAL PATH</text>
-  <text x="78" y="281" class="subtitle">Full Spark reload with warm runtime, catalog, and compiled-kernel caches.</text>
+  <text x="78" y="281" class="subtitle">Full Spark expert reload with cached runtime, catalog, and compiled kernels reused.</text>
 
   <rect x="250" y="325" width="59.3" height="72" rx="7" fill="#7c9cff" stroke="#91a8ff"/>
   <rect x="309.3" y="325" width="272.4" height="72" rx="7" fill="#a978ff" fill-opacity=".78" stroke="#bd9aff"/>
@@ -66,7 +66,7 @@
   <text x="445.5" y="353" class="bar" text-anchor="middle">Spark readiness wait</text>
   <text x="445.5" y="376" class="mono" text-anchor="middle">20.43 s</text>
   <text x="594.5" y="366" class="mono" text-anchor="middle">1.93</text>
-  <text x="752.2" y="353" class="bar" text-anchor="middle">main targeted prewarm</text>
+  <text x="752.2" y="353" class="bar" text-anchor="middle">targeted graph capture</text>
   <text x="752.2" y="376" class="mono" text-anchor="middle">21.72 s</text>
   <text x="916.5" y="366" class="mono" text-anchor="middle">2.95</text>
   <text x="961.1" y="353" class="bar" text-anchor="middle">API bind</text>
@@ -88,8 +88,8 @@
   </g>
 
   <g class="small">
-    <rect x="78" y="522" width="10" height="10" rx="2" fill="#ffc35a"/><text x="96" y="531">expert warmup + executor assembly</text>
-    <rect x="350" y="522" width="10" height="10" rx="2" fill="#32b985"/><text x="368" y="531">batched dSpark prewarm</text>
+    <rect x="78" y="522" width="10" height="10" rx="2" fill="#ffc35a"/><text x="96" y="531">expert initialization + executor assembly</text>
+    <rect x="350" y="522" width="10" height="10" rx="2" fill="#32b985"/><text x="368" y="531">batched dSpark graph capture</text>
     <rect x="590" y="522" width="10" height="10" rx="2" fill="#46d7e8"/><text x="608" y="531">launcher validation and API bind</text>
   </g>
 

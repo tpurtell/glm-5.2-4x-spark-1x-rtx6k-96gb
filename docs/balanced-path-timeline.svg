@@ -11,18 +11,18 @@
 </defs>
 <rect width="1920" height="1450" fill="#07111f"/>
 <text x="64" y="58" class="title" text-anchor="start">GLMRT BALANCED PATH · TIMELINE</text>
-<text x="64" y="86" class="subtitle" text-anchor="start">Clean production envelope above; synchronized attribution below. Repeated layer work is collapsed.</text>
+<text x="64" y="86" class="subtitle" text-anchor="start">Fresh NVFP4 qualification above; retained synchronized path attribution below. Repeated layer work is collapsed.</text>
 <rect x="64" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
-<text x="81" y="139" class="metric" text-anchor="start" fill="#56d69c">27.87 TPS</text>
+<text x="81" y="139" class="metric" text-anchor="start" fill="#56d69c">26.63 TPS</text>
 <text x="81" y="161" class="metric-label" text-anchor="start">5× WEIGHTED WALL</text>
 <rect x="327" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
-<text x="344" y="139" class="metric" text-anchor="start" fill="#a978ff">2.643</text>
+<text x="344" y="139" class="metric" text-anchor="start" fill="#a978ff">2.520</text>
 <text x="344" y="161" class="metric-label" text-anchor="start">TOKENS / SPEC CYCLE</text>
 <rect x="590" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
-<text x="607" y="139" class="metric" text-anchor="start" fill="#46d7e8">4.793 s</text>
+<text x="607" y="139" class="metric" text-anchor="start" fill="#46d7e8">4.726 s</text>
 <text x="607" y="161" class="metric-label" text-anchor="start">FRESH 8K EXTERNAL TTFT</text>
 <rect x="853" y="112" width="300" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
-<text x="870" y="139" class="metric" text-anchor="start" fill="#5d8cff">1715 TPS</text>
+<text x="870" y="139" class="metric" text-anchor="start" fill="#5d8cff">1736 TPS</text>
 <text x="870" y="161" class="metric-label" text-anchor="start">FRESH 8K EXTERNAL PROMPT</text>
 <rect x="64" y="215" width="1792" height="315" rx="18" fill="#0d1b2d" fill-opacity="1.0" stroke="#203a55" stroke-width="1.2"/>
 <text x="92" y="252" class="section" text-anchor="start">A · CLEAN ADAPTIVE TARGET-CYCLE ENVELOPE</text>
@@ -186,5 +186,5 @@
 <text x="92" y="1350" class="small" text-anchor="start">Diagnostic: 5.841 s, 1405 TPS · median layer/chunk attention 6.26 ms · sparse dispatch 40.51 ms. These synchronized work clocks overlap and are not additive.</text>
 <rect x="64" y="1402" width="1792" height="1" rx="0" fill="#203a55" fill-opacity="1.0" stroke="#203a55" stroke-width="1.2"/>
 <text x="64" y="1430" class="subtitle" text-anchor="start">Production numbers: uninstrumented complete requests. Diagnostic numbers: verbose host clocks + CUDA events for stage attribution only.</text>
-<text x="1856" y="1430" class="mono" text-anchor="end">commit d5a0a367</text>
+<text x="1856" y="1430" class="mono" text-anchor="end">v6 public release · retained attribution</text>
 </svg>

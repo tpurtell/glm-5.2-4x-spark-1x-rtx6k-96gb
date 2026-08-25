@@ -11,15 +11,15 @@
 </defs>
 <rect width="1920" height="1420" fill="#07111f"/>
 <text x="64" y="58" class="title" text-anchor="start">GLMRT BALANCED PATH</text>
-<text x="64" y="86" class="subtitle" text-anchor="start">Information flow, ownership, residency, kernels, and measured steady-state timing</text>
+<text x="64" y="86" class="subtitle" text-anchor="start">Information flow, ownership, residency, kernels, and fresh NVFP4 headline timing</text>
 <rect x="64" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
-<text x="81" y="139" class="metric" text-anchor="start" fill="#56d69c">27.87 TPS</text>
+<text x="81" y="139" class="metric" text-anchor="start" fill="#56d69c">26.63 TPS</text>
 <text x="81" y="161" class="metric-label" text-anchor="start">WEIGHTED ADAPTIVE DECODE</text>
 <rect x="327" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
-<text x="344" y="139" class="metric" text-anchor="start" fill="#a978ff">78.6%</text>
+<text x="344" y="139" class="metric" text-anchor="start" fill="#a978ff">75.2%</text>
 <text x="344" y="161" class="metric-label" text-anchor="start">DRAFT ACCEPTANCE</text>
 <rect x="590" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
-<text x="607" y="139" class="metric" text-anchor="start" fill="#46d7e8">1715 TPS</text>
+<text x="607" y="139" class="metric" text-anchor="start" fill="#46d7e8">1736 TPS</text>
 <text x="607" y="161" class="metric-label" text-anchor="start">FRESH 8K EXTERNAL</text>
 <rect x="853" y="112" width="245" height="66" rx="13" fill="#0b192a" fill-opacity="1.0" stroke="#ffc35a" stroke-width="1.2"/>
 <text x="870" y="139" class="metric" text-anchor="start" fill="#ffc35a">M = 1…8</text>
@@ -103,7 +103,7 @@
 <text x="907" y="1097" class="body" text-anchor="start">greedy or sampled target rows</text>
 <text x="907" y="1115" class="body" text-anchor="start">accept matching draft prefix; emit 1…M tokens</text>
 <text x="907" y="1133" class="body" text-anchor="start">publish target radix pages + reusable dSpark tail</text>
-<text x="907" y="1151" class="body" text-anchor="start">measured 2.643 emitted/spec cycle</text>
+<text x="907" y="1151" class="body" text-anchor="start">measured 2.520 emitted/spec cycle</text>
 <path d="M565,980 C565,1000 625,1000 625,1025" fill="none" stroke="#a978ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
 <path d="M852,1124 L885,1124" fill="none" stroke="#46d7e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
 <path d="M1125,1025 C1125,995 1010,996 1010,980" fill="none" stroke="#56d69c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
@@ -118,29 +118,29 @@
 <rect x="1472" y="375" width="6" height="150" rx="3" fill="#46d7e8" fill-opacity="1.0" stroke="#46d7e8" stroke-width="1.2"/>
 <text x="1494" y="404" class="box-title" text-anchor="start">spark-0 · ostrich</text>
 <text x="1494" y="429" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
-<text x="1494" y="447" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
-<text x="1494" y="465" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="447" class="body" text-anchor="start">device-resident NVFP4 or EXL3 K3 weights</text>
+<text x="1494" y="465" class="body" text-anchor="start">SparkInfer/CuTe grouped kernels</text>
 <text x="1494" y="483" class="body" text-anchor="start">expert-local FP32 accumulation</text>
 <rect x="1472" y="565" width="356" height="150" rx="14" fill="#171d35" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
 <rect x="1472" y="565" width="6" height="150" rx="3" fill="#5d8cff" fill-opacity="1.0" stroke="#5d8cff" stroke-width="1.2"/>
 <text x="1494" y="594" class="box-title" text-anchor="start">spark-1 · dodo</text>
 <text x="1494" y="619" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
-<text x="1494" y="637" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
-<text x="1494" y="655" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="637" class="body" text-anchor="start">device-resident NVFP4 or EXL3 K3 weights</text>
+<text x="1494" y="655" class="body" text-anchor="start">SparkInfer/CuTe grouped kernels</text>
 <text x="1494" y="673" class="body" text-anchor="start">expert-local FP32 accumulation</text>
 <rect x="1472" y="755" width="356" height="150" rx="14" fill="#171d35" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
 <rect x="1472" y="755" width="6" height="150" rx="3" fill="#a978ff" fill-opacity="1.0" stroke="#a978ff" stroke-width="1.2"/>
 <text x="1494" y="784" class="box-title" text-anchor="start">spark-2 · emu</text>
 <text x="1494" y="809" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
-<text x="1494" y="827" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
-<text x="1494" y="845" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="827" class="body" text-anchor="start">device-resident NVFP4 or EXL3 K3 weights</text>
+<text x="1494" y="845" class="body" text-anchor="start">SparkInfer/CuTe grouped kernels</text>
 <text x="1494" y="863" class="body" text-anchor="start">expert-local FP32 accumulation</text>
 <rect x="1472" y="945" width="356" height="150" rx="14" fill="#171d35" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
 <rect x="1472" y="945" width="6" height="150" rx="3" fill="#56d69c" fill-opacity="1.0" stroke="#56d69c" stroke-width="1.2"/>
 <text x="1494" y="974" class="box-title" text-anchor="start">spark-3 · kiwi</text>
 <text x="1494" y="999" class="body" text-anchor="start">64 experts/layer by modulo ownership</text>
-<text x="1494" y="1017" class="body" text-anchor="start">device-resident packed NVFP4 weights</text>
-<text x="1494" y="1035" class="body" text-anchor="start">B12X/CuTe W4A16 grouped AOT</text>
+<text x="1494" y="1017" class="body" text-anchor="start">device-resident NVFP4 or EXL3 K3 weights</text>
+<text x="1494" y="1035" class="body" text-anchor="start">SparkInfer/CuTe grouped kernels</text>
 <text x="1494" y="1053" class="body" text-anchor="start">expert-local FP32 accumulation</text>
 <path d="M1301,879 C1390,879 1370,545 1472,545" fill="none" stroke="#a978ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="1.0" marker-end="url(#arrow)"/>
 <text x="1395" y="706" class="small" text-anchor="middle" fill="#a978ff">top-8 routes</text>
@@ -151,5 +151,5 @@
 <text x="1492" y="1200" class="small" text-anchor="start">small rows: direct BF16 response</text>
 <text x="1492" y="1218" class="small" text-anchor="start">≥16 rows: FP8 Spark-RDMA → BF16 owner</text>
 <text x="64" y="1364" class="subtitle" text-anchor="start">Measured on the maintained source tree. Headline timing is uninstrumented; synchronized stage timing is shown in the companion timeline.</text>
-<text x="1856" y="1364" class="mono" text-anchor="end">commit d5a0a367</text>
+<text x="1856" y="1364" class="mono" text-anchor="end">v6 public release</text>
 </svg>
