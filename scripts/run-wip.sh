@@ -460,8 +460,13 @@ check_model_cache_local() {
 
 echo "== checking model snapshots =="
 check_model_cache_local "$RELEASE_MODEL_ID"
+coordinator_model_root="$hf_home/hub/models--${RELEASE_MODEL_ID//\//--}"
+coordinator_model_revision="$(<"$coordinator_model_root/refs/main")"
+[[ "$coordinator_model_revision" == "$expert_model_revision" ]] ||
+  release_die "coordinator selected $RELEASE_MODEL_ID@$coordinator_model_revision; Sparks selected @$expert_model_revision"
 [[ "$SPECULATION" != dspark ]] ||
   check_model_cache_local "$RELEASE_DSPARK_MODEL_ID" "$RELEASE_DSPARK_REVISION"
+echo "  selected text-model snapshot is identical on all five hosts: $coordinator_model_revision"
 report_wip_startup_phase model-snapshots
 
 echo "== checking launch headroom =="
@@ -495,8 +500,17 @@ for host in "$SPARK_0_HOST" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
     >"$resource_check_dir/$host.out" 2>"$resource_check_dir/$host.err" <<'REMOTE' &
 set -euo pipefail
 container="$1"
-available_kib="$(awk '/MemAvailable:/{print $2}' /proc/meminfo)"
 min_kib=$((105 * 1024 * 1024))
+# A stopped CUDA process can remain charged to unified memory briefly while
+# the driver tears down its UVM mappings.  A configuration-changing --restart
+# used to inspect that transient state once and falsely reject an otherwise
+# healthy Spark.  Poll the same hard gate; do not weaken it.
+available_kib=0
+for _ in $(seq 1 100); do
+  available_kib="$(awk '/MemAvailable:/{print $2}' /proc/meminfo)"
+  ((available_kib >= min_kib)) && break
+  sleep 0.1
+done
 ((available_kib >= min_kib)) || { echo "only $((available_kib / 1024)) MiB unified memory is available" >&2; exit 2; }
 gpu_line="$(docker exec "$container" nvidia-smi --id=0 --query-gpu=memory.total,memory.free --format=csv,noheader,nounits)"
 echo "RAM $((available_kib / 1024)) MiB available; GPU $gpu_line"
@@ -610,6 +624,42 @@ if [[ -n "${GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES:-}" ]]; then
   echo "GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES=$GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES" \
     >>"$env_file"
 fi
+# Timing switches are intentionally launcher-scoped: they are useful for a
+# WIP A/B, but must not become part of the frozen production profile.  Spark
+# switches are inherited by phase0-spark-tcp-bench.sh; mirror the coordinator
+# switches into its generated environment so one launch profiles both ends of
+# the same request.
+for timing_env in \
+  GLMRT_REAL_FULL_REQUEST_TIMING \
+  GLMRT_REAL_FULL_SCHEDULER_TIMING \
+  GLMRT_REAL_FULL_SCHEDULER_SUMMARY_TIMING \
+  GLMRT_REAL_FULL_SPARSE_TCP_STAGE_TIMING \
+  GLMRT_REAL_FULL_ATTENTION_CUDA_TIMING \
+  GLMRT_PROTOCOL_V2_TCP_TIMING \
+  GLMRT_REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING \
+  GLMRT_REAL_FULL_NVFP4_ROUTE_TIMING \
+  GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_EVENT_TIMING
+do
+  if [[ -n "${!timing_env:-}" ]]; then
+    printf '%s=%s\n' "$timing_env" "${!timing_env}" >>"$env_file"
+  fi
+done
+if [[ -n "${GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS:-}" ]]; then
+  echo "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS=$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID:-}" ]]; then
+  [[ "$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] ||
+    release_die "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID must contain 1..128 alphanumeric, '.', '_', or '-' characters"
+  echo "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID=$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE:-}" ]]; then
+  [[ "$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE" =~ ^/[A-Za-z0-9_./-]{1,256}$ ]] ||
+    release_die "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE must be a simple absolute path"
+  echo "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE=$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE" \
+    >>"$env_file"
+fi
 
 echo "== starting coordinator process in $coordinator_container =="
 if ! docker exec -d --env-file "$env_file" -w "$coordinator_workspace" \
@@ -657,6 +707,20 @@ until curl -fsS "http://127.0.0.1:${ADDR##*:}/v1/models" >/dev/null 2>&1; do
 done
 
 curl -fsS "http://127.0.0.1:${ADDR##*:}/v1/models" >"$state_dir/models.json"
+deployment_evidence="$state_dir/deployment.json"
+python3 "$repo_root/scripts/write-wip-deployment-evidence.py" \
+  --model-id "$RELEASE_MODEL_ID" \
+  --model-revision "$coordinator_model_revision" \
+  --slot "$slot" --profile "$PROFILE" --speculation "$SPECULATION" \
+  --power-limit-w "$coordinator_power_limit_watts" \
+  --coordinator-slot-fingerprint "$coordinator_slot_fingerprint" \
+  --expert-slot-fingerprint "$expert_slot_fingerprint" \
+  --expert-runtime-fingerprint "$expert_runtime_fingerprint" \
+  --deployment-fingerprint "$deployment_fingerprint" \
+  --engine-identity "$coordinator_engine_commit" \
+  --sparkinfer-revision "$coordinator_sparkinfer_commit" \
+  --resolved-profile "$resolved_json" --config "$config" \
+  --output "$deployment_evidence" >/dev/null
 report_wip_startup_phase api-ready
 echo "GLMRT WIP server is ready at http://127.0.0.1:${ADDR##*:}/v1/"
 echo "  slot:        $slot"
@@ -668,3 +732,4 @@ echo "  fixed draft: ${DSPARK_FIXED_DRAFTS:-adaptive}"
 echo "  concurrency: $CONCURRENCY"
 echo "  containers:  persistent $coordinator_container + four $spark_container"
 echo "  Spark reuse: $([[ "$reuse_spark_experts" == 1 ]] && echo yes || echo no)"
+echo "  evidence:    $deployment_evidence"

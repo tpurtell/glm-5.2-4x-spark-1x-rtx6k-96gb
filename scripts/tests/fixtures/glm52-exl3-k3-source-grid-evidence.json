@@ -1,0 +1,647 @@
+{
+  "cases": [
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "benchmark_iterations": 2000,
+        "benchmark_rounds": 15,
+        "blocks_per_sm": 1,
+        "candidate_comparison": {
+          "capacity_rows": 1,
+          "delta_percent": 1.6780192350673406,
+          "grid_x": 48,
+          "median_ms": 0.12102819061279296,
+          "minimum_ms": 0.1203927001953125,
+          "route_block_rows": 8,
+          "samples_ms": [
+            0.1212802734375,
+            0.12083448028564453,
+            0.12104342651367188,
+            0.12093761444091797,
+            0.1218304672241211,
+            0.12045532989501953,
+            0.12051455688476563,
+            0.1203927001953125,
+            0.12056928253173828,
+            0.1212523193359375,
+            0.1215296173095703,
+            0.12102819061279296,
+            0.12075303649902344,
+            0.12139380645751953,
+            0.12145458984375
+          ]
+        },
+        "capacity_rows": 1,
+        "cosine": 1,
+        "fc1_tile": [
+          64,
+          256
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 44,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "median_ms": 0.11903083038330078,
+        "minimum_ms": 0.1186222915649414,
+        "packed_route_count": 64,
+        "registers_per_thread": 255,
+        "relative_l2": 0,
+        "route_block_rows": 8,
+        "rows": 1,
+        "samples_ms": [
+          0.12129694366455078,
+          0.1189129409790039,
+          0.11922345733642578,
+          0.11898825836181641,
+          0.1188196029663086,
+          0.11932630157470703,
+          0.11879946899414062,
+          0.1186222915649414,
+          0.11874584197998046,
+          0.11976302337646484,
+          0.11921504211425782,
+          0.12021593475341796,
+          0.11915673828125,
+          0.11903083038330078,
+          0.11894624328613282
+        ],
+        "source_scale": 0.002
+      },
+      "label": "m1_grid44_vs48_final",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-source-tuned-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "180e4c81f583caf353f01129fa2b6368c8f84f48b2601a5e83913b0800408235"
+      },
+      "route_fixture": null,
+      "source_report_sha256": "f17d2fbfb32cc3d0bffb63c9cc38f446c9a579e269868a245d338c6d109241cf",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    },
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "benchmark_iterations": 100,
+        "benchmark_rounds": 9,
+        "blocks_per_sm": 1,
+        "candidate_comparison": {
+          "capacity_rows": 9,
+          "delta_percent": -1.9297802986708468,
+          "grid_x": 40,
+          "median_ms": 0.9979280090332031,
+          "minimum_ms": 0.9906288146972656,
+          "route_block_rows": 8,
+          "samples_ms": [
+            1.0109967803955078,
+            1.0102428436279296,
+            0.9977161407470703,
+            0.9910358428955078,
+            0.999056625366211,
+            0.9911283111572265,
+            0.9979280090332031,
+            0.9906288146972656,
+            1.002954864501953
+          ]
+        },
+        "capacity_rows": 9,
+        "cosine": 0.9999998807907104,
+        "fc1_tile": [
+          128,
+          128
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 48,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "median_ms": 1.0175647735595703,
+        "minimum_ms": 1.0100662231445312,
+        "packed_route_count": 480,
+        "registers_per_thread": 254,
+        "relative_l2": 0,
+        "route_block_rows": 8,
+        "rows": 9,
+        "samples_ms": [
+          1.0333519744873048,
+          1.0175647735595703,
+          1.0100662231445312,
+          1.0349683380126953,
+          1.0111644744873047,
+          1.024581756591797,
+          1.016505584716797,
+          1.0247612762451173,
+          1.0115689849853515
+        ],
+        "source_scale": 0.002
+      },
+      "label": "m9_random_grid40_repeat",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-grid-profile-max-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "e7ada5d526075f0f9b72e420a1f092d8da8ea49f85831d797f5cf4aee6d3417c"
+      },
+      "route_fixture": null,
+      "source_report_sha256": "2a616a8b8b8ba60dcacc2dd9436b6b6bba6d9e119dd3f414b41ee24352efa1d9",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    },
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "benchmark_iterations": 100,
+        "benchmark_rounds": 9,
+        "blocks_per_sm": 1,
+        "candidate_comparison": {
+          "capacity_rows": 9,
+          "delta_percent": 19.47284005560972,
+          "grid_x": 40,
+          "median_ms": 0.2414739227294922,
+          "minimum_ms": 0.2327507209777832,
+          "route_block_rows": 8,
+          "samples_ms": [
+            0.24341823577880858,
+            0.2417398452758789,
+            0.2327507209777832,
+            0.24394847869873046,
+            0.23434463500976563,
+            0.2414739227294922,
+            0.24264768600463868,
+            0.24042400360107422,
+            0.23942399978637696
+          ]
+        },
+        "capacity_rows": 9,
+        "cosine": 0.9999999403953552,
+        "fc1_tile": [
+          128,
+          128
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 48,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "median_ms": 0.20211616516113282,
+        "minimum_ms": 0.19537727355957032,
+        "packed_route_count": 128,
+        "registers_per_thread": 254,
+        "relative_l2": 0,
+        "route_block_rows": 8,
+        "rows": 9,
+        "samples_ms": [
+          0.19537727355957032,
+          0.20411359786987304,
+          0.2048464012145996,
+          0.1965990447998047,
+          0.2046063995361328,
+          0.19740959167480468,
+          0.20211616516113282,
+          0.19737888336181642,
+          0.20525375366210938
+        ],
+        "source_scale": 0.002
+      },
+      "label": "m9_high_reuse_grid40",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-grid-profile-max-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "e7ada5d526075f0f9b72e420a1f092d8da8ea49f85831d797f5cf4aee6d3417c"
+      },
+      "route_fixture": {
+        "capture_id": "qualification-v1",
+        "kind": "content-bound-route-profile-sample",
+        "profile": {
+          "bytes": 2260,
+          "path": "/tmp/glmrt-exl3-route-profile-smoke.json",
+          "sha256": "2430ccf320829eeb52179ff37ee252f95d8bd3f8f9da3a15eb9509e91fedbf65"
+        },
+        "profile_report_sha256": "0e42545f65fec637040fbbf64e5d65317e8cfedbb16984a4964a9a60ea468d91",
+        "sample": {
+          "expert_route_counts": [
+            [
+              0,
+              9
+            ],
+            [
+              1,
+              9
+            ],
+            [
+              2,
+              9
+            ],
+            [
+              3,
+              9
+            ],
+            [
+              4,
+              9
+            ],
+            [
+              5,
+              9
+            ],
+            [
+              6,
+              9
+            ],
+            [
+              7,
+              9
+            ]
+          ],
+          "host_lines": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "hosts": [
+            "spark0",
+            "spark1",
+            "spark2",
+            "spark3"
+          ],
+          "layer_id": 3,
+          "log": "smoke",
+          "request_id_base": 1030,
+          "routes": 72,
+          "rows": 9,
+          "source_rows": [
+            [
+              "DecodeStep",
+              9
+            ]
+          ],
+          "transport": "verbs-host"
+        },
+        "sample_index": 0
+      },
+      "source_report_sha256": "5fb3332442099bc4b4dd3b13f9d65a945e6e6142cc34136156477bd3426b782e",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    },
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "benchmark_iterations": 50,
+        "benchmark_rounds": 3,
+        "blocks_per_sm": 1,
+        "candidate_comparison": {
+          "capacity_rows": 9,
+          "delta_percent": 19.498963829051785,
+          "grid_x": 32,
+          "median_ms": 0.23995391845703126,
+          "minimum_ms": 0.23971391677856446,
+          "route_block_rows": 8,
+          "samples_ms": [
+            0.23971391677856446,
+            0.2551391983032227,
+            0.23995391845703126
+          ]
+        },
+        "capacity_rows": 9,
+        "cosine": 0.9999999403953552,
+        "fc1_tile": [
+          128,
+          128
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 48,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "median_ms": 0.20079999923706054,
+        "minimum_ms": 0.20028928756713868,
+        "packed_route_count": 128,
+        "registers_per_thread": 254,
+        "relative_l2": 0,
+        "route_block_rows": 8,
+        "rows": 9,
+        "samples_ms": [
+          0.20079999923706054,
+          0.20028928756713868,
+          0.2154195213317871
+        ],
+        "source_scale": 0.002
+      },
+      "label": "m9_high_reuse_grid32",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-grid-profile-max-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "e7ada5d526075f0f9b72e420a1f092d8da8ea49f85831d797f5cf4aee6d3417c"
+      },
+      "route_fixture": {
+        "capture_id": "qualification-v1",
+        "kind": "content-bound-route-profile-sample",
+        "profile": {
+          "bytes": 2260,
+          "path": "/tmp/glmrt-exl3-route-profile-smoke.json",
+          "sha256": "2430ccf320829eeb52179ff37ee252f95d8bd3f8f9da3a15eb9509e91fedbf65"
+        },
+        "profile_report_sha256": "0e42545f65fec637040fbbf64e5d65317e8cfedbb16984a4964a9a60ea468d91",
+        "sample": {
+          "expert_route_counts": [
+            [
+              0,
+              9
+            ],
+            [
+              1,
+              9
+            ],
+            [
+              2,
+              9
+            ],
+            [
+              3,
+              9
+            ],
+            [
+              4,
+              9
+            ],
+            [
+              5,
+              9
+            ],
+            [
+              6,
+              9
+            ],
+            [
+              7,
+              9
+            ]
+          ],
+          "host_lines": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "hosts": [
+            "spark0",
+            "spark1",
+            "spark2",
+            "spark3"
+          ],
+          "layer_id": 3,
+          "log": "smoke",
+          "request_id_base": 1030,
+          "routes": 72,
+          "rows": 9,
+          "source_rows": [
+            [
+              "DecodeStep",
+              9
+            ]
+          ],
+          "transport": "verbs-host"
+        },
+        "sample_index": 0
+      },
+      "source_report_sha256": "52938fa31ce0f54b441c1e3f7cd145c058741b32431bdba84e0c43ad65be26ec",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    },
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "benchmark_iterations": 20,
+        "benchmark_rounds": 5,
+        "blocks_per_sm": 1,
+        "capacity_rows": 2048,
+        "cosine": 0.9999999403953552,
+        "fc1_tile": [
+          64,
+          256
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 48,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "median_ms": 10.047137451171874,
+        "minimum_ms": 9.972038269042969,
+        "packed_route_count": 16384,
+        "registers_per_thread": 244,
+        "relative_l2": 0,
+        "route_block_rows": 64,
+        "rows": 2048,
+        "samples_ms": [
+          10.070265960693359,
+          10.047137451171874,
+          10.044545745849609,
+          9.972038269042969,
+          10.057936096191407
+        ],
+        "source_scale": 0.002
+      },
+      "label": "m2048_high_reuse",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-grid-profile-max-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "e7ada5d526075f0f9b72e420a1f092d8da8ea49f85831d797f5cf4aee6d3417c"
+      },
+      "route_fixture": {
+        "bytes": 1307,
+        "path": "/tmp/glm52-exl3-route-counts-m2048-high-reuse.json",
+        "sha256": "da0584df8523c8070897a1f43a2463feca17a8522ea83264de3ad296518a892b"
+      },
+      "source_report_sha256": "2321a855a39d363be2883921d9626b7c0a732bb03031205c8dcd7b72aac117a5",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    },
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "benchmark_iterations": 100,
+        "benchmark_rounds": 7,
+        "blocks_per_sm": 1,
+        "candidate_comparison": {
+          "capacity_rows": 2064,
+          "delta_percent": -0.06257497100948806,
+          "grid_x": null,
+          "median_ms": 10.024659423828124,
+          "minimum_ms": 9.97718017578125,
+          "route_block_rows": 64,
+          "samples_ms": [
+            10.020792236328125,
+            9.97718017578125,
+            9.997348022460937,
+            10.038563842773437,
+            10.026814575195312,
+            10.039759521484376,
+            10.024659423828124
+          ]
+        },
+        "capacity_rows": 2048,
+        "cosine": 0.9999999403953552,
+        "fc1_tile": [
+          64,
+          256
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 48,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "median_ms": 10.030936279296874,
+        "minimum_ms": 9.984786987304688,
+        "packed_route_count": 16384,
+        "registers_per_thread": 244,
+        "relative_l2": 0,
+        "route_block_rows": 64,
+        "rows": 2048,
+        "samples_ms": [
+          10.000374145507813,
+          9.984786987304688,
+          10.030936279296874,
+          10.026644287109375,
+          10.03968994140625,
+          10.043441772460938,
+          10.056549682617188
+        ],
+        "source_scale": 0.002
+      },
+      "label": "m2048_vs_capacity2064_high_reuse",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-grid-profile-max-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "e7ada5d526075f0f9b72e420a1f092d8da8ea49f85831d797f5cf4aee6d3417c"
+      },
+      "route_fixture": {
+        "bytes": 1307,
+        "path": "/tmp/glm52-exl3-route-counts-m2048-high-reuse.json",
+        "sha256": "da0584df8523c8070897a1f43a2463feca17a8522ea83264de3ad296518a892b"
+      },
+      "source_report_sha256": "bfc2d5e062e228c47e1ee57097b545e8855f75cf1a0819600c9ee8ec43d9b65e",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    },
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "blocks_per_sm": 1,
+        "capacity_rows": 2064,
+        "cosine": 1,
+        "fc1_tile": [
+          64,
+          256
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 48,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "packed_route_count": 23936,
+        "registers_per_thread": 244,
+        "relative_l2": 0,
+        "route_block_rows": 64,
+        "rows": 2049,
+        "source_scale": 0.002
+      },
+      "label": "m2049_boundary",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-grid-profile-max-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "e7ada5d526075f0f9b72e420a1f092d8da8ea49f85831d797f5cf4aee6d3417c"
+      },
+      "route_fixture": null,
+      "source_report_sha256": "6ac0aaa51e5187409b7de20242763711cb38cfa0f94002a7ed5d6da09baed9f4",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    },
+    {
+      "case": {
+        "automatic_grid_x": 48,
+        "benchmark_iterations": 20,
+        "benchmark_rounds": 5,
+        "blocks_per_sm": 1,
+        "capacity_rows": 2064,
+        "cosine": 1.0000001192092896,
+        "fc1_tile": [
+          64,
+          256
+        ],
+        "fc2_tile": [
+          64,
+          256
+        ],
+        "grid_x": 48,
+        "local_memory_bytes": 0,
+        "max_abs": 0,
+        "median_ms": 9.986796569824218,
+        "minimum_ms": 9.962417602539062,
+        "packed_route_count": 16896,
+        "registers_per_thread": 244,
+        "relative_l2": 0,
+        "route_block_rows": 64,
+        "rows": 2064,
+        "samples_ms": [
+          10.030264282226563,
+          9.986796569824218,
+          9.962417602539062,
+          9.98783187866211,
+          9.978628540039063
+        ],
+        "source_scale": 0.002
+      },
+      "label": "m2064_high_reuse",
+      "native_library": {
+        "bytes": 13809872,
+        "path": "/wip/slots/exl3-grid-profile-max-aot/spark-expert/workspace/.glmrt-wip/libglmrt_native.so",
+        "sha256": "e7ada5d526075f0f9b72e420a1f092d8da8ea49f85831d797f5cf4aee6d3417c"
+      },
+      "route_fixture": {
+        "bytes": 1307,
+        "path": "/tmp/glm52-exl3-route-counts-m2064-high-reuse.json",
+        "sha256": "32430b52f210493929b6fa1a58a2644668c03fa00f5c37a40b909fa6b058e052"
+      },
+      "source_report_sha256": "8e2e124169f7a1d595f5a0ae5ea5ec4a01f6fc5cea21f625591dc79728f4bcdb",
+      "weight_source": {
+        "kind": "deterministic-synthetic",
+        "seed": 20260823
+      }
+    }
+  ],
+  "device": {
+    "compute_capability": "12.1",
+    "name": "NVIDIA GB10"
+  },
+  "schema": "glmrt-glm52-exl3-k3-source-grid-evidence-v1",
+  "sparkinfer_revision": "28e083482fd18ca3ce0e2553cd533102be85552f",
+  "status": "accepted"
+}

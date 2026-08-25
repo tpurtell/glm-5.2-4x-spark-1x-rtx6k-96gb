@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
+import re
 import statistics
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -56,7 +59,7 @@ CASES = {
         "exposition",
         "Explain virtual memory to a junior programmer in five concise bullet points, "
         "including paging, page faults, and the role of the TLB.",
-        224,
+        384,
     ),
     "structured-json": PromptCase(
         "structured-output",
@@ -69,7 +72,7 @@ CASES = {
         "multilingual",
         "請用繁體中文，以四個簡短條列解釋什麼是寫入時複製（copy-on-write），"
         "並包含一個行程 fork 後修改記憶體頁面的例子。",
-        192,
+        384,
     ),
 }
 
@@ -97,6 +100,198 @@ CASES.update(
     }
 )
 REACHABILITY_CASE_IDS = ("count", "repeat", "syntax-rust", "syntax-python")
+QUALITY_CONTRACT_VERSION = "glmrt-semantic-decode-contract-v2"
+
+
+def _python_block(content: str) -> tuple[str | None, list[str]]:
+    match = re.fullmatch(
+        r"\s*```(?:python|py)?\s*\n(?P<code>.*)\n```\s*",
+        content,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if match is None:
+        return None, ["response is not exactly one Python code block"]
+    return match.group("code"), []
+
+
+def validate_case_content(case_id: str, content: str) -> dict[str, Any]:
+    """Check prompt-visible contracts without executing generated content."""
+
+    issues: list[str] = []
+    stripped = content.strip()
+    if not stripped:
+        issues.append("response is empty")
+    elif case_id == "count":
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if lines != [str(value) for value in range(1, 65)]:
+            issues.append("response is not exactly the integers 1 through 64")
+    elif case_id == "repeat":
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if lines != ["red green blue"] * 24:
+            issues.append("response is not exactly 24 requested repetition lines")
+    elif case_id == "code":
+        code, block_issues = _python_block(content)
+        issues.extend(block_issues)
+        if code is not None:
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                issues.append("Python code does not parse")
+            else:
+                functions = [
+                    node
+                    for node in tree.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "merge_intervals"
+                ]
+                if len(functions) != 1:
+                    issues.append("merge_intervals function is missing or duplicated")
+                else:
+                    function = functions[0]
+                    if (
+                        not function.args.args
+                        or function.args.args[0].annotation is None
+                        or function.returns is None
+                    ):
+                        issues.append("merge_intervals lacks requested type hints")
+                    if ast.get_docstring(function) is None:
+                        issues.append("merge_intervals lacks a docstring")
+                if sum(isinstance(node, ast.Assert) for node in ast.walk(tree)) < 3:
+                    issues.append("fewer than three assert examples were provided")
+    elif case_id == "math":
+        normalized = stripped.replace(",", "")
+        if re.search(r"(?<![0-9])(?:\$\s*)?194\.4(?:0)?(?![0-9])", normalized) is None:
+            issues.append("response does not contain the correct final price 194.40")
+        if (
+            "240" not in normalized
+            or not any(token in normalized for token in ("25", "75", "0.75", ".75"))
+            or not any(token in normalized for token in ("8", "1.08"))
+        ):
+            issues.append("response does not show the requested calculation inputs")
+    elif case_id == "fable":
+        words = re.findall(r"\b[\w'-]+\b", stripped, flags=re.UNICODE)
+        if not 140 <= len(words) <= 170:
+            issues.append(f"fable has {len(words)} words, outside 140..170")
+        sentence_matches = list(re.finditer(r"(?:^|(?<=[.!?]))\s*([^.!?]+[.!?])", stripped))
+        final_sentence = sentence_matches[-1].group(1).strip() if sentence_matches else ""
+        moral_words = re.findall(r"\b[\w'-]+\b", final_sentence, flags=re.UNICODE)
+        moral_terms = (
+            "credit",
+            "share",
+            "sharing",
+            "together",
+            "cooperat",
+            "team",
+            "recognition",
+            "praise",
+            "glory",
+            "harmony",
+            "humility",
+            "fair",
+            "both",
+        )
+        if not 3 <= len(moral_words) <= 32 or not any(
+            term in final_sentence.casefold() for term in moral_terms
+        ):
+            issues.append(
+                "response does not end with a concise moral about sharing credit"
+            )
+    elif case_id == "hello":
+        if len(stripped) > 512:
+            issues.append("short greeting response is unexpectedly long")
+    elif case_id == "topic":
+        bullets = [
+            line
+            for line in stripped.splitlines()
+            if re.match(r"^\s*(?:[-*•]|[1-5][.)])\s+", line)
+        ]
+        if len(bullets) != 5:
+            issues.append(f"response has {len(bullets)} bullets, expected five")
+        lowered = stripped.casefold()
+        for term in ("paging", "page fault", "tlb"):
+            if term not in lowered:
+                issues.append(f"response omits {term}")
+    elif case_id == "structured-json":
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            issues.append("response is not bare valid JSON")
+        else:
+            expected_keys = {"path", "operation", "line_start", "line_end", "rationale"}
+            if not isinstance(value, dict) or set(value) != expected_keys:
+                issues.append("JSON object has the wrong key set")
+            elif (
+                value.get("path") != "src/cache.rs"
+                or value.get("operation") != "replace"
+                or value.get("line_start") != 41
+                or value.get("line_end") != 47
+                or not isinstance(value.get("rationale"), str)
+                or not value["rationale"].strip()
+            ):
+                issues.append("JSON object does not preserve the requested edit")
+    elif case_id == "multilingual":
+        bullets = [
+            line
+            for line in stripped.splitlines()
+            if re.match(r"^\s*(?:[-*•]|[1-4][.)、])\s*", line)
+        ]
+        if len(bullets) != 4:
+            issues.append(f"response has {len(bullets)} bullets, expected four")
+        lowered = stripped.casefold()
+        if not ("寫入時複製" in stripped or "copy-on-write" in lowered):
+            issues.append("response omits copy-on-write")
+        if "fork" not in lowered or "頁" not in stripped:
+            issues.append("response omits the requested fork/page example")
+    elif case_id == "syntax-rust":
+        variants = [
+            int(match.group(1))
+            for line in stripped.splitlines()
+            if (match := re.match(r"^\s*Op([0-9]{3}),?\s*$", line))
+        ]
+        if variants != list(range(128)):
+            issues.append("Rust enum does not contain exactly Op000 through Op127")
+    elif case_id == "syntax-python":
+        code, block_issues = _python_block(content)
+        issues.extend(block_issues)
+        if code is not None:
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                issues.append("Python code does not parse")
+            else:
+                assignments = [
+                    node
+                    for node in tree.body
+                    if isinstance(node, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "POWERS_OF_TWO"
+                        for target in node.targets
+                    )
+                ]
+                if len(assignments) != 1 or not isinstance(assignments[0].value, ast.Tuple):
+                    issues.append("POWERS_OF_TWO tuple assignment is missing")
+                else:
+                    exponents = []
+                    for element in assignments[0].value.elts:
+                        if (
+                            not isinstance(element, ast.BinOp)
+                            or not isinstance(element.op, ast.Pow)
+                            or not isinstance(element.left, ast.Constant)
+                            or element.left.value != 2
+                            or not isinstance(element.right, ast.Constant)
+                            or not isinstance(element.right.value, int)
+                        ):
+                            break
+                        exponents.append(element.right.value)
+                    if exponents != list(range(128)):
+                        issues.append("tuple is not exactly 2**0 through 2**127")
+    else:
+        issues.append(f"no quality validator exists for {case_id}")
+    return {
+        "quality_contract_version": QUALITY_CONTRACT_VERSION,
+        "quality_contract_passed": not issues,
+        "quality_contract_issues": issues,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -142,7 +337,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--timeout", type=float, default=300.0)
-    return parser.parse_args()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="optional JSONL evidence path; refuses to overwrite an existing file",
+    )
+    args = parser.parse_args()
+    if args.output is not None and args.output.exists():
+        parser.error(f"refusing to overwrite output: {args.output}")
+    return args
 
 
 def completion_payload(
@@ -159,6 +362,38 @@ def completion_payload(
             "max_tokens": case.max_tokens if max_tokens is None else max_tokens,
         }
     ).encode()
+
+
+def prompt_contract(
+    selected: list[str],
+    *,
+    suite: str,
+    repeats: int,
+    nonce_seed: int | None,
+    max_tokens: int | None,
+) -> dict[str, Any]:
+    """Return the model-independent identity for a matched decode replay."""
+
+    return {
+        "suite": suite,
+        "cases": [
+            {
+                "id": case_id,
+                "category": CASES[case_id].category,
+                "prompt": CASES[case_id].prompt,
+                "max_tokens": (
+                    CASES[case_id].max_tokens
+                    if max_tokens is None
+                    else max_tokens
+                ),
+            }
+            for case_id in selected
+        ],
+        "repeats": repeats,
+        "nonce_seed": nonce_seed,
+        "temperature": 0,
+        "quality_contract_version": QUALITY_CONTRACT_VERSION,
+    }
 
 
 def request_completion(url: str, payload: bytes, timeout: float) -> dict[str, Any]:
@@ -218,6 +453,7 @@ def summarize_case(case_id: str, result: dict[str, Any]) -> dict[str, Any]:
         "content_chars": len(content),
         "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
         "content_preview": content[:160].replace("\n", "\\n"),
+        **validate_case_content(case_id, content),
     }
 
 
@@ -241,6 +477,18 @@ def main() -> None:
         selected_suite = "all"
     summaries = []
     repeat_summaries = []
+    destination = None
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        destination = args.output.open("x", encoding="utf-8")
+
+    def emit(value: dict[str, Any]) -> None:
+        line = json.dumps(value, ensure_ascii=False)
+        print(line, flush=True)
+        if destination is not None:
+            destination.write(line + "\n")
+            destination.flush()
+
     for repeat_index in range(args.repeats):
         repeat_cases = []
         for case_id in selected:
@@ -259,6 +507,10 @@ def main() -> None:
             result = request_completion(args.url, payload, args.timeout)
             summary = summarize_case(case_id, result)
             summary["repeat"] = repeat_index + 1
+            summary["request_sha256"] = hashlib.sha256(payload).hexdigest()
+            summary["prompt_sha256"] = hashlib.sha256(
+                (prompt_prefix + CASES[case_id].prompt).encode()
+            ).hexdigest()
             if args.reference_url:
                 reference = request_completion(args.reference_url, payload, args.timeout)
                 summary["reference_content_match"] = (
@@ -275,7 +527,7 @@ def main() -> None:
                 )
             repeat_cases.append(summary)
             summaries.append(summary)
-            print(json.dumps(summary, ensure_ascii=False), flush=True)
+            emit(summary)
 
         repeat_timed_tokens = sum(
             summary["completion_tokens"] - 1 for summary in repeat_cases
@@ -350,7 +602,27 @@ def main() -> None:
         summary["emitted_tokens_per_verify_cycle_second"]
         for summary in repeat_summaries
     ]
+    replay_contract = prompt_contract(
+        selected,
+        suite=selected_suite,
+        repeats=args.repeats,
+        nonce_seed=args.nonce_seed,
+        max_tokens=args.max_tokens,
+    )
     aggregate = {
+        "schema": "glmrt-mtp-acceptance-aggregate-v3",
+        "model": args.model,
+        "endpoint": args.url,
+        "nonce_seed": args.nonce_seed,
+        "prompt_contract": replay_contract,
+        "prompt_contract_sha256": hashlib.sha256(
+            json.dumps(
+                replay_contract,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest(),
         "suite": selected_suite,
         "selected_case_ids": selected,
         "cases": len(summaries),
@@ -408,6 +680,19 @@ def main() -> None:
         "all_zero_runtime_captures": all(
             summary["runtime_captures"] == 0 for summary in summaries
         ),
+        "quality_contract_version": QUALITY_CONTRACT_VERSION,
+        "all_quality_contracts_passed": all(
+            summary["quality_contract_passed"] for summary in summaries
+        ),
+        "quality_contract_failures": [
+            {
+                "case": summary["case"],
+                "repeat": summary["repeat"],
+                "issues": summary["quality_contract_issues"],
+            }
+            for summary in summaries
+            if not summary["quality_contract_passed"]
+        ],
     }
     if args.reference_url:
         aggregate["all_reference_outputs_match"] = all(
@@ -416,7 +701,9 @@ def main() -> None:
             and summary["reference_completion_tokens_match"]
             for summary in summaries
         )
-    print(json.dumps({"aggregate": aggregate}, ensure_ascii=False))
+    emit({"aggregate": aggregate})
+    if destination is not None:
+        destination.close()
 
 
 if __name__ == "__main__":

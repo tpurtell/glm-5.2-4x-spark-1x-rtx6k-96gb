@@ -49,6 +49,10 @@ Environment:
                                       default: 1 for real daemon startup
   GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_GRAPHS
                                       forward to real daemon; default: 1 for real mode, else 0
+  GLMRT_REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE
+                                      cooperatively read/compact/exchange EXL3 rank slices; default: 1
+  GLMRT_REAL_FULL_EXL3_PREFILL_BF16_OUTPUT
+                                      experimental BF16 EXL3 output for rows >= 256; default: 0
   GLMRT_B12X_SPARK_AOT               build direct SparkInfer AOT kernels; default: 1 for real mode
   GLMRT_B12X_SPARK_ROUTE_LANES       concurrent direct-SparkInfer lanes in 1..4; default: 4
   GLMRT_B12X_SPARK_GROUPED_DECODE    grouped TP4 M=1/topk=8 decode; default: 1
@@ -87,7 +91,7 @@ Environment:
                                       concurrent RDMA/NCCL request lanes in 1..8; default: 4
   GLMRT_REAL_FULL_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS
                                       full-top8 requests bypassing the general CPU
-                                      row/group planner, in 8..2048; default: 2048
+                                      row/group planner, in 8..2064; default: 2064
   GLMRT_PROTOCOL_V2_VERBS_HOST_DEVICE_MAP
                                       generated per Spark from RDMA netdev IPs; maps each
                                       accepted control-plane destination IP to its ibverbs device
@@ -190,9 +194,11 @@ route_timing="${GLMRT_REAL_FULL_NVFP4_ROUTE_TIMING:-0}"
 route_cuda_event_timing="${GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_EVENT_TIMING:-0}"
 route_validate="${GLMRT_REAL_FULL_CUDA_ROUTE_VALIDATE:-0}"
 protocol_v2_verbs_host_execution_lanes="${GLMRT_PROTOCOL_V2_VERBS_HOST_EXECUTION_LANES:-4}"
-protocol_v2_packed_direct_max_rows="${GLMRT_REAL_FULL_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS:-2048}"
+protocol_v2_packed_direct_max_rows="${GLMRT_REAL_FULL_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS:-2064}"
 route_preload_io_workers="${GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_IO_WORKERS:-128}"
 route_preload_cooperative="${GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE:-1}"
+exl3_route_preload_cooperative="${GLMRT_REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE:-1}"
+exl3_prefill_bf16_output="${GLMRT_REAL_FULL_EXL3_PREFILL_BF16_OUTPUT:-0}"
 weight_preload_nccl_port="${GLMRT_EXPERT_WEIGHT_PRELOAD_NCCL_PORT:-9350}"
 b12x_route_lanes="${GLMRT_B12X_SPARK_ROUTE_LANES:-4}"
 b12x_grouped_decode="${GLMRT_B12X_SPARK_GROUPED_DECODE:-1}"
@@ -522,8 +528,8 @@ if ! [[ "$protocol_v2_verbs_host_execution_lanes" =~ ^[1-8]$ ]]; then
 fi
 if ! [[ "$protocol_v2_packed_direct_max_rows" =~ ^[0-9]+$ ]] \
   || [ "$protocol_v2_packed_direct_max_rows" -lt 8 ] \
-  || [ "$protocol_v2_packed_direct_max_rows" -gt 2048 ]; then
-  echo "GLMRT_REAL_FULL_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS must be an integer in 8..2048, got: $protocol_v2_packed_direct_max_rows" >&2
+  || [ "$protocol_v2_packed_direct_max_rows" -gt 2064 ]; then
+  echo "GLMRT_REAL_FULL_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS must be an integer in 8..2064, got: $protocol_v2_packed_direct_max_rows" >&2
   exit 2
 fi
 rdma_last_port=$((intermediate_rdma_port + protocol_v2_verbs_host_execution_lanes * 6 - 1))
@@ -1038,9 +1044,9 @@ start_expertd() {
   # late in the vector or every following positional parameter shifts left.
   local existing_container_arg="${existing_container:-__unset__}"
   local runtime_cache_dir_arg="${runtime_cache_dir:-__unset__}"
-  echo "== starting $mode ProtocolV2 expertd on $host:$port transport=$expert_transport real_layer=${expert_real_layer:-all} mtp_bf16_experts=$mtp_bf16_experts intermediate_shard=${intermediate_shard_rank}/${intermediate_shards} intermediate_reduction=$intermediate_reduction reduction_dtype=$intermediate_reduction_dtype owner_reduction_dtype=$intermediate_owner_reduction_dtype fused_fp8_reduction=$fused_fp8_reduction protocol_v2_execution_lanes=$protocol_v2_verbs_host_execution_lanes packed_direct_max_rows=$protocol_v2_packed_direct_max_rows spark_layer_blocks=$spark_layer_blocks transformer_tp=$spark_transformer_tp transformer_tp_range=$spark_transformer_tp_range managed_route_projections=${managed_route_projections:-0} grouped_multirow=${grouped_multirow:-0} route_cuda_graphs=${route_cuda_graphs:-0} b12x_spark_aot=${b12x_spark_aot:-0} b12x_route_lanes=$b12x_route_lanes b12x_grouped_decode=$b12x_grouped_decode serve_profile=${serve_profile:-unset} b12x_w4a16_device_weights=$b12x_w4a16_device_weights b12x_w4a16_m1_fused_sum=$b12x_w4a16_m1_fused_sum b12x_w4a16_small_m_mode=$b12x_w4a16_small_m_mode nccl_ib_hca=$nccl_ib_hca nccl_cross_nic=$nccl_cross_nic nccl_netdevs_policy=$nccl_netdevs_policy nccl_ib_merge_nics=$nccl_ib_merge_nics nccl_p2p_net_chunksize=$nccl_p2p_net_chunksize nccl_launch_order_implicit=$nccl_launch_order_implicit route_cuda_event_timing=${route_cuda_event_timing:-0} route_timing=${route_timing:-0} build_profile=$build_profile gpu_runtime=$gpu_runtime =="
+  echo "== starting $mode ProtocolV2 expertd on $host:$port transport=$expert_transport real_layer=${expert_real_layer:-all} mtp_bf16_experts=$mtp_bf16_experts intermediate_shard=${intermediate_shard_rank}/${intermediate_shards} intermediate_reduction=$intermediate_reduction reduction_dtype=$intermediate_reduction_dtype owner_reduction_dtype=$intermediate_owner_reduction_dtype fused_fp8_reduction=$fused_fp8_reduction protocol_v2_execution_lanes=$protocol_v2_verbs_host_execution_lanes packed_direct_max_rows=$protocol_v2_packed_direct_max_rows spark_layer_blocks=$spark_layer_blocks transformer_tp=$spark_transformer_tp transformer_tp_range=$spark_transformer_tp_range managed_route_projections=${managed_route_projections:-0} grouped_multirow=${grouped_multirow:-0} route_cuda_graphs=${route_cuda_graphs:-0} b12x_spark_aot=${b12x_spark_aot:-0} b12x_route_lanes=$b12x_route_lanes b12x_grouped_decode=$b12x_grouped_decode serve_profile=${serve_profile:-unset} b12x_w4a16_device_weights=$b12x_w4a16_device_weights b12x_w4a16_m1_fused_sum=$b12x_w4a16_m1_fused_sum b12x_w4a16_small_m_mode=$b12x_w4a16_small_m_mode exl3_cooperative_preload=$exl3_route_preload_cooperative exl3_prefill_bf16_output=$exl3_prefill_bf16_output nccl_ib_hca=$nccl_ib_hca nccl_cross_nic=$nccl_cross_nic nccl_netdevs_policy=$nccl_netdevs_policy nccl_ib_merge_nics=$nccl_ib_merge_nics nccl_p2p_net_chunksize=$nccl_p2p_net_chunksize nccl_launch_order_implicit=$nccl_launch_order_implicit route_cuda_event_timing=${route_cuda_event_timing:-0} route_timing=${route_timing:-0} build_profile=$build_profile gpu_runtime=$gpu_runtime =="
   ssh -o BatchMode=yes "$host" bash -s -- \
-    "$remote_dir" "$image" "$container" "$mode" "$port" "$catalog_arg" "$loadplan_arg" "$host" "$layer_id" "$expert_real_layer" "$managed_route_projections" "$build_profile" "$gpu_runtime" "${GLMRT_PROTOCOL_V2_TCP_TIMING:-0}" "${GLMRT_REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING:-0}" "$grouped_multirow" "$route_cuda_graphs" "$route_timing" "$expert_transport" "$verbs_ib_port_num_arg" "$route_cuda_event_timing" "$b12x_spark_aot" "$route_validate" "$b12x_route_lanes" "$intermediate_shards" "$intermediate_shard_rank" "$intermediate_reduction" "$intermediate_reduction_dtype" "$intermediate_reduction_root" "$intermediate_reduction_port" "$intermediate_reduction_min_rows" "$nccl_socket_ifname" "$nccl_ib_hca" "$nccl_debug" "$b12x_grouped_decode" "$intermediate_owner_max_rows" "$intermediate_owner_port" "$intermediate_owner_peers_arg" "$spark_layer_blocks" "$spark_layer_block_kv_dtype" "$spark_transformer_tp" "$spark_transformer_tp_range" "$spark_transformer_tp_root" "$spark_transformer_tp_port" "$spark_transformer_tp_collective_probe_iters" "$fused_fp8_reduction" "$nccl_bf16_reduce" "$b12x_w4a16_decode_grid_x_arg" "$b12x_w4a16_device_weights" "$intermediate_row_sharded_reduction" "$nccl_launch_order_implicit" "$protocol_v2_verbs_host_execution_lanes" "$intermediate_rdma_peers" "$intermediate_rdma_port" "$intermediate_rdma_slot_bytes" "$intermediate_rdma_ring_depth" "$intermediate_owner_reduction_dtype" "$nccl_cross_nic" "$intermediate_rdma_additional_peers_arg" "$intermediate_rdma_devices_arg" "$intermediate_rdma_stripe_min_bytes" "$nccl_netdevs_policy" "$nccl_ib_merge_nics" "$nccl_p2p_net_chunksize" "$protocol_v2_packed_direct_max_rows" "$b12x_w4a16_m1_fused_sum" "$b12x_w4a16_small_m_mode" "$model_id" "${GLMRT_SPARK_INCLUDE_MTP_LAYER:-1}" "$mtp_bf16_experts" "$release_config_sha256_arg" "$prebuilt" "$route_preload_io_workers" "$weight_preload_nccl_port" "$route_preload_cooperative" "$serve_profile_arg" "$existing_container_arg" "$prebuilt_bin" "$prebuilt_native_lib" "$runtime_cache_dir_arg" <<'REMOTE'
+    "$remote_dir" "$image" "$container" "$mode" "$port" "$catalog_arg" "$loadplan_arg" "$host" "$layer_id" "$expert_real_layer" "$managed_route_projections" "$build_profile" "$gpu_runtime" "${GLMRT_PROTOCOL_V2_TCP_TIMING:-0}" "${GLMRT_REAL_FULL_PROTOCOL_V2_EXECUTOR_TIMING:-0}" "$grouped_multirow" "$route_cuda_graphs" "$route_timing" "$expert_transport" "$verbs_ib_port_num_arg" "$route_cuda_event_timing" "$b12x_spark_aot" "$route_validate" "$b12x_route_lanes" "$intermediate_shards" "$intermediate_shard_rank" "$intermediate_reduction" "$intermediate_reduction_dtype" "$intermediate_reduction_root" "$intermediate_reduction_port" "$intermediate_reduction_min_rows" "$nccl_socket_ifname" "$nccl_ib_hca" "$nccl_debug" "$b12x_grouped_decode" "$intermediate_owner_max_rows" "$intermediate_owner_port" "$intermediate_owner_peers_arg" "$spark_layer_blocks" "$spark_layer_block_kv_dtype" "$spark_transformer_tp" "$spark_transformer_tp_range" "$spark_transformer_tp_root" "$spark_transformer_tp_port" "$spark_transformer_tp_collective_probe_iters" "$fused_fp8_reduction" "$nccl_bf16_reduce" "$b12x_w4a16_decode_grid_x_arg" "$b12x_w4a16_device_weights" "$intermediate_row_sharded_reduction" "$nccl_launch_order_implicit" "$protocol_v2_verbs_host_execution_lanes" "$intermediate_rdma_peers" "$intermediate_rdma_port" "$intermediate_rdma_slot_bytes" "$intermediate_rdma_ring_depth" "$intermediate_owner_reduction_dtype" "$nccl_cross_nic" "$intermediate_rdma_additional_peers_arg" "$intermediate_rdma_devices_arg" "$intermediate_rdma_stripe_min_bytes" "$nccl_netdevs_policy" "$nccl_ib_merge_nics" "$nccl_p2p_net_chunksize" "$protocol_v2_packed_direct_max_rows" "$b12x_w4a16_m1_fused_sum" "$b12x_w4a16_small_m_mode" "$model_id" "${GLMRT_SPARK_INCLUDE_MTP_LAYER:-1}" "$mtp_bf16_experts" "$release_config_sha256_arg" "$prebuilt" "$route_preload_io_workers" "$weight_preload_nccl_port" "$route_preload_cooperative" "$serve_profile_arg" "$existing_container_arg" "$prebuilt_bin" "$prebuilt_native_lib" "$runtime_cache_dir_arg" "$exl3_route_preload_cooperative" "$exl3_prefill_bf16_output" <<'REMOTE'
 set -euo pipefail
 remote_dir="$1"
 image="$2"
@@ -1128,7 +1134,7 @@ intermediate_rdma_stripe_min_bytes="${61:-262144}"
 nccl_netdevs_policy="${62:-ALL}"
 nccl_ib_merge_nics="${63:-1}"
 nccl_p2p_net_chunksize="${64:-131072}"
-protocol_v2_packed_direct_max_rows="${65:-2048}"
+protocol_v2_packed_direct_max_rows="${65:-2064}"
 b12x_w4a16_m1_fused_sum="${66:-0}"
 b12x_w4a16_small_m_mode="${67:-wide}"
 model_id="${68:-lukealonso/GLM-5.2-NVFP4}"
@@ -1156,6 +1162,8 @@ runtime_cache_dir="${80:-}"
 if [ "$runtime_cache_dir" = "__unset__" ]; then
   runtime_cache_dir=""
 fi
+exl3_route_preload_cooperative="${81:-0}"
+exl3_prefill_bf16_output="${82:-0}"
 
 discover_rdma_device_map() {
   local entries=()
@@ -1237,6 +1245,8 @@ docker_args=(
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_MANAGED_PROJECTIONS="$managed_route_projections"
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_IO_WORKERS="$route_preload_io_workers"
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE="$route_preload_cooperative"
+  -e GLMRT_REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE="$exl3_route_preload_cooperative"
+  -e GLMRT_REAL_FULL_EXL3_PREFILL_BF16_OUTPUT="$exl3_prefill_bf16_output"
   -e GLMRT_EXPERT_WEIGHT_PRELOAD_NCCL_PORT="$weight_preload_nccl_port"
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_GROUPED_MULTIROW="$grouped_multirow"
   -e GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_GRAPHS="$route_cuda_graphs"

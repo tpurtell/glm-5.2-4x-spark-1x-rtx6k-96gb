@@ -45,6 +45,8 @@ def test_model_and_expert_kernel_controls_are_selected() -> None:
         {
             "GLMRT_MODEL_ID": "model-a",
             "GLMRT_B12X_SPARK_W4A16_SMALL_M_MODE": "wide",
+            "GLMRT_REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE": "0",
+            "GLMRT_REAL_FULL_EXL3_PREFILL_BF16_OUTPUT": "0",
             "GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_GRAPHS": "1",
             "GLMRT_PROTOCOL_V2_VERBS_HOST_EXECUTION_LANES": "4",
         },
@@ -54,6 +56,8 @@ def test_model_and_expert_kernel_controls_are_selected() -> None:
     assert set(selected) == {
         "GLMRT_MODEL_ID",
         "GLMRT_B12X_SPARK_W4A16_SMALL_M_MODE",
+        "GLMRT_REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE",
+        "GLMRT_REAL_FULL_EXL3_PREFILL_BF16_OUTPUT",
         "GLMRT_REAL_FULL_NVFP4_ROUTE_CUDA_GRAPHS",
         "GLMRT_PROTOCOL_V2_VERBS_HOST_EXECUTION_LANES",
     }

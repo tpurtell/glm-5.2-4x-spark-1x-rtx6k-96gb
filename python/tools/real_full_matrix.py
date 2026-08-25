@@ -157,11 +157,18 @@ def git_commit(root: Path) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=root,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
-    return result.stdout.strip()
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    engine_identity = os.environ.get("GLMRT_ENGINE_COMMIT", "").strip()
+    if engine_identity:
+        return engine_identity
+    raise RuntimeError(
+        f"cannot resolve source revision below {root} and GLMRT_ENGINE_COMMIT is unset"
+    )
 
 
 def request_metrics(

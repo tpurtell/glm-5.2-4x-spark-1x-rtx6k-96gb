@@ -32,7 +32,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--model",
-        choices=("luke", "nvidia"),
+        choices=("luke", "nvidia", "exl3"),
         default="luke",
         help="supported text checkpoint",
     )

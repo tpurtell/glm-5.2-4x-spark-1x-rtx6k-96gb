@@ -146,6 +146,31 @@ typedef struct glmrt_b12x_spark_w4a16_moe_buffers_t {
   glmrt_device_buffer_t locks;
 } glmrt_b12x_spark_w4a16_moe_buffers_t;
 
+typedef struct glmrt_b12x_spark_exl3_k3_moe_buffers_t {
+  glmrt_device_buffer_t input_bf16;
+  glmrt_device_buffer_t rotation_a_gate;
+  glmrt_device_buffer_t rotation_a_up;
+  glmrt_device_buffer_t w13_trellis;
+  glmrt_device_buffer_t w2_trellis;
+  glmrt_device_buffer_t unit_global_scale;
+  glmrt_device_buffer_t fc1_output;
+  glmrt_device_buffer_t activated;
+  glmrt_device_buffer_t fc2_output;
+  glmrt_device_buffer_t output_f32;
+  glmrt_device_buffer_t packed_route_indices;
+  glmrt_device_buffer_t block_expert_ids;
+  glmrt_device_buffer_t packed_route_count;
+  glmrt_device_buffer_t topk_ids;
+  glmrt_device_buffer_t topk_weights;
+  glmrt_device_buffer_t fc1_scratch;
+  glmrt_device_buffer_t fc2_scratch;
+  glmrt_device_buffer_t locks;
+  glmrt_device_buffer_t intermediate_rotations;
+  glmrt_device_buffer_t gate_suh;
+  glmrt_device_buffer_t up_suh;
+  glmrt_device_buffer_t down_svh;
+} glmrt_b12x_spark_exl3_k3_moe_buffers_t;
+
 typedef struct glmrt_b12x_coordinator_w4a16_buffers_t {
   glmrt_device_buffer_t input;
   glmrt_device_buffer_t weight;
@@ -303,6 +328,7 @@ glmrt_status_t glmrt_alloc_device_buffer(size_t bytes, glmrt_device_buffer_t* ou
 glmrt_status_t glmrt_alloc_managed_device_buffer(size_t bytes, glmrt_device_buffer_t* out);
 glmrt_status_t glmrt_free_device_buffer(glmrt_device_buffer_t* buf);
 glmrt_status_t glmrt_cuda_stream_create(void** out_cuda_stream);
+glmrt_status_t glmrt_cuda_stream_create_high_priority(void** out_cuda_stream);
 glmrt_status_t glmrt_cuda_stream_destroy(void* cuda_stream);
 glmrt_status_t glmrt_cuda_stream_synchronize(void* cuda_stream);
 glmrt_status_t glmrt_cuda_stream_wait_event(void* cuda_stream, void* cuda_event);
@@ -665,6 +691,26 @@ glmrt_status_t glmrt_cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_async(
     const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers,
     glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
     size_t rows, void* cuda_stream);
+glmrt_status_t glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, void* cuda_stream);
+/* Full-rotation sum accumulates in FP32 and stores contiguous BF16 rows. */
+glmrt_status_t glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_bf16_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, void* cuda_stream);
+glmrt_status_t
+glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_capacity_candidate_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, size_t capacity_rows, void* cuda_stream);
+/* Benchmark-only EXL3 capacity/grid sweep; serving does not reference this symbol. */
+glmrt_status_t
+glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_capacity_grid_candidate_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, size_t capacity_rows, int grid_x, void* cuda_stream);
 /* Benchmark-only packed-prefill grid sweep; serving does not reference this symbol. */
 glmrt_status_t
 glmrt_cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_grid_candidate_async(

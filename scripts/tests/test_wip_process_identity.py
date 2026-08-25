@@ -86,6 +86,9 @@ def test_wip_launcher_has_separate_expert_and_deployment_identities() -> None:
         "GLMRT_COORDINATOR_POWER_LIMIT_WATTS=$coordinator_power_limit_watts"
         in launcher
     )
+    assert 'coordinator_model_revision" == "$expert_model_revision' in launcher
+    assert "write-wip-deployment-evidence.py" in launcher
+    assert 'deployment_evidence="$state_dir/deployment.json"' in launcher
 
 
 def test_wip_builder_streams_every_local_heredoc_into_docker() -> None:

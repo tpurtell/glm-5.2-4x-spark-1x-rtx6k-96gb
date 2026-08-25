@@ -129,7 +129,8 @@ release_load_config() {
   case "${MODEL,,}" in
     luke) RELEASE_MODEL_ID=lukealonso/GLM-5.2-NVFP4 ;;
     nvidia) RELEASE_MODEL_ID=nvidia/GLM-5.2-NVFP4 ;;
-    *) release_die "MODEL must be luke or nvidia" ;;
+    exl3) RELEASE_MODEL_ID=wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1 ;;
+    *) release_die "MODEL must be luke, nvidia, or exl3" ;;
   esac
   case "${DSPARK_MODEL,,}" in
     redhat)

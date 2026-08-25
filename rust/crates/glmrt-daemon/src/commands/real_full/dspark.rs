@@ -27,6 +27,14 @@ use dspark_cost_profile::{
     GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_REVISION, GLM52_REDHAT_DSPARK_COST_PROFILE_TOPOLOGY,
 };
 
+// The GLMRT fork adds two otherwise-missing SM121 register-table entries used
+// only by the EXL3 K3 forced tiles. It does not change any specialization
+// reachable by the calibrated NVFP4 profile, so that profile remains valid on
+// this exact reviewed descendant. Any later SparkInfer revision must be
+// requalified explicitly rather than inheriting compatibility transitively.
+const GLM52_REDHAT_DSPARK_COST_PROFILE_GLMRT_EXL3_COMPATIBLE_SPARKINFER_REVISION: &str =
+    "28e083482fd18ca3ce0e2553cd533102be85552f";
+
 use super::coordinator_kernels::{
     preload_resident_weight_from_host_staging, preload_resident_weight_from_host_staging_profiled,
     preloaded_resident_weight_device_buffer, preloaded_resident_weight_device_buffer_view,
@@ -2288,10 +2296,15 @@ pub(super) fn install_qualified_dspark_cost_profile(
     max_verify_drafts: usize,
 ) -> Result<Option<DsparkCostProfileActivation>> {
     let target_revision = target_snapshot.file_name().and_then(|name| name.to_str());
+    let sparkinfer_profile_compatible = sparkinfer_revision.is_some_and(|revision| {
+        revision == GLM52_REDHAT_DSPARK_COST_PROFILE_SPARKINFER_REVISION
+            || revision
+                == GLM52_REDHAT_DSPARK_COST_PROFILE_GLMRT_EXL3_COMPATIBLE_SPARKINFER_REVISION
+    });
     if target_model != GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_MODEL
         || target_revision != Some(GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_REVISION)
         || checkpoint_revision != GLM52_REDHAT_DSPARK_COST_PROFILE_DSPARK_REVISION
-        || sparkinfer_revision != Some(GLM52_REDHAT_DSPARK_COST_PROFILE_SPARKINFER_REVISION)
+        || !sparkinfer_profile_compatible
         || coordinator_power_limit_watts != Some(GLM52_REDHAT_DSPARK_COST_PROFILE_POWER_LIMIT_WATTS)
         || max_execution_lanes > GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_CONCURRENCY
         || max_verify_drafts != GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_DRAFTS
@@ -4398,6 +4411,47 @@ mod tests {
         let after = 1_000.0 / model.profile(2, &[0, 0]).unwrap().get(2).unwrap();
         assert_eq!(observation.exact_samples, 0);
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn glmrt_exl3_fork_preserves_only_the_nvfp4_embedded_profile() {
+        let target_snapshot =
+            Path::new("/tmp").join(GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_REVISION);
+        let mut nvfp4 = DsparkRuntimeCostModel::new(
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_CONCURRENCY,
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_DRAFTS,
+        )
+        .unwrap();
+        let activation = install_qualified_dspark_cost_profile(
+            &mut nvfp4,
+            GLM52_REDHAT_DSPARK_COST_PROFILE_TARGET_MODEL,
+            &target_snapshot,
+            GLM52_REDHAT_DSPARK_COST_PROFILE_DSPARK_REVISION,
+            Some(GLM52_REDHAT_DSPARK_COST_PROFILE_GLMRT_EXL3_COMPATIBLE_SPARKINFER_REVISION),
+            Some(GLM52_REDHAT_DSPARK_COST_PROFILE_POWER_LIMIT_WATTS),
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_CONCURRENCY,
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_DRAFTS,
+        )
+        .unwrap();
+        assert!(activation.is_some());
+
+        let mut exl3 = DsparkRuntimeCostModel::new(
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_CONCURRENCY,
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_DRAFTS,
+        )
+        .unwrap();
+        let activation = install_qualified_dspark_cost_profile(
+            &mut exl3,
+            glmrt_core::EXL3_MODEL_ID,
+            &target_snapshot,
+            GLM52_REDHAT_DSPARK_COST_PROFILE_DSPARK_REVISION,
+            Some(GLM52_REDHAT_DSPARK_COST_PROFILE_GLMRT_EXL3_COMPATIBLE_SPARKINFER_REVISION),
+            Some(GLM52_REDHAT_DSPARK_COST_PROFILE_POWER_LIMIT_WATTS),
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_CONCURRENCY,
+            GLM52_REDHAT_DSPARK_COST_PROFILE_MAX_DRAFTS,
+        )
+        .unwrap();
+        assert!(activation.is_none());
     }
 
     #[test]

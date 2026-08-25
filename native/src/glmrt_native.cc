@@ -905,6 +905,37 @@ extern "C" glmrt_status_t glmrt_cuda_stream_create(void** out_cuda_stream) {
 #endif
 }
 
+extern "C" glmrt_status_t
+glmrt_cuda_stream_create_high_priority(void** out_cuda_stream) {
+  if (out_cuda_stream == nullptr) {
+    return fail(GLMRT_STATUS_INVALID_ARGUMENT,
+                "CUDA stream output pointer is null");
+  }
+  *out_cuda_stream = nullptr;
+#if GLMRT_NATIVE_ENABLE_CUDA
+  int least_priority = 0;
+  int greatest_priority = 0;
+  cudaError_t err =
+      cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority);
+  if (err != cudaSuccess) {
+    return fail_cuda(GLMRT_STATUS_CUDA_UNAVAILABLE,
+                     "cudaDeviceGetStreamPriorityRange failed", err);
+  }
+  cudaStream_t stream = nullptr;
+  err = cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking,
+                                     greatest_priority);
+  if (err != cudaSuccess) {
+    return fail_cuda(GLMRT_STATUS_CUDA_UNAVAILABLE,
+                     "cudaStreamCreateWithPriority failed", err);
+  }
+  *out_cuda_stream = reinterpret_cast<void*>(stream);
+  return ok();
+#else
+  return fail(GLMRT_STATUS_CUDA_UNAVAILABLE,
+              "CUDA stream creation is unavailable in this build");
+#endif
+}
+
 extern "C" glmrt_status_t glmrt_cuda_stream_destroy(void* cuda_stream) {
   if (cuda_stream == nullptr) {
     return ok();

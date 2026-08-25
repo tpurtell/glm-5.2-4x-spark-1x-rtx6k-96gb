@@ -31,6 +31,7 @@ use crate::{
 
 const PROTOCOL_V2_TCP_TIMING_ENV: &str = "GLMRT_PROTOCOL_V2_TCP_TIMING";
 const PROTOCOL_V2_EXPERT_QUEUE_STATS_ENV: &str = "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS";
+const PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID_ENV: &str = "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID";
 const PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_ENV: &str = "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES";
 const PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE_ENV: &str =
     "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE";
@@ -3554,6 +3555,7 @@ struct ExpertQueuePlanStats {
     least_hot_expert_rows: usize,
     hottest_expert: Option<usize>,
     hottest_expert_rows: usize,
+    source_rows_by_kind: BTreeMap<String, usize>,
     expert_route_counts_by_id: Vec<(usize, usize)>,
 }
 
@@ -3566,51 +3568,15 @@ fn maybe_log_expert_queue_plan(
     if !protocol_v2_expert_queue_stats_enabled() {
         return;
     }
-    let stats = expert_queue_plan_stats(host_batch);
-    let expert_only_row_factor = if stats.rows == 0 {
-        0.0
-    } else {
-        stats.expert_only_rows as f64 / stats.rows as f64
-    };
-    let expert_route_counts = stats
-        .expert_route_counts_by_id
-        .iter()
-        .map(|(expert_id, routes)| format!("{expert_id}:{routes}"))
-        .collect::<Vec<_>>()
-        .join(",");
     eprintln!(
-        "protocol_v2_expert_queue_plan transport={} request_id_base={} request_id={} host={} host_index={} rows={} routes={} experts={} single_expert_rows={} multi_expert_rows={} empty_rows={} expert_only_rows={} expert_only_extra_rows={} expert_only_row_factor={:.3} expert_row_min={} expert_row_p50={} expert_row_max={} expert_route_min={} expert_route_p50={} expert_route_max={} least_hot_expert={} least_hot_rows={} hottest_expert={} hottest_rows={} expert_route_counts={}",
-        transport,
-        request_id_base,
-        request_id_base + host_index as u64,
-        host_batch.host,
-        host_index,
-        stats.rows,
-        stats.routes,
-        stats.experts,
-        stats.single_expert_rows,
-        stats.multi_expert_rows,
-        stats.empty_rows,
-        stats.expert_only_rows,
-        stats.expert_only_extra_rows,
-        expert_only_row_factor,
-        stats.min_expert_rows,
-        stats.p50_expert_rows,
-        stats.max_expert_rows,
-        stats.min_expert_routes,
-        stats.p50_expert_routes,
-        stats.max_expert_routes,
-        stats
-            .least_hot_expert
-            .map(|expert_id| expert_id.to_string())
-            .unwrap_or_else(|| "none".to_owned()),
-        stats.least_hot_expert_rows,
-        stats
-            .hottest_expert
-            .map(|expert_id| expert_id.to_string())
-            .unwrap_or_else(|| "none".to_owned()),
-        stats.hottest_expert_rows,
-        expert_route_counts,
+        "{}",
+        expert_queue_plan_trace_line(
+            transport,
+            request_id_base,
+            host_index,
+            host_batch,
+            &protocol_v2_expert_queue_capture_id(),
+        )
     );
     if host_index == 0 && protocol_v2_expert_queue_row_routes_enabled() {
         let source_kinds = host_batch
@@ -3649,6 +3615,70 @@ fn maybe_log_expert_queue_plan(
     }
 }
 
+fn expert_queue_plan_trace_line(
+    transport: &str,
+    request_id_base: u64,
+    host_index: usize,
+    host_batch: &ExpertHostBatch,
+    capture_id: &str,
+) -> String {
+    let stats = expert_queue_plan_stats(host_batch);
+    let expert_only_row_factor = if stats.rows == 0 {
+        0.0
+    } else {
+        stats.expert_only_rows as f64 / stats.rows as f64
+    };
+    let expert_route_counts = stats
+        .expert_route_counts_by_id
+        .iter()
+        .map(|(expert_id, routes)| format!("{expert_id}:{routes}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let source_rows = stats
+        .source_rows_by_kind
+        .iter()
+        .map(|(source_kind, rows)| format!("{source_kind}:{rows}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "protocol_v2_expert_queue_plan trace_schema=2 capture_id={} transport={} request_id_base={} request_id={} layer_id={} host={} host_index={} rows={} routes={} source_rows={} experts={} single_expert_rows={} multi_expert_rows={} empty_rows={} expert_only_rows={} expert_only_extra_rows={} expert_only_row_factor={:.3} expert_row_min={} expert_row_p50={} expert_row_max={} expert_route_min={} expert_route_p50={} expert_route_max={} least_hot_expert={} least_hot_rows={} hottest_expert={} hottest_rows={} expert_route_counts={}",
+        capture_id,
+        transport,
+        request_id_base,
+        request_id_base + host_index as u64,
+        host_batch.layer_id.0,
+        host_batch.host,
+        host_index,
+        stats.rows,
+        stats.routes,
+        source_rows,
+        stats.experts,
+        stats.single_expert_rows,
+        stats.multi_expert_rows,
+        stats.empty_rows,
+        stats.expert_only_rows,
+        stats.expert_only_extra_rows,
+        expert_only_row_factor,
+        stats.min_expert_rows,
+        stats.p50_expert_rows,
+        stats.max_expert_rows,
+        stats.min_expert_routes,
+        stats.p50_expert_routes,
+        stats.max_expert_routes,
+        stats
+            .least_hot_expert
+            .map(|expert_id| expert_id.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        stats.least_hot_expert_rows,
+        stats
+            .hottest_expert
+            .map(|expert_id| expert_id.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        stats.hottest_expert_rows,
+        expert_route_counts,
+    )
+}
+
 fn expert_queue_plan_stats(host_batch: &ExpertHostBatch) -> ExpertQueuePlanStats {
     let mut stats = ExpertQueuePlanStats {
         rows: host_batch.rows.len(),
@@ -3658,6 +3688,10 @@ fn expert_queue_plan_stats(host_batch: &ExpertHostBatch) -> ExpertQueuePlanStats
     let mut expert_groups = BTreeMap::<usize, ExpertQueueGroupStats>::new();
 
     for row in &host_batch.rows {
+        *stats
+            .source_rows_by_kind
+            .entry(format!("{:?}", row.source_kind))
+            .or_default() += 1;
         let route_end = row.route_offset.saturating_add(row.route_count);
         let mut row_experts = Vec::<usize>::new();
         for route in host_batch
@@ -3735,6 +3769,19 @@ fn percentile_mid(sorted_values: &[usize]) -> usize {
 fn protocol_v2_expert_queue_stats_enabled() -> bool {
     protocol_v2_bool_env(PROTOCOL_V2_EXPERT_QUEUE_STATS_ENV)
         && protocol_v2_expert_queue_trace_gate_open()
+}
+
+fn protocol_v2_expert_queue_capture_id() -> String {
+    env::var(PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID_ENV)
+        .ok()
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+        .unwrap_or_else(|| "unbound".to_owned())
 }
 
 fn protocol_v2_expert_queue_row_routes_enabled() -> bool {
@@ -4165,9 +4212,22 @@ mod tests {
         assert_eq!(stats.least_hot_expert, Some(11));
         assert_eq!(stats.least_hot_expert_rows, 1);
         assert_eq!(
+            stats.source_rows_by_kind,
+            BTreeMap::from([("Benchmark".to_owned(), 4)])
+        );
+        assert_eq!(
             stats.expert_route_counts_by_id,
             vec![(7, 2), (9, 2), (11, 2)]
         );
+        let trace =
+            expert_queue_plan_trace_line("verbs-host", 500, 2, &host_batch, "qualification-v1");
+        assert!(trace.starts_with(
+            "protocol_v2_expert_queue_plan trace_schema=2 capture_id=qualification-v1 "
+        ));
+        assert!(trace.contains("request_id_base=500 request_id=502 layer_id=3"));
+        assert!(trace.contains("host=spark0 host_index=2 rows=4 routes=6"));
+        assert!(trace.contains("source_rows=Benchmark:4"));
+        assert!(trace.ends_with("expert_route_counts=7:2,9:2,11:2"));
     }
 
     #[test]

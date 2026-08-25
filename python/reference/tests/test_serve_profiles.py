@@ -138,6 +138,22 @@ def test_nvidia_mtp_selects_bf16_layer_78_without_blocking_dspark(tmp_path, monk
     assert any("not passed" in warning for warning in accuracy.warnings)
 
 
+def test_exl3_selects_calibrated_candidate_without_changing_profile_geometry(
+    tmp_path,
+):
+    baseline = resolve(tmp_path, model="luke", speculation="plain")
+    candidate = resolve(tmp_path, model="exl3", speculation="plain")
+
+    assert candidate.model_id == (
+        "wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1"
+    )
+    assert candidate.environment["GLMRT_MODEL_ID"] == candidate.model_id
+    assert candidate.fixed_reserve_gib == baseline.fixed_reserve_gib
+    assert candidate.kv_pool_tokens == baseline.kv_pool_tokens
+    assert candidate.qualification == "candidate"
+    assert any("paired live serving gates" in warning for warning in candidate.warnings)
+
+
 def test_dspark_checkpoint_can_be_selected_for_controlled_evaluation(
     tmp_path, monkeypatch
 ):

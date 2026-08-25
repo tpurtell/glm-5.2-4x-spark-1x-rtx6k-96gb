@@ -17,7 +17,7 @@ INTERMEDIATE = 512
 EXPERTS = 256
 BENCH_EXPERTS = 8
 TOP_K = 8
-MAX_PACKED_ROUTE_SLOTS = 32_512
+MAX_PACKED_ROUTE_SLOTS = 32_640
 MAX_ROUTE_BLOCKS = 760
 SCRATCH_ELEMENTS = 3_145_728
 SPARK_LOCK_ELEMENTS = 194
@@ -372,8 +372,8 @@ def main() -> None:
         parser.error("exact replay verification requires one weight set and one stream")
     if args.empty_routes and args.scenario != "prefill":
         parser.error("empty-routes is only valid for the prefill scenario")
-    if args.scenario == "prefill" and not 1 <= args.prefill_rows <= 2048:
-        parser.error("prefill-rows must be between 1 and 2048")
+    if args.scenario == "prefill" and not 1 <= args.prefill_rows <= 2064:
+        parser.error("prefill-rows must be between 1 and 2064")
     if args.prefill_grid_x is not None and (
         args.scenario != "prefill" or not 1 <= args.prefill_grid_x <= 96
     ):
@@ -481,7 +481,7 @@ def main() -> None:
     rows = 1 if args.scenario == "decode" else args.prefill_rows
     capacity_rows = rows
     if args.scenario == "prefill":
-        capacity_rows = max(2, 1 << (rows - 1).bit_length())
+        capacity_rows = 2064 if rows > 2048 else max(2, 1 << (rows - 1).bit_length())
     weight_experts = (
         args.weight_experts or BENCH_EXPERTS
         if args.scenario == "decode"
@@ -632,6 +632,8 @@ def main() -> None:
                         args.grouped_m1_parity_candidate
                         or args.grouped_wide_m1_parity_candidate
                     )
+                    else 48
+                    if rows > 2048
                     else 32
                 ),
             )

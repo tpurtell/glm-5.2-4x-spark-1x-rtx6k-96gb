@@ -1,16 +1,18 @@
 use anyhow::{Context, Result};
 use glmrt_core::{
     plan_completion_first_routes, CompletionRoutePlanEntry, DType, TensorCatalog, TensorInfo,
+    GLM52_HIDDEN_SIZE, GLM52_MOE_INTERMEDIATE_SIZE,
 };
 use glmrt_ffi::{
-    GlmrtB12xSparkW4a16MoeBuffers, GlmrtDeviceBuffer, GlmrtHostBuffer, GlmrtNcclComm,
-    GlmrtNvfp4RouteBatchedMetadata, GlmrtRouteShardReductionBuffers, NativeLibrary,
-    GLMRT_DEVICE_BUFFER_FLAG_MANAGED, GLMRT_ROUTE_SHARD_LOCAL_BF16, GLMRT_ROUTE_SHARD_LOCAL_F32,
-    GLMRT_ROUTE_SHARD_WIRE_BF16, GLMRT_ROUTE_SHARD_WIRE_FP8_E4M3_ROW_SCALED,
-    GLMRT_ROUTE_SHARD_WIRE_NVFP4_E2M1_FP8_E4M3,
+    GlmrtB12xSparkExl3K3MoeBuffers, GlmrtB12xSparkW4a16MoeBuffers, GlmrtDeviceBuffer,
+    GlmrtHostBuffer, GlmrtNcclComm, GlmrtNvfp4RouteBatchedMetadata,
+    GlmrtRouteShardReductionBuffers, NativeLibrary, GLMRT_DEVICE_BUFFER_FLAG_MANAGED,
+    GLMRT_ROUTE_SHARD_LOCAL_BF16, GLMRT_ROUTE_SHARD_LOCAL_F32, GLMRT_ROUTE_SHARD_WIRE_BF16,
+    GLMRT_ROUTE_SHARD_WIRE_FP8_E4M3_ROW_SCALED, GLMRT_ROUTE_SHARD_WIRE_NVFP4_E2M1_FP8_E4M3,
 };
 use glmrt_loader::{
-    dtype_byte_width, load_tensor_bytes, load_tensor_rows, LoadedTensor, LoadedTensorRows,
+    dtype_byte_width, glm52_exl3_expert, is_glm52_exl3_recipe, load_tensor_bytes, load_tensor_rows,
+    Glm52Exl3Projection, LoadedTensor, LoadedTensorRows, GLM52_EXL3_BITS,
 };
 use glmrt_transport::{protocol_v2_verbs_host_execution_lanes, ExpertProtocolV2StreamPlan};
 use io_uring::{opcode, types, IoUring};
@@ -21,7 +23,10 @@ use std::{
     fs::{File, OpenOptions},
     ops::Deref,
     os::unix::fs::OpenOptionsExt,
-    os::{fd::AsRawFd, unix::fs::FileExt},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::fs::FileExt,
+    },
     path::{Path, PathBuf},
     ptr::NonNull,
     slice,
@@ -67,6 +72,9 @@ const REAL_FULL_NVFP4_ROUTE_PRELOAD_DIRECT_IO_ENV: &str =
     "GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_DIRECT_IO";
 const REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE_ENV: &str =
     "GLMRT_REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE";
+const REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE_ENV: &str =
+    "GLMRT_REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE";
+const REAL_FULL_EXL3_PREFILL_BF16_OUTPUT_ENV: &str = "GLMRT_REAL_FULL_EXL3_PREFILL_BF16_OUTPUT";
 const EXPERT_FUSED_FP8_REDUCTION_ENV: &str = "GLMRT_EXPERT_FUSED_FP8_REDUCTION";
 const EXPERT_NCCL_BF16_REDUCE_ENV: &str = "GLMRT_EXPERT_NCCL_BF16_REDUCE";
 const CPU_REFERENCE_NVFP4_ROUTE_BACKEND: &str = "cpu-reference-provisional-nvfp4-route";
@@ -81,13 +89,22 @@ const B12X_SPARK_DIRECT_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND: &str =
 const RETAINED_BF16_MTP_ROUTE_BACKEND: &str = "retained-bf16-mtp-cublas-route-bf16-accumulated";
 const B12X_SPARK_AOT_MAX_ROWS: usize = 256;
 const B12X_SPARK_ROUTE_MAX_LANES: usize = 4;
-const B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS: usize = 2048;
+const B12X_POWER_OF_TWO_CAPACITY_ROWS: usize = 2048;
+// One full DSA prefill wave plus its authoritative target row and the maximum
+// 15-row dSpark draft suffix. Both resident formats cover the complete legal
+// wave with one packed AOT launch; larger waves must be split upstream rather
+// than silently entering the expert-grouped fallback.
+const B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS: usize = 2064;
+pub(in crate::commands::real_full) const B12X_EXL3_K3_TOPK8_CAPACITY_ROWS: usize = 2064;
 const B12X_W4A16_PREFILL_TOPK8_ROUTES: usize = 8;
 const B12X_W4A16_EXPERTS: usize = 256;
-const B12X_W4A16_MAX_PACKED_ROUTE_SLOTS: usize = 32_512;
+const B12X_W4A16_MAX_PACKED_ROUTE_SLOTS: usize = 32_640;
 const B12X_W4A16_MAX_ROUTE_BLOCKS: usize = 760;
 const B12X_W4A16_SCRATCH_ELEMENTS: usize = 3_145_728;
 const B12X_W4A16_LOCK_ELEMENTS: usize = 1_026;
+const EXL3_K3_TRELLIS_TILE: usize = 16;
+const EXL3_K3_TRELLIS_WORDS_PER_TILE: usize = 48;
+const EXL3_MCG_MARKER: u32 = 0xCBAC_1FED;
 const STREAMING_FIRST_RESPONSE_ROWS: usize = 32;
 const STREAMING_RESPONSE_MAX_ROWS: usize = 256;
 const SPARK_COLLECTIVE_REQUEST_STRIDE: u64 = 65_536;
@@ -443,7 +460,12 @@ impl RouteTensorCache {
                     .expert_slabs
                     .values()
                     .map(|slab| slab.expert_count * 3)
-                    .sum();
+                    .sum::<usize>()
+                    + cuda
+                        .exl3_expert_slabs
+                        .values()
+                        .map(|slab| slab.expert_count * 3)
+                        .sum::<usize>();
                 let managed_projection_entries = cuda
                     .expert_slabs
                     .values()
@@ -487,8 +509,20 @@ impl RouteTensorCache {
     }
 
     fn cuda_cache(&mut self) -> Result<&mut RouteCudaCache> {
+        let cooperative_weight_preload =
+            route_preload_cooperative_from_env(REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE_ENV, true);
+        self.cuda_cache_with_weight_preload(cooperative_weight_preload)
+    }
+
+    fn cuda_cache_with_weight_preload(
+        &mut self,
+        cooperative_weight_preload: bool,
+    ) -> Result<&mut RouteCudaCache> {
         if self.cuda.is_none() {
-            self.cuda = Some(RouteCudaCache::new(self.execution_lane)?);
+            self.cuda = Some(RouteCudaCache::new(
+                self.execution_lane,
+                cooperative_weight_preload,
+            )?);
         }
         Ok(self.cuda.as_mut().expect("initialized above"))
     }
@@ -551,8 +585,10 @@ struct RouteCudaCache {
     b12x_aux_streams: Vec<RouteCudaStream>,
     b12x_lane_events: Vec<RouteCudaEvent>,
     completion_stream: RouteCudaStream,
+    prefill_completion_stream: RouteCudaStream,
     metadata_ready_event: RouteCudaEvent,
     expert_slabs: HashMap<usize, Arc<RouteCudaLayerExpertSlab>>,
+    exl3_expert_slabs: HashMap<usize, Arc<RouteCudaExl3LayerExpertSlab>>,
     bf16_expert_slabs: HashMap<usize, Arc<RouteCudaBf16LayerExpertSlab>>,
     projection_uploads: usize,
     active_layer: Option<usize>,
@@ -569,7 +605,7 @@ struct RouteCudaCache {
 }
 
 impl RouteCudaCache {
-    fn new(execution_lane: u32) -> Result<Self> {
+    fn new(execution_lane: u32, cooperative_weight_preload: bool) -> Result<Self> {
         let path = native_library_path().with_context(|| {
             format!(
                 "{REAL_FULL_CUDA_REFERENCE_KERNELS_ENV}=1 requires GLMRT_NATIVE_LIB or native/build-cuda/libglmrt_native.so"
@@ -599,6 +635,7 @@ impl RouteCudaCache {
         let library = Arc::new(library);
         let stream = RouteCudaStream::new(Arc::clone(&library))?;
         let completion_stream = RouteCudaStream::new(Arc::clone(&library))?;
+        let prefill_completion_stream = RouteCudaStream::new_high_priority(Arc::clone(&library))?;
         let metadata_ready_event = RouteCudaEvent::new(Arc::clone(&library))?;
         let shard = spark_expert_intermediate_shard_from_env()?;
         let spark_reduction =
@@ -609,14 +646,6 @@ impl RouteCudaCache {
             spark_reduction.is_none() || spark_rdma_reduction.is_none(),
             "Spark route lane {execution_lane} initialized both NCCL and RDMA reduction"
         );
-        let cooperative_weight_preload = env::var(REAL_FULL_NVFP4_ROUTE_PRELOAD_COOPERATIVE_ENV)
-            .map(|value| {
-                !matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "no" | "off" | "disabled"
-                )
-            })
-            .unwrap_or(true);
         let weight_preload_communicator = if b12x_w4a16_packed && cooperative_weight_preload {
             initialize_spark_weight_preload_communicator(&library, shard)?
         } else {
@@ -645,8 +674,10 @@ impl RouteCudaCache {
             b12x_aux_streams,
             b12x_lane_events,
             completion_stream,
+            prefill_completion_stream,
             metadata_ready_event,
             expert_slabs: HashMap::new(),
+            exl3_expert_slabs: HashMap::new(),
             bf16_expert_slabs: HashMap::new(),
             projection_uploads: 0,
             active_layer: None,
@@ -666,6 +697,8 @@ impl RouteCudaCache {
         let b12x_lane_count = self.b12x_lane_count();
         let stream = RouteCudaStream::new(Arc::clone(&self.library))?;
         let completion_stream = RouteCudaStream::new(Arc::clone(&self.library))?;
+        let prefill_completion_stream =
+            RouteCudaStream::new_high_priority(Arc::clone(&self.library))?;
         let metadata_ready_event = RouteCudaEvent::new(Arc::clone(&self.library))?;
         let shard = spark_expert_intermediate_shard_from_env()?;
         let spark_reduction = initialize_spark_expert_reduction_lane(
@@ -697,8 +730,10 @@ impl RouteCudaCache {
             b12x_aux_streams,
             b12x_lane_events,
             completion_stream,
+            prefill_completion_stream,
             metadata_ready_event,
             expert_slabs: self.expert_slabs.clone(),
+            exl3_expert_slabs: self.exl3_expert_slabs.clone(),
             bf16_expert_slabs: self.bf16_expert_slabs.clone(),
             projection_uploads: 0,
             active_layer: self.active_layer,
@@ -764,6 +799,19 @@ impl RouteCudaCache {
 
     fn b12x_lane_event(&self, lane: usize) -> *mut c_void {
         self.b12x_lane_events[lane].as_ptr()
+    }
+
+    fn completion_stream_for_rows(&self, rows: usize) -> *mut c_void {
+        // Decode and speculative verification depend on overlap among several
+        // small waves. Promoting their completion work regresses that overlap.
+        // Large prefill kernels can instead monopolize every SM long enough to
+        // starve their wire pack behind later admitted waves, so only those
+        // waves use the high-priority completion stream.
+        if rows >= 256 {
+            self.prefill_completion_stream.as_ptr()
+        } else {
+            self.completion_stream.as_ptr()
+        }
     }
 
     fn ensure_b12x_route_workspaces(
@@ -959,6 +1007,13 @@ impl RouteCudaStream {
         Ok(Self { library, stream })
     }
 
+    fn new_high_priority(library: Arc<NativeLibrary>) -> Result<Self> {
+        let stream = library
+            .cuda_stream_create_high_priority()
+            .context("creating high-priority NVFP4 route completion CUDA stream")?;
+        Ok(Self { library, stream })
+    }
+
     fn as_ptr(&self) -> *mut c_void {
         self.stream
     }
@@ -1144,13 +1199,18 @@ struct RouteCudaWorkspace {
     b12x_w4a16_packed_route_indices: Option<OwnedDeviceAllocation>,
     b12x_w4a16_block_expert_ids: Option<OwnedDeviceAllocation>,
     b12x_w4a16_packed_route_count: Option<OwnedDeviceAllocation>,
+    b12x_w4a16_topk_ids: Option<OwnedDeviceAllocation>,
     b12x_w4a16_topk_weights: Option<OwnedDeviceAllocation>,
     b12x_w4a16_fc1_scratch: Option<OwnedDeviceAllocation>,
     b12x_w4a16_fc2_scratch: Option<OwnedDeviceAllocation>,
     b12x_w4a16_locks: Option<OwnedDeviceAllocation>,
+    b12x_exl3_rotation_a_gate: Option<OwnedDeviceAllocation>,
+    b12x_exl3_rotation_a_up: Option<OwnedDeviceAllocation>,
     b12x_w4a16_pack_source: Option<OwnedDeviceAllocation>,
     startup_nvfp4_weight: Option<OwnedDeviceAllocation>,
     startup_nvfp4_scale: Option<OwnedDeviceAllocation>,
+    startup_exl3_exchange_send: Option<OwnedDeviceAllocation>,
+    startup_exl3_exchange_receive: Option<OwnedDeviceAllocation>,
     pinned_hidden: Option<OwnedPinnedHostAllocation>,
     pinned_scatter_index: Option<OwnedPinnedHostAllocation>,
     pinned_route_weights: Option<OwnedPinnedHostAllocation>,
@@ -1220,6 +1280,14 @@ struct B12xSparkAotRouteWorkspaceBuffers {
     w4a16_fc1_scratch: GlmrtDeviceBuffer,
     w4a16_fc2_scratch: GlmrtDeviceBuffer,
     w4a16_locks: GlmrtDeviceBuffer,
+}
+
+#[derive(Clone, Copy)]
+struct B12xSparkExl3AotRouteWorkspaceBuffers {
+    common: B12xSparkAotRouteWorkspaceBuffers,
+    topk_ids: GlmrtDeviceBuffer,
+    rotation_a_gate: GlmrtDeviceBuffer,
+    rotation_a_up: GlmrtDeviceBuffer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1876,6 +1944,30 @@ impl RouteCudaWorkspace {
         output_dim: usize,
     ) -> Result<B12xSparkAotRouteWorkspaceBuffers> {
         let capacity_rows = b12x_w4a16_capacity_rows(rows)?;
+        self.ensure_b12x_aot_route_buffers_for_capacity(
+            library,
+            rows,
+            capacity_rows,
+            hidden_dim,
+            intermediate_dim,
+            output_dim,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_b12x_aot_route_buffers_for_capacity(
+        &mut self,
+        library: Arc<NativeLibrary>,
+        rows: usize,
+        capacity_rows: usize,
+        hidden_dim: usize,
+        intermediate_dim: usize,
+        output_dim: usize,
+    ) -> Result<B12xSparkAotRouteWorkspaceBuffers> {
+        anyhow::ensure!(
+            rows > 0 && rows <= capacity_rows,
+            "B12X workspace rows {rows} exceed capacity {capacity_rows}"
+        );
         let compact_hidden_bytes =
             checked_matrix_bytes(capacity_rows, hidden_dim, 2, "B12X input")?;
         let group_output_bytes = checked_matrix_bytes(
@@ -2027,7 +2119,73 @@ impl RouteCudaWorkspace {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn ensure_b12x_exl3_aot_route_buffers(
+        &mut self,
+        library: Arc<NativeLibrary>,
+        rows: usize,
+        hidden_dim: usize,
+        intermediate_dim: usize,
+        output_dim: usize,
+    ) -> Result<B12xSparkExl3AotRouteWorkspaceBuffers> {
+        let capacity_rows = b12x_exl3_k3_capacity_rows(rows)?;
+        let common = self.ensure_b12x_aot_route_buffers_for_capacity(
+            Arc::clone(&library),
+            rows,
+            capacity_rows,
+            hidden_dim,
+            intermediate_dim,
+            output_dim,
+        )?;
+        let routed_rows = capacity_rows
+            .checked_mul(B12X_W4A16_PREFILL_TOPK8_ROUTES)
+            .context("B12X EXL3 routed row count overflow")?;
+        let topk_id_bytes = routed_rows
+            .checked_mul(std::mem::size_of::<i32>())
+            .context("B12X EXL3 top-k ID byte count overflow")?;
+        let rotation_bytes = checked_matrix_bytes(
+            routed_rows,
+            hidden_dim,
+            std::mem::size_of::<u16>(),
+            "B12X EXL3 rotation A",
+        )?;
+        Self::ensure_buffer(
+            &mut self.b12x_w4a16_topk_ids,
+            Arc::clone(&library),
+            topk_id_bytes,
+            "B12X EXL3 direct top-k expert IDs",
+        )?;
+        Self::ensure_buffer(
+            &mut self.b12x_exl3_rotation_a_gate,
+            Arc::clone(&library),
+            rotation_bytes,
+            "B12X EXL3 gate input rotation",
+        )?;
+        Self::ensure_buffer(
+            &mut self.b12x_exl3_rotation_a_up,
+            library,
+            rotation_bytes,
+            "B12X EXL3 up input rotation",
+        )?;
+        Ok(B12xSparkExl3AotRouteWorkspaceBuffers {
+            common,
+            topk_ids: self
+                .b12x_w4a16_topk_ids
+                .as_ref()
+                .expect("B12X EXL3 top-k IDs ensured")
+                .buffer(),
+            rotation_a_gate: self
+                .b12x_exl3_rotation_a_gate
+                .as_ref()
+                .expect("B12X EXL3 gate rotation A ensured")
+                .buffer(),
+            rotation_a_up: self
+                .b12x_exl3_rotation_a_up
+                .as_ref()
+                .expect("B12X EXL3 up rotation A ensured")
+                .buffer(),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn quantize_bf16_projection_into_w4a16(
         &mut self,
@@ -2628,6 +2786,506 @@ impl RouteCudaBf16LayerExpertSlab {
                 self.w2_expert_stride_bytes,
                 "retained BF16 W2 expert",
             )?,
+        })
+    }
+}
+
+struct RouteCudaExl3LayerExpertSlab {
+    layer_id: usize,
+    expert_count: usize,
+    hidden_dim: usize,
+    intermediate_dim: usize,
+    w13_trellis: Arc<OwnedDeviceAllocation>,
+    w2_trellis: Arc<OwnedDeviceAllocation>,
+    unit_global_scale: Arc<OwnedDeviceAllocation>,
+    gate_suh: Arc<OwnedDeviceAllocation>,
+    up_suh: Arc<OwnedDeviceAllocation>,
+    intermediate_rotations: Arc<OwnedDeviceAllocation>,
+    down_svh: Arc<OwnedDeviceAllocation>,
+    trellis_expert_stride_bytes: usize,
+}
+
+impl RouteCudaExl3LayerExpertSlab {
+    fn new(
+        library: Arc<NativeLibrary>,
+        layer_id: usize,
+        expert_count: usize,
+        hidden_dim: usize,
+        intermediate_dim: usize,
+    ) -> Result<Self> {
+        anyhow::ensure!(expert_count > 0, "EXL3 expert slab requires experts");
+        anyhow::ensure!(
+            hidden_dim % EXL3_K3_TRELLIS_TILE == 0 && intermediate_dim % EXL3_K3_TRELLIS_TILE == 0,
+            "layer {layer_id} EXL3 geometry {hidden_dim}x{intermediate_dim} is not tile aligned"
+        );
+        let trellis_expert_stride_bytes = hidden_dim
+            .checked_div(EXL3_K3_TRELLIS_TILE)
+            .and_then(|hidden_tiles| {
+                hidden_tiles.checked_mul(intermediate_dim / EXL3_K3_TRELLIS_TILE)
+            })
+            .and_then(|tiles| tiles.checked_mul(EXL3_K3_TRELLIS_WORDS_PER_TILE))
+            .and_then(|words| words.checked_mul(std::mem::size_of::<i16>()))
+            .context("EXL3 trellis expert stride overflow")?;
+        let w13_bytes = trellis_expert_stride_bytes
+            .checked_mul(expert_count)
+            .and_then(|bytes| bytes.checked_mul(2))
+            .context("EXL3 W13 slab byte count overflow")?;
+        let w2_bytes = trellis_expert_stride_bytes
+            .checked_mul(expert_count)
+            .context("EXL3 W2 slab byte count overflow")?;
+        let hidden_rotation_bytes = expert_count
+            .checked_mul(hidden_dim)
+            .and_then(|values| values.checked_mul(std::mem::size_of::<u16>()))
+            .context("EXL3 hidden rotation slab byte count overflow")?;
+        let intermediate_rotation_bytes = expert_count
+            .checked_mul(intermediate_dim)
+            .and_then(|values| values.checked_mul(3))
+            .and_then(|values| values.checked_mul(std::mem::size_of::<u16>()))
+            .context("EXL3 intermediate rotation slab byte count overflow")?;
+        let allocation = |bytes, label: &str| {
+            OwnedDeviceAllocation::new_with_kind(
+                Arc::clone(&library),
+                bytes,
+                &format!("layer {layer_id} EXL3 {label}"),
+                false,
+            )
+            .map(Arc::new)
+        };
+        Ok(Self {
+            layer_id,
+            expert_count,
+            hidden_dim,
+            intermediate_dim,
+            w13_trellis: allocation(w13_bytes, "W13 trellis slab")?,
+            w2_trellis: allocation(w2_bytes, "W2 trellis slab")?,
+            unit_global_scale: allocation(
+                expert_count
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .context("EXL3 unit global scale byte count overflow")?,
+                "unit global scale",
+            )?,
+            gate_suh: allocation(hidden_rotation_bytes, "gate Suh slab")?,
+            up_suh: allocation(hidden_rotation_bytes, "up Suh slab")?,
+            intermediate_rotations: allocation(
+                intermediate_rotation_bytes,
+                "intermediate rotation slab",
+            )?,
+            down_svh: allocation(hidden_rotation_bytes, "down Svh slab")?,
+            trellis_expert_stride_bytes,
+        })
+    }
+
+    fn upload_unit_global_scale(
+        &self,
+        library: Arc<NativeLibrary>,
+        workspace: &mut RouteCudaWorkspace,
+        cuda_stream: *mut c_void,
+    ) -> Result<()> {
+        let unit_global_scale = vec![1.0_f32; self.expert_count];
+        workspace.upload_host_bytes_to_existing_device_buffer(
+            library,
+            self.unit_global_scale.buffer(),
+            f32_bytes(&unit_global_scale),
+            &format!("layer {} EXL3 unit global scale", self.layer_id),
+            RouteCudaProjectionStageSlot::Weight,
+            cuda_stream,
+        )
+    }
+
+    fn store_layer_experts_direct(
+        &self,
+        catalog: &TensorCatalog,
+        expert_ids: &[usize],
+        shard: ExpertIntermediateShard,
+        source_reader: &mut RouteCudaExl3ReadExecutor,
+        library: Arc<NativeLibrary>,
+        workspace: &mut RouteCudaWorkspace,
+        cuda_stream: *mut c_void,
+    ) -> Result<u64> {
+        anyhow::ensure!(
+            shard.count == 4 && shard.rank < shard.count,
+            "native EXL3 direct preload requires TP4, got rank {}/{}",
+            shard.rank,
+            shard.count
+        );
+        let local_intermediate = shard.local_rows(GLM52_MOE_INTERMEDIATE_SIZE)?;
+        anyhow::ensure!(
+            self.hidden_dim == GLM52_HIDDEN_SIZE
+                && self.intermediate_dim == local_intermediate
+                && self.expert_count == catalog.facts.routed_experts,
+            "layer {} EXL3 direct preload slab geometry is incompatible with the catalog",
+            self.layer_id
+        );
+        let trellis = self.trellis_expert_stride_bytes;
+        let hidden_rotation = GLM52_HIDDEN_SIZE
+            .checked_mul(std::mem::size_of::<u16>())
+            .context("EXL3 hidden rotation byte count overflow")?;
+        let local_rotation = local_intermediate
+            .checked_mul(std::mem::size_of::<u16>())
+            .context("EXL3 local rotation byte count overflow")?;
+        let gate_trellis = 0;
+        let up_trellis = gate_trellis + trellis;
+        let down_trellis = up_trellis + trellis;
+        let gate_suh = down_trellis + trellis;
+        let up_suh = gate_suh + hidden_rotation;
+        let gate_svh = up_suh + hidden_rotation;
+        let up_svh = gate_svh + local_rotation;
+        let down_suh = up_svh + local_rotation;
+        let down_svh = down_suh + local_rotation;
+        let expert_bytes = down_svh
+            .checked_add(hidden_rotation)
+            .context("EXL3 direct staging expert byte count overflow")?;
+        // This is a streaming pinned window rather than a second resident copy.
+        // Bound it so a layer with 256 experts does not create a giant host slab.
+        let chunk_experts = ((32 * 1024 * 1024) / expert_bytes).clamp(1, 16);
+        RouteCudaWorkspace::ensure_pinned_buffer(
+            &mut workspace.pinned_projection_weight,
+            Arc::clone(&library),
+            chunk_experts * expert_bytes,
+            "EXL3 direct resident preload",
+        )?;
+
+        let snapshot = Path::new(&catalog.snapshot_path);
+        let mut files = HashMap::<PathBuf, Arc<File>>::new();
+        let mut source_bytes = 0_u64;
+        let mut request_build_elapsed = Duration::ZERO;
+        let mut source_read_elapsed = Duration::ZERO;
+        let mut host_to_device_elapsed = Duration::ZERO;
+        let mut preload_chunks = 0_usize;
+        let mut max_chunk_requests = 0_usize;
+
+        for expert_chunk in expert_ids.chunks(chunk_experts) {
+            preload_chunks += 1;
+            let chunk_bytes = expert_chunk
+                .len()
+                .checked_mul(expert_bytes)
+                .context("EXL3 direct staging chunk byte count overflow")?;
+            let staging_buffer;
+            {
+                let request_build_started = Instant::now();
+                let staging = workspace
+                    .pinned_projection_weight
+                    .as_mut()
+                    .expect("EXL3 pinned preload buffer ensured above");
+                let destination = staging.as_mut_slice(chunk_bytes)?;
+                let mut markers = vec![0_u8; expert_chunk.len() * 3 * std::mem::size_of::<u32>()];
+                let mut requests = Vec::with_capacity(expert_chunk.len() * 780);
+                for (chunk_index, &expert_id) in expert_chunk.iter().enumerate() {
+                    anyhow::ensure!(
+                        expert_id < self.expert_count,
+                        "layer {} EXL3 expert {expert_id} exceeds {}",
+                        self.layer_id,
+                        self.expert_count
+                    );
+                    let expert = glm52_exl3_expert(catalog, self.layer_id, expert_id)?;
+                    let base = chunk_index * expert_bytes;
+                    queue_route_cuda_exl3_trellis_tp4(
+                        snapshot,
+                        expert.gate,
+                        shard,
+                        local_intermediate,
+                        &mut destination[base + gate_trellis..base + gate_trellis + trellis],
+                        &mut files,
+                        &mut requests,
+                    )?;
+                    queue_route_cuda_exl3_trellis_tp4(
+                        snapshot,
+                        expert.up,
+                        shard,
+                        local_intermediate,
+                        &mut destination[base + up_trellis..base + up_trellis + trellis],
+                        &mut files,
+                        &mut requests,
+                    )?;
+                    queue_route_cuda_exl3_trellis_tp4(
+                        snapshot,
+                        expert.down,
+                        shard,
+                        local_intermediate,
+                        &mut destination[base + down_trellis..base + down_trellis + trellis],
+                        &mut files,
+                        &mut requests,
+                    )?;
+                    queue_route_cuda_exl3_tensor_window(
+                        snapshot,
+                        expert.gate.suh,
+                        0,
+                        &mut files,
+                        &mut destination[base + gate_suh..base + gate_suh + hidden_rotation],
+                        &mut requests,
+                    )?;
+                    queue_route_cuda_exl3_tensor_window(
+                        snapshot,
+                        expert.up.suh,
+                        0,
+                        &mut files,
+                        &mut destination[base + up_suh..base + up_suh + hidden_rotation],
+                        &mut requests,
+                    )?;
+                    let local_rotation_start = shard
+                        .rank
+                        .checked_mul(local_rotation)
+                        .context("EXL3 local rotation source offset overflow")?;
+                    queue_route_cuda_exl3_tensor_window(
+                        snapshot,
+                        expert.gate.svh,
+                        local_rotation_start,
+                        &mut files,
+                        &mut destination[base + gate_svh..base + gate_svh + local_rotation],
+                        &mut requests,
+                    )?;
+                    queue_route_cuda_exl3_tensor_window(
+                        snapshot,
+                        expert.up.svh,
+                        local_rotation_start,
+                        &mut files,
+                        &mut destination[base + up_svh..base + up_svh + local_rotation],
+                        &mut requests,
+                    )?;
+                    queue_route_cuda_exl3_tensor_window(
+                        snapshot,
+                        expert.down.suh,
+                        local_rotation_start,
+                        &mut files,
+                        &mut destination[base + down_suh..base + down_suh + local_rotation],
+                        &mut requests,
+                    )?;
+                    queue_route_cuda_exl3_tensor_window(
+                        snapshot,
+                        expert.down.svh,
+                        0,
+                        &mut files,
+                        &mut destination[base + down_svh..base + down_svh + hidden_rotation],
+                        &mut requests,
+                    )?;
+                    for (projection_index, projection) in [expert.gate, expert.up, expert.down]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let marker_start =
+                            (chunk_index * 3 + projection_index) * std::mem::size_of::<u32>();
+                        queue_route_cuda_exl3_tensor_window(
+                            snapshot,
+                            projection.mcg,
+                            0,
+                            &mut files,
+                            &mut markers[marker_start..marker_start + std::mem::size_of::<u32>()],
+                            &mut requests,
+                        )?;
+                    }
+                    source_bytes = source_bytes
+                        .checked_add(expert_bytes as u64 + 3 * std::mem::size_of::<u32>() as u64)
+                        .context("EXL3 direct source byte count overflow")?;
+                }
+                request_build_elapsed += request_build_started.elapsed();
+                max_chunk_requests = max_chunk_requests.max(requests.len());
+                let source_read_started = Instant::now();
+                source_reader.execute(&requests)?;
+                source_read_elapsed += source_read_started.elapsed();
+                for (marker_index, marker) in
+                    markers.chunks_exact(std::mem::size_of::<u32>()).enumerate()
+                {
+                    let marker = u32::from_le_bytes(
+                        marker
+                            .try_into()
+                            .expect("EXL3 marker chunk has exactly four bytes"),
+                    );
+                    anyhow::ensure!(
+                        marker == EXL3_MCG_MARKER,
+                        "layer {} EXL3 marker {marker_index} has 0x{marker:08x}, expected 0x{EXL3_MCG_MARKER:08x}",
+                        self.layer_id
+                    );
+                }
+                staging_buffer = staging.buffer();
+            }
+
+            let host_to_device_started = Instant::now();
+            for (chunk_index, &expert_id) in expert_chunk.iter().enumerate() {
+                let host_base = chunk_index * expert_bytes;
+                let intermediate_base = expert_id * 3 * local_rotation;
+                let copies = [
+                    (
+                        gate_trellis,
+                        trellis,
+                        device_buffer_byte_view(
+                            self.w13_trellis.buffer(),
+                            expert_id * trellis,
+                            trellis,
+                            "EXL3 W13 gate trellis",
+                        )?,
+                    ),
+                    (
+                        up_trellis,
+                        trellis,
+                        device_buffer_byte_view(
+                            self.w13_trellis.buffer(),
+                            (self.expert_count + expert_id) * trellis,
+                            trellis,
+                            "EXL3 W13 up trellis",
+                        )?,
+                    ),
+                    (
+                        down_trellis,
+                        trellis,
+                        device_buffer_byte_view(
+                            self.w2_trellis.buffer(),
+                            expert_id * trellis,
+                            trellis,
+                            "EXL3 W2 down trellis",
+                        )?,
+                    ),
+                    (
+                        gate_suh,
+                        hidden_rotation,
+                        device_buffer_byte_view(
+                            self.gate_suh.buffer(),
+                            expert_id * hidden_rotation,
+                            hidden_rotation,
+                            "EXL3 gate Suh",
+                        )?,
+                    ),
+                    (
+                        up_suh,
+                        hidden_rotation,
+                        device_buffer_byte_view(
+                            self.up_suh.buffer(),
+                            expert_id * hidden_rotation,
+                            hidden_rotation,
+                            "EXL3 up Suh",
+                        )?,
+                    ),
+                    (
+                        gate_svh,
+                        local_rotation,
+                        device_buffer_byte_view(
+                            self.intermediate_rotations.buffer(),
+                            intermediate_base,
+                            local_rotation,
+                            "EXL3 gate Svh",
+                        )?,
+                    ),
+                    (
+                        up_svh,
+                        local_rotation,
+                        device_buffer_byte_view(
+                            self.intermediate_rotations.buffer(),
+                            intermediate_base + local_rotation,
+                            local_rotation,
+                            "EXL3 up Svh",
+                        )?,
+                    ),
+                    (
+                        down_suh,
+                        local_rotation,
+                        device_buffer_byte_view(
+                            self.intermediate_rotations.buffer(),
+                            intermediate_base + 2 * local_rotation,
+                            local_rotation,
+                            "EXL3 down Suh",
+                        )?,
+                    ),
+                    (
+                        down_svh,
+                        hidden_rotation,
+                        device_buffer_byte_view(
+                            self.down_svh.buffer(),
+                            expert_id * hidden_rotation,
+                            hidden_rotation,
+                            "EXL3 down Svh",
+                        )?,
+                    ),
+                ];
+                for (source_offset, bytes, destination) in copies {
+                    let source = host_buffer_byte_view(
+                        staging_buffer,
+                        host_base + source_offset,
+                        bytes,
+                        "EXL3 compact pinned source",
+                    )?;
+                    unsafe {
+                        library
+                            .copy_host_buffer_h2d_async(destination, source, bytes, cuda_stream)
+                            .context("copying compact EXL3 TP4 bytes into resident slab")?;
+                    }
+                }
+            }
+            unsafe {
+                library
+                    .cuda_stream_synchronize(cuda_stream)
+                    .context("synchronizing EXL3 direct resident preload chunk")?;
+            }
+            host_to_device_elapsed += host_to_device_started.elapsed();
+        }
+        eprintln!(
+            "real_exl3_direct_preload_breakdown layer_id={} tp_rank={} chunks={} chunk_experts={} max_chunk_requests={} request_build_ms={:.3} source_read_ms={:.3} host_to_device_ms={:.3}",
+            self.layer_id,
+            shard.rank,
+            preload_chunks,
+            chunk_experts,
+            max_chunk_requests,
+            request_build_elapsed.as_secs_f64() * 1_000.0,
+            source_read_elapsed.as_secs_f64() * 1_000.0,
+            host_to_device_elapsed.as_secs_f64() * 1_000.0,
+        );
+        Ok(source_bytes)
+    }
+
+    fn resident_bytes(&self) -> usize {
+        [
+            &self.w13_trellis,
+            &self.w2_trellis,
+            &self.unit_global_scale,
+            &self.gate_suh,
+            &self.up_suh,
+            &self.intermediate_rotations,
+            &self.down_svh,
+        ]
+        .into_iter()
+        .map(|allocation| allocation.capacity_bytes())
+        .sum()
+    }
+
+    fn exl3_k3_moe_buffers(
+        &self,
+        workspace: B12xSparkExl3AotRouteWorkspaceBuffers,
+        output_f32: GlmrtDeviceBuffer,
+    ) -> Result<GlmrtB12xSparkExl3K3MoeBuffers> {
+        anyhow::ensure!(
+            self.expert_count == B12X_W4A16_EXPERTS
+                && self.hidden_dim == GLM52_HIDDEN_SIZE
+                && self.intermediate_dim == 512
+                && self.trellis_expert_stride_bytes
+                    == self.hidden_dim * self.intermediate_dim * GLM52_EXL3_BITS / 8,
+            "layer {} EXL3 slab has unsupported experts={} geometry={}x{} trellis_stride={}",
+            self.layer_id,
+            self.expert_count,
+            self.hidden_dim,
+            self.intermediate_dim,
+            self.trellis_expert_stride_bytes,
+        );
+        Ok(GlmrtB12xSparkExl3K3MoeBuffers {
+            input_bf16: workspace.common.compact_hidden,
+            rotation_a_gate: workspace.rotation_a_gate,
+            rotation_a_up: workspace.rotation_a_up,
+            w13_trellis: self.w13_trellis.buffer(),
+            w2_trellis: self.w2_trellis.buffer(),
+            unit_global_scale: self.unit_global_scale.buffer(),
+            fc1_output: workspace.common.w4a16_fc1_output,
+            activated: workspace.common.w4a16_activated,
+            fc2_output: workspace.common.group_output,
+            output_f32,
+            packed_route_indices: workspace.common.w4a16_packed_route_indices,
+            block_expert_ids: workspace.common.w4a16_block_expert_ids,
+            packed_route_count: workspace.common.w4a16_packed_route_count,
+            topk_ids: workspace.topk_ids,
+            topk_weights: workspace.common.w4a16_topk_weights,
+            fc1_scratch: workspace.common.w4a16_fc1_scratch,
+            fc2_scratch: workspace.common.w4a16_fc2_scratch,
+            locks: workspace.common.w4a16_locks,
+            intermediate_rotations: self.intermediate_rotations.buffer(),
+            gate_suh: self.gate_suh.buffer(),
+            up_suh: self.up_suh.buffer(),
+            down_svh: self.down_svh.buffer(),
         })
     }
 }
@@ -3728,9 +4386,38 @@ fn plan_packed_w4a16_topk8_prefill_flat(
     row_count: usize,
     routes: &[PackedW4a16Topk8Route],
 ) -> Result<PackedW4a16Topk8PrefillPlan> {
+    plan_packed_topk8_prefill_flat_with_block_rows(
+        row_count,
+        routes,
+        b12x_w4a16_prefill_route_block_rows(row_count),
+        true,
+        B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS,
+    )
+}
+
+fn plan_packed_exl3_k3_topk8_prefill_flat(
+    row_count: usize,
+    routes: &[PackedW4a16Topk8Route],
+) -> Result<PackedW4a16Topk8PrefillPlan> {
+    plan_packed_topk8_prefill_flat_with_block_rows(
+        row_count,
+        routes,
+        b12x_exl3_k3_route_block_rows(row_count),
+        false,
+        B12X_EXL3_K3_TOPK8_CAPACITY_ROWS,
+    )
+}
+
+fn plan_packed_topk8_prefill_flat_with_block_rows(
+    row_count: usize,
+    routes: &[PackedW4a16Topk8Route],
+    route_block_rows: usize,
+    direct_m1: bool,
+    capacity_rows: usize,
+) -> Result<PackedW4a16Topk8PrefillPlan> {
     anyhow::ensure!(
-        row_count > 0 && row_count <= B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS,
-        "packed W4A16 top-k=8 prefill rows {row_count} are outside 1..={B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS}"
+        row_count > 0 && row_count <= capacity_rows,
+        "packed top-k=8 prefill rows {row_count} are outside 1..={capacity_rows}"
     );
     let route_count = row_count
         .checked_mul(B12X_W4A16_PREFILL_TOPK8_ROUTES)
@@ -3757,7 +4444,7 @@ fn plan_packed_w4a16_topk8_prefill_flat(
     // M=1 consumes the direct top-k expert IDs. Exact M=2..8 execution is
     // expert-packed in block-8 groups so each route retains the M=1 arithmetic
     // shape while repeated experts reuse their resident weights.
-    let direct_topk = row_count == 1;
+    let direct_topk = direct_m1 && row_count == 1;
     let topk_weights = routes.iter().map(|route| route.weight).collect::<Vec<_>>();
     if direct_topk {
         return Ok(PackedW4a16Topk8PrefillPlan {
@@ -3769,7 +4456,10 @@ fn plan_packed_w4a16_topk8_prefill_flat(
         });
     }
 
-    let route_block_rows = b12x_w4a16_prefill_route_block_rows(row_count);
+    anyhow::ensure!(
+        matches!(route_block_rows, 8 | 16 | 32 | 48 | 64),
+        "packed top-k=8 route block rows {route_block_rows} are unsupported"
+    );
     let mut expert_counts = [0_usize; B12X_W4A16_EXPERTS];
     for route in routes {
         let expert_id = route.expert_id as usize;
@@ -3843,6 +4533,7 @@ pub(in crate::commands::real_full) struct RouteNvfp4IngressStream {
     max_group_rows: usize,
     lane_count: usize,
     packed_w4a16_topk8_prefill: bool,
+    exl3_topk8_prefill: bool,
     m1_parity_grouped_small_m_w4a16: bool,
     split_m1_m2_w4a16: bool,
     w4a16_small_m_mode: W4a16SmallMMode,
@@ -3925,10 +4616,7 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
     cache: &mut RouteTensorCache,
 ) -> Result<Option<RouteNvfp4IngressStream>> {
     let route_count = routes.len();
-    if row_count == 0
-        || row_count > B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS
-        || route_count != row_count * B12X_W4A16_PREFILL_TOPK8_ROUTES
-    {
+    if row_count == 0 || route_count != row_count * B12X_W4A16_PREFILL_TOPK8_ROUTES {
         return Ok(None);
     }
     anyhow::ensure!(
@@ -3957,8 +4645,20 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         && slab
             .map(|slab| slab.w4a16_moe_buffers().is_ok())
             .unwrap_or(false);
-    if !packed_w4a16 {
+    let exl3_topk8_prefill = cuda_cache.exl3_expert_slabs.contains_key(&layer_id);
+    if !packed_w4a16 && !exl3_topk8_prefill {
         return Ok(None);
+    }
+    if exl3_topk8_prefill {
+        anyhow::ensure!(
+            row_count <= B12X_EXL3_K3_TOPK8_CAPACITY_ROWS,
+            "EXL3 top-k=8 host rows {row_count} exceed the combined prefill/decode/MTP capacity {B12X_EXL3_K3_TOPK8_CAPACITY_ROWS}"
+        );
+    } else {
+        anyhow::ensure!(
+            row_count <= B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS,
+            "packed W4A16 top-k=8 host rows {row_count} exceed the combined prefill/decode/MTP capacity {B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS}; split the wave upstream"
+        );
     }
     anyhow::ensure!(
         cuda_cache.b12x_aot_enabled,
@@ -3980,8 +4680,13 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         );
     }
 
-    let packed_plan = plan_packed_w4a16_topk8_prefill_flat(row_count, routes)?;
-    let m1_parity_grouped_small_m_w4a16 = packed_w4a16 && (2..=8).contains(&row_count);
+    let packed_plan = if exl3_topk8_prefill {
+        plan_packed_exl3_k3_topk8_prefill_flat(row_count, routes)?
+    } else {
+        plan_packed_w4a16_topk8_prefill_flat(row_count, routes)?
+    };
+    let m1_parity_grouped_small_m_w4a16 =
+        packed_w4a16 && !exl3_topk8_prefill && (2..=8).contains(&row_count);
     let w4a16_small_m_mode = b12x_spark_w4a16_small_m_mode();
     let split_m1_m2_w4a16 = m1_parity_grouped_small_m_w4a16
         && row_count == 2
@@ -3997,19 +4702,25 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         && output_dtype == RouteStreamingOutputDtype::Fp8E4m3RowScaled
         && fused_fp8_reduction_enabled()
         && cuda_cache.spark_reduction_dtype() == Some(ExpertIntermediateReductionDtype::Fp8);
-    let packed_w4a16_direct_fp8_output = output_dtype
-        == RouteStreamingOutputDtype::Fp8E4m3RowScaled
+    let packed_w4a16_direct_fp8_output = !exl3_topk8_prefill
+        && output_dtype == RouteStreamingOutputDtype::Fp8E4m3RowScaled
         && (packed_w4a16_row_sharded_fp8_direct || !spark_reduction);
     if route_stage_timing_enabled() {
         eprintln!(
-            "real_nvfp4_route_topk8_prefill_fast_selected layer_id={layer_id} rows={row_count} routes={route_count} layout=w4a16-packed"
+            "real_nvfp4_route_topk8_prefill_fast_selected layer_id={layer_id} rows={row_count} routes={route_count} layout={}",
+            if exl3_topk8_prefill { "exl3-k3-trellis" } else { "w4a16-packed" }
         );
     }
 
     let hidden_bytes = row_count
         .checked_mul(hidden_row_stride_bytes)
         .context("packed W4A16 prefill hidden byte count overflow")?;
-    let accumulator_bytes = row_count
+    let accumulator_rows = if exl3_topk8_prefill {
+        b12x_exl3_k3_capacity_rows(row_count)?
+    } else {
+        row_count
+    };
+    let accumulator_bytes = accumulator_rows
         .checked_mul(output_rows)
         .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
         .context("packed W4A16 prefill accumulator byte count overflow")?;
@@ -4021,7 +4732,7 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         .context("packed W4A16 prefill weight byte count overflow")?;
     let library = Arc::clone(&cuda_cache.library);
     let cuda_stream = cuda_cache.stream.as_ptr();
-    let completion_stream = cuda_cache.completion_stream.as_ptr();
+    let completion_stream = cuda_cache.completion_stream_for_rows(row_count);
     let metadata_ready_event = cuda_cache.metadata_ready_event.as_ptr();
     unsafe {
         library
@@ -4038,13 +4749,28 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         index_bytes,
     )?;
     let b12x_workspace_rows = if split_m1_m2_w4a16 { 1 } else { row_count };
-    let b12x_workspaces = cuda_cache.ensure_b12x_route_workspaces(
-        lane_count,
-        b12x_workspace_rows,
-        hidden_dim,
-        512,
-        output_rows,
-    )?;
+    let exl3_workspace = exl3_topk8_prefill
+        .then(|| {
+            cuda_cache.workspace.ensure_b12x_exl3_aot_route_buffers(
+                Arc::clone(&library),
+                b12x_workspace_rows,
+                hidden_dim,
+                512,
+                output_rows,
+            )
+        })
+        .transpose()?;
+    let b12x_workspaces = if let Some(exl3) = exl3_workspace {
+        vec![exl3.common]
+    } else {
+        cuda_cache.ensure_b12x_route_workspaces(
+            lane_count,
+            b12x_workspace_rows,
+            hidden_dim,
+            512,
+            output_rows,
+        )?
+    };
     let scatter_indices = (0..row_count)
         .map(|row| u32::try_from(row).context("packed prefill row index exceeds u32"))
         .collect::<Result<Vec<_>>>()?;
@@ -4057,6 +4783,10 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
     packed_metadata.extend_from_slice(&packed_plan.block_expert_ids);
     let route_count_offset = packed_metadata.len() * std::mem::size_of::<u32>();
     packed_metadata.push(packed_plan.packed_route_count);
+    let direct_topk_offset = packed_metadata.len() * std::mem::size_of::<u32>();
+    if exl3_topk8_prefill {
+        packed_metadata.extend_from_slice(&packed_plan.direct_topk_ids);
+    }
     let metadata_payloads = cuda_cache.workspace.stage_accumulation_metadata_payloads(
         Arc::clone(&library),
         u32_bytes(&scatter_indices),
@@ -4146,6 +4876,22 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
                 completion_stream,
             )
             .context("copying packed W4A16 prefill route count")?;
+        if let Some(exl3) = exl3_workspace {
+            let direct_topk_bytes = packed_plan.direct_topk_ids.len() * std::mem::size_of::<u32>();
+            library
+                .copy_host_buffer_h2d_async(
+                    exl3.topk_ids,
+                    host_buffer_byte_view(
+                        input_index_payload,
+                        direct_topk_offset,
+                        direct_topk_bytes,
+                        "EXL3 top-k expert IDs",
+                    )?,
+                    direct_topk_bytes,
+                    completion_stream,
+                )
+                .context("copying EXL3 top-k expert IDs")?;
+        }
         if !split_m1_m2_w4a16 {
             library
                 .copy_host_buffer_h2d_async(
@@ -4194,6 +4940,7 @@ pub(in crate::commands::real_full) fn try_begin_packed_w4a16_topk8_prefill_cache
         max_group_rows: b12x_workspace_rows,
         lane_count,
         packed_w4a16_topk8_prefill: true,
+        exl3_topk8_prefill,
         m1_parity_grouped_small_m_w4a16,
         split_m1_m2_w4a16,
         w4a16_small_m_mode,
@@ -4428,7 +5175,7 @@ pub(in crate::commands::real_full) fn begin_nvfp4_route_ingress_stream_cached(
     let grouped_decode = grouped_decode_shape && w4a16_decode;
     let library = Arc::clone(&cuda_cache.library);
     let cuda_stream = cuda_cache.stream.as_ptr();
-    let completion_stream = cuda_cache.completion_stream.as_ptr();
+    let completion_stream = cuda_cache.completion_stream_for_rows(row_count);
     let workspace = cuda_cache.workspace.ensure_accumulation_buffers(
         Arc::clone(&library),
         hidden_bytes,
@@ -4688,6 +5435,7 @@ pub(in crate::commands::real_full) fn begin_nvfp4_route_ingress_stream_cached(
         max_group_rows: workspace_rows,
         lane_count,
         packed_w4a16_topk8_prefill,
+        exl3_topk8_prefill: false,
         m1_parity_grouped_small_m_w4a16,
         split_m1_m2_w4a16,
         w4a16_small_m_mode,
@@ -5292,8 +6040,12 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
         .row_count
         .checked_mul(state.hidden_row_stride_bytes)
         .context("streamed NVFP4 route hidden byte count overflow")?;
-    let accumulator_bytes = state
-        .row_count
+    let accumulator_rows = if state.exl3_topk8_prefill {
+        b12x_exl3_k3_capacity_rows(state.row_count)?
+    } else {
+        state.row_count
+    };
+    let accumulator_bytes = accumulator_rows
         .checked_mul(state.output_rows)
         .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
         .context("streamed NVFP4 route accumulator byte count overflow")?;
@@ -5308,7 +6060,7 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
     let cuda_cache = cache.cuda_cache()?;
     cuda_cache.prepare_layer(state.layer_id);
     let library = Arc::clone(&cuda_cache.library);
-    let completion_stream = cuda_cache.completion_stream.as_ptr();
+    let completion_stream = cuda_cache.completion_stream_for_rows(state.row_count);
     let workspace = cuda_cache.workspace.ensure_accumulation_buffers(
         Arc::clone(&library),
         hidden_bytes,
@@ -5318,13 +6070,29 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
         weight_bytes,
         index_bytes,
     )?;
-    let b12x_workspaces = cuda_cache.ensure_b12x_route_workspaces(
-        state.lane_count,
-        state.max_group_rows,
-        state.hidden_dim,
-        state.max_intermediate_rows,
-        state.output_rows,
-    )?;
+    let exl3_workspace = state
+        .exl3_topk8_prefill
+        .then(|| {
+            cuda_cache.workspace.ensure_b12x_exl3_aot_route_buffers(
+                Arc::clone(&library),
+                state.max_group_rows,
+                state.hidden_dim,
+                state.max_intermediate_rows,
+                state.output_rows,
+            )
+        })
+        .transpose()?;
+    let b12x_workspaces = if let Some(exl3) = exl3_workspace {
+        vec![exl3.common]
+    } else {
+        cuda_cache.ensure_b12x_route_workspaces(
+            state.lane_count,
+            state.max_group_rows,
+            state.hidden_dim,
+            state.max_intermediate_rows,
+            state.output_rows,
+        )?
+    };
     let packed_prefill_rdma_bf16_direct = state.packed_w4a16_topk8_prefill
         && state.spark_row_sharded_reduction
         && cuda_cache.spark_rdma_reduction_enabled()
@@ -5376,11 +6144,6 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
                 state.next_group == 0,
                 "packed W4A16 top-k=8 prefill was launched more than once"
             );
-            let slab = cuda_cache
-                .expert_slabs
-                .get(&state.layer_id)
-                .context("top-k=8 prefill lost its expert slab")?;
-            let w4a16_layer_buffers = slab.w4a16_moe_buffers()?;
             let group_stream = cuda_cache.b12x_lane_stream(0);
             let b12x_workspace = b12x_workspaces[0];
             let input_payload = direct_packed_input.unwrap_or(device_buffer_byte_view(
@@ -5389,57 +6152,122 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
                 state.row_count * state.hidden_row_stride_bytes,
                 "packed W4A16 top-k=8 prefill NVFP4 input",
             )?);
-            let combined_output = device_buffer_byte_view(
-                if state.topk8_combined_output_in_group_buffer {
-                    b12x_workspace.group_output
-                } else {
-                    b12x_workspace.compact_hidden
-                },
-                0,
-                state.row_count * state.output_rows * std::mem::size_of::<u16>(),
-                "packed W4A16 top-k=8 prefill combined output",
-            )?;
-            let output_indices = device_buffer_byte_view(
-                workspace.scatter_index,
-                0,
-                state.row_count * std::mem::size_of::<u32>(),
-                "packed W4A16 top-k=8 prefill output indices",
-            )?;
-            unsafe {
-                if let Some(timeline) = packed_prefill_timeline.as_ref() {
-                    timeline.record(
-                        timeline.start.as_ref(),
-                        group_stream,
-                        "packed compute start",
-                    )?;
+            if state.exl3_topk8_prefill {
+                let exl3_workspace = exl3_workspace.context("EXL3 route lost its workspace")?;
+                let buffers = cuda_cache
+                    .exl3_expert_slabs
+                    .get(&state.layer_id)
+                    .context("EXL3 top-k=8 route lost its resident expert slab")?
+                    .exl3_k3_moe_buffers(exl3_workspace, workspace.accumulator)?;
+                // Preserve the qualified FP32 decode and speculative-verify
+                // paths. Verify executes several rows together too, so merely
+                // checking M > 1 is not a prefill discriminator. For genuine
+                // prefill-sized waves, write the FP32-accumulated top-k sum as
+                // BF16 into the now-dead input workspace so the reducer can
+                // use its contiguous fast-pack contract.
+                let direct_bf16_output = packed_prefill_rdma_bf16_direct
+                    && state.row_count >= 256
+                    && exl3_prefill_bf16_output_enabled();
+                unsafe {
+                    if let Some(timeline) = packed_prefill_timeline.as_ref() {
+                        timeline.record(
+                            timeline.start.as_ref(),
+                            group_stream,
+                            "EXL3 packed compute start",
+                        )?;
+                    }
+                    if direct_bf16_output {
+                        library
+                            .cuda_b12x_spark_exl3_k3_topk8_nvfp4_bf16_async(
+                                &buffers,
+                                input_payload,
+                                state.hidden_row_stride_bytes,
+                                state.row_count,
+                                group_stream,
+                            )
+                            .context("launching packed B12X EXL3 K3 top-k=8 BF16-output MoE")?;
+                        packed_prefill_bf16_output = Some(buffers.input_bf16);
+                    } else {
+                        library
+                            .cuda_b12x_spark_exl3_k3_topk8_nvfp4_async(
+                                &buffers,
+                                input_payload,
+                                state.hidden_row_stride_bytes,
+                                state.row_count,
+                                group_stream,
+                            )
+                            .context("launching packed B12X EXL3 K3 top-k=8 MoE")?;
+                    }
+                    if let Some(timeline) = packed_prefill_timeline.as_ref() {
+                        timeline.record(
+                            timeline.hidden_ready.as_ref(),
+                            group_stream,
+                            "EXL3 packed compute end",
+                        )?;
+                    }
+                    library
+                        .cuda_event_record(cuda_cache.b12x_lane_event(0), group_stream)
+                        .context("recording packed B12X EXL3 K3 completion")?;
                 }
-                let buffers = b12x_w4a16_moe_buffers(
-                    w4a16_layer_buffers,
-                    b12x_workspace,
-                    b12x_workspace.compact_hidden,
-                    b12x_workspace.group_output,
-                    b12x_workspace.w4a16_topk_weights,
-                );
-                let direct_fp8_target = (!state.spark_reduction
-                    && state.packed_w4a16_direct_fp8_output)
-                    .then_some(response_device_target)
-                    .flatten()
-                    .map(|target| {
-                        let output_bytes = state
-                            .row_count
-                            .checked_mul(state.output_dtype.row_stride_bytes(state.output_rows)?)
-                            .context("direct packed FP8 response byte count overflow")?;
-                        route_device_buffer_slice(target, 0, output_bytes)
-                    })
-                    .transpose()?;
-                if state.m1_parity_grouped_small_m_w4a16 {
-                    anyhow::ensure!(
+            } else {
+                let slab = cuda_cache
+                    .expert_slabs
+                    .get(&state.layer_id)
+                    .context("top-k=8 prefill lost its expert slab")?;
+                let w4a16_layer_buffers = slab.w4a16_moe_buffers()?;
+                let combined_output = device_buffer_byte_view(
+                    if state.topk8_combined_output_in_group_buffer {
+                        b12x_workspace.group_output
+                    } else {
+                        b12x_workspace.compact_hidden
+                    },
+                    0,
+                    state.row_count * state.output_rows * std::mem::size_of::<u16>(),
+                    "packed W4A16 top-k=8 prefill combined output",
+                )?;
+                let output_indices = device_buffer_byte_view(
+                    workspace.scatter_index,
+                    0,
+                    state.row_count * std::mem::size_of::<u32>(),
+                    "packed W4A16 top-k=8 prefill output indices",
+                )?;
+                unsafe {
+                    if let Some(timeline) = packed_prefill_timeline.as_ref() {
+                        timeline.record(
+                            timeline.start.as_ref(),
+                            group_stream,
+                            "packed compute start",
+                        )?;
+                    }
+                    let buffers = b12x_w4a16_moe_buffers(
+                        w4a16_layer_buffers,
+                        b12x_workspace,
+                        b12x_workspace.compact_hidden,
+                        b12x_workspace.group_output,
+                        b12x_workspace.w4a16_topk_weights,
+                    );
+                    let direct_fp8_target = (!state.spark_reduction
+                        && state.packed_w4a16_direct_fp8_output)
+                        .then_some(response_device_target)
+                        .flatten()
+                        .map(|target| {
+                            let output_bytes = state
+                                .row_count
+                                .checked_mul(
+                                    state.output_dtype.row_stride_bytes(state.output_rows)?,
+                                )
+                                .context("direct packed FP8 response byte count overflow")?;
+                            route_device_buffer_slice(target, 0, output_bytes)
+                        })
+                        .transpose()?;
+                    if state.m1_parity_grouped_small_m_w4a16 {
+                        anyhow::ensure!(
                             state.hidden_dim == state.output_rows,
                             "grouped W4A16 M2..8 row parity requires hidden/output equality, got hidden={} output={}",
                             state.hidden_dim,
                             state.output_rows
                         );
-                    match state.w4a16_small_m_mode {
+                        match state.w4a16_small_m_mode {
                         W4a16SmallMMode::Ordered => library
                             .cuda_b12x_spark_w4a16_m1_parity_grouped_m2_8_nvfp4_async(
                                 &buffers,
@@ -5552,80 +6380,86 @@ pub(in crate::commands::real_full) fn execute_nvfp4_route_ingress_stream_chunk_c
                                 "launching split-M1 fallback wide-FC2 W4A16 M3..8 row-parity MoE",
                             )?,
                     }
-                    if let Some(target) = direct_fp8_target {
-                        if state.split_m1_m2_w4a16 {
+                        if let Some(target) = direct_fp8_target {
+                            if state.split_m1_m2_w4a16 {
+                                library
+                                    .cuda_stream_wait_event(
+                                        group_stream,
+                                        cuda_cache.b12x_lane_event(1),
+                                    )
+                                    .context(
+                                        "joining split-M1 W4A16 rows before direct FP8 pack",
+                                    )?;
+                            }
                             library
-                                .cuda_stream_wait_event(group_stream, cuda_cache.b12x_lane_event(1))
-                                .context("joining split-M1 W4A16 rows before direct FP8 pack")?;
+                                .cuda_bf16_rows_to_fp8_e4m3_row_scaled_async(
+                                    combined_output,
+                                    target,
+                                    state.row_count,
+                                    state.output_rows,
+                                    state.output_dtype.row_stride_bytes(state.output_rows)?,
+                                    group_stream,
+                                )
+                                .context("packing grouped W4A16 M2..8 row-parity FP8 response")?;
+                            packed_prefill_fp8_output = Some(target);
                         }
+                    } else if let Some(target) = direct_fp8_target {
                         library
-                            .cuda_bf16_rows_to_fp8_e4m3_row_scaled_async(
-                                combined_output,
-                                target,
+                            .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_fp8_async(
+                                &buffers,
+                                input_payload,
+                                state.hidden_row_stride_bytes,
                                 state.row_count,
-                                state.output_rows,
+                                target,
                                 state.output_dtype.row_stride_bytes(state.output_rows)?,
                                 group_stream,
                             )
-                            .context("packing grouped W4A16 M2..8 row-parity FP8 response")?;
+                            .context("launching packed B12X W4A16 top-k=8 direct FP8 response")?;
                         packed_prefill_fp8_output = Some(target);
-                    }
-                } else if let Some(target) = direct_fp8_target {
-                    library
-                        .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_fp8_async(
-                            &buffers,
-                            input_payload,
-                            state.hidden_row_stride_bytes,
-                            state.row_count,
-                            target,
-                            state.output_dtype.row_stride_bytes(state.output_rows)?,
-                            group_stream,
-                        )
-                        .context("launching packed B12X W4A16 top-k=8 direct FP8 response")?;
-                    packed_prefill_fp8_output = Some(target);
-                } else {
-                    library
-                        .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_async(
-                            &buffers,
-                            input_payload,
-                            state.hidden_row_stride_bytes,
-                            state.row_count,
-                            group_stream,
-                        )
-                        .context("launching packed B12X W4A16 top-k=8 prefill MoE")?;
-                }
-                if let Some(timeline) = packed_prefill_timeline.as_ref() {
-                    timeline.record(
-                        timeline.hidden_ready.as_ref(),
-                        group_stream,
-                        "packed compute end",
-                    )?;
-                }
-                if packed_prefill_fp8_output.is_none() {
-                    // The row-sharded RDMA reducer can FP8-pack outgoing BF16
-                    // partitions directly and consume the local BF16 shard.
-                    // Do not materialize every row through the FP32
-                    // accumulator merely because the final coordinator
-                    // response uses a different packed dtype.
-                    if state.packed_w4a16_direct_fp8_output || packed_prefill_rdma_bf16_direct {
-                        packed_prefill_bf16_output = Some(combined_output);
                     } else {
                         library
-                            .cuda_scatter_add_rows_bf16_to_f32_async(
-                                combined_output,
-                                output_indices,
-                                workspace.accumulator,
+                            .cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_async(
+                                &buffers,
+                                input_payload,
+                                state.hidden_row_stride_bytes,
                                 state.row_count,
-                                state.row_count,
-                                state.output_rows,
                                 group_stream,
                             )
-                            .context("accumulating packed B12X W4A16 top-k=8 prefill output")?;
+                            .context("launching packed B12X W4A16 top-k=8 prefill MoE")?;
                     }
+                    if let Some(timeline) = packed_prefill_timeline.as_ref() {
+                        timeline.record(
+                            timeline.hidden_ready.as_ref(),
+                            group_stream,
+                            "packed compute end",
+                        )?;
+                    }
+                    if packed_prefill_fp8_output.is_none() {
+                        // The row-sharded RDMA reducer can FP8-pack outgoing BF16
+                        // partitions directly and consume the local BF16 shard.
+                        // Do not materialize every row through the FP32
+                        // accumulator merely because the final coordinator
+                        // response uses a different packed dtype.
+                        if state.packed_w4a16_direct_fp8_output || packed_prefill_rdma_bf16_direct {
+                            packed_prefill_bf16_output = Some(combined_output);
+                        } else {
+                            library
+                                .cuda_scatter_add_rows_bf16_to_f32_async(
+                                    combined_output,
+                                    output_indices,
+                                    workspace.accumulator,
+                                    state.row_count,
+                                    state.row_count,
+                                    state.output_rows,
+                                    group_stream,
+                                )
+                                .context("accumulating packed B12X W4A16 top-k=8 prefill output")?;
+                        }
+                    }
+                    library
+                        .cuda_event_record(cuda_cache.b12x_lane_event(0), group_stream)
+                        .context("recording packed B12X W4A16 top-k=8 prefill completion")?;
                 }
-                library
-                    .cuda_event_record(cuda_cache.b12x_lane_event(0), group_stream)
-                    .context("recording packed B12X W4A16 top-k=8 prefill completion")?;
             }
             if state.split_m1_m2_w4a16 {
                 state.lane_used_since_emit.fill(true);
@@ -7138,7 +7972,7 @@ fn execute_nvfp4_route_rows_bf16_accumulated_cached_inner(
         cuda_cache_prepare_ms = elapsed_ms(cuda_cache_prepare_started);
         let library = Arc::clone(&cuda_cache.library);
         let cuda_stream = cuda_cache.stream.as_ptr();
-        let completion_stream = cuda_cache.completion_stream.as_ptr();
+        let completion_stream = cuda_cache.completion_stream_for_rows(row_count);
         let retained_bf16_layer = cuda_cache.bf16_expert_slabs.get(&layer_id).cloned();
         let w4a16_layer_buffers = if cuda_cache.b12x_aot_enabled {
             cuda_cache
@@ -8833,6 +9667,10 @@ fn b12x_spark_grouped_decode_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn exl3_prefill_bf16_output_enabled() -> bool {
+    env_flag_enabled(REAL_FULL_EXL3_PREFILL_BF16_OUTPUT_ENV)
+}
+
 fn b12x_spark_w4a16_small_m_mode() -> W4a16SmallMMode {
     static MODE: OnceLock<W4a16SmallMMode> = OnceLock::new();
     *MODE.get_or_init(|| {
@@ -8880,7 +9718,25 @@ fn b12x_w4a16_capacity_rows(rows: usize) -> Result<usize> {
         rows > 0 && rows <= B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS,
         "B12X packed W4A16 rows {rows} are outside 1..={B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS}"
     );
-    Ok(rows.next_power_of_two().max(2))
+    if rows > B12X_POWER_OF_TWO_CAPACITY_ROWS {
+        Ok(B12X_W4A16_PREFILL_TOPK8_CAPACITY_ROWS)
+    } else {
+        Ok(rows.next_power_of_two().max(2))
+    }
+}
+
+fn b12x_exl3_k3_capacity_rows(rows: usize) -> Result<usize> {
+    anyhow::ensure!(
+        rows > 0 && rows <= B12X_EXL3_K3_TOPK8_CAPACITY_ROWS,
+        "B12X EXL3 K3 rows {rows} are outside 1..={B12X_EXL3_K3_TOPK8_CAPACITY_ROWS}"
+    );
+    if matches!(rows, 9 | 257) {
+        Ok(rows)
+    } else if rows > B12X_POWER_OF_TWO_CAPACITY_ROWS {
+        Ok(B12X_EXL3_K3_TOPK8_CAPACITY_ROWS)
+    } else {
+        Ok(rows.next_power_of_two())
+    }
 }
 
 fn b12x_w4a16_prefill_route_block_rows(rows: usize) -> usize {
@@ -8891,6 +9747,31 @@ fn b12x_w4a16_prefill_route_block_rows(rows: usize) -> usize {
     } else {
         48
     }
+}
+
+fn b12x_exl3_k3_route_block_rows(rows: usize) -> usize {
+    // This is SparkInfer's select_route_block_size_m policy with top_k=8 and
+    // num_experts=256. It is part of the generated fused-kernel ABI, so use
+    // the AOT capacity selected by the native dispatcher rather than the
+    // request's active M. The final 2,064 regime is deliberately non-power-of-
+    // two so a full prefill wave retains its decode/draft suffix.
+    let regime_rows = if matches!(rows, 9 | 257) {
+        rows
+    } else if rows > B12X_POWER_OF_TWO_CAPACITY_ROWS {
+        B12X_EXL3_K3_TOPK8_CAPACITY_ROWS
+    } else {
+        rows.next_power_of_two()
+    };
+    let route_count = regime_rows.saturating_mul(B12X_W4A16_PREFILL_TOPK8_ROUTES);
+    [8_usize, 16, 32, 48, 64]
+        .into_iter()
+        .find(|block_rows| {
+            10_usize.saturating_mul(route_count)
+                < 9_usize
+                    .saturating_mul(B12X_W4A16_EXPERTS)
+                    .saturating_mul(*block_rows)
+        })
+        .unwrap_or(64)
 }
 
 fn b12x_spark_route_lane_count() -> usize {
@@ -9840,6 +10721,18 @@ fn route_preload_direct_io() -> bool {
         .unwrap_or(true)
 }
 
+fn route_preload_cooperative_from_env(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off" | "disabled"
+            )
+        })
+        .unwrap_or(default)
+}
+
 const ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT: usize = 4096;
 
 struct RouteCudaAlignedAllocation {
@@ -9917,6 +10810,17 @@ impl RouteCudaAlignedReadBuffer {
         else {
             return Ok(None);
         };
+        Ok(Some((
+            Self::allocate_geometry(aligned_bytes, requested_offset, source_bytes)?,
+            aligned_offset,
+        )))
+    }
+
+    fn allocate_geometry(
+        aligned_bytes: usize,
+        requested_offset: usize,
+        requested_bytes: usize,
+    ) -> Result<Self> {
         let layout =
             std::alloc::Layout::from_size_align(aligned_bytes, ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT)
                 .context("building direct route read allocation layout")?;
@@ -9937,15 +10841,12 @@ impl RouteCudaAlignedReadBuffer {
                 .context("allocating direct route read buffer")?;
             allocation = Some(RouteCudaAlignedAllocation { ptr, layout });
         }
-        Ok(Some((
-            Self {
-                allocation,
-                aligned_bytes,
-                requested_offset,
-                requested_bytes: source_bytes,
-            },
-            aligned_offset,
-        )))
+        Ok(Self {
+            allocation,
+            aligned_bytes,
+            requested_offset,
+            requested_bytes,
+        })
     }
 
     fn new(
@@ -9968,6 +10869,79 @@ impl RouteCudaAlignedReadBuffer {
             });
         }
         Ok(Some(buffer))
+    }
+
+    fn new_with_buffered_tail(
+        direct_file: &File,
+        buffered_file: &File,
+        file_bytes: u64,
+        source_offset: u64,
+        source_bytes: usize,
+    ) -> Result<Self> {
+        let alignment = ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT as u64;
+        let aligned_offset = source_offset / alignment * alignment;
+        let requested_offset: usize = (source_offset - aligned_offset)
+            .try_into()
+            .context("coalesced route read prefix exceeds usize")?;
+        let requested_end = requested_offset
+            .checked_add(source_bytes)
+            .context("coalesced route read requested byte end overflow")?;
+        let aligned_bytes = requested_end
+            .checked_add(ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT - 1)
+            .context("coalesced route read aligned byte length overflow")?
+            / ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT
+            * ROUTE_PRELOAD_DIRECT_IO_ALIGNMENT;
+        let source_end = source_offset
+            .checked_add(
+                source_bytes
+                    .try_into()
+                    .context("coalesced route source length exceeds u64")?,
+            )
+            .context("coalesced route source extent overflow")?;
+        anyhow::ensure!(
+            source_end <= file_bytes,
+            "coalesced route source extent exceeds its file"
+        );
+        let direct_bytes: usize = ((file_bytes - aligned_offset) / alignment * alignment)
+            .min(
+                aligned_bytes
+                    .try_into()
+                    .context("coalesced route aligned length exceeds u64")?,
+            )
+            .try_into()
+            .context("coalesced route direct length exceeds usize")?;
+        let mut buffer = Self::allocate_geometry(aligned_bytes, requested_offset, source_bytes)?;
+        if direct_bytes > 0 {
+            direct_file
+                .read_exact_at(&mut buffer.full_slice_mut()[..direct_bytes], aligned_offset)
+                .with_context(|| {
+                    format!(
+                        "direct-reading {direct_bytes} coalesced bytes at offset {aligned_offset}"
+                    )
+                })?;
+        }
+        let buffered_start = direct_bytes.max(requested_offset);
+        if buffered_start < requested_end {
+            let buffered_offset = aligned_offset
+                .checked_add(
+                    buffered_start
+                        .try_into()
+                        .context("coalesced route buffered offset exceeds u64")?,
+                )
+                .context("coalesced route buffered file offset overflow")?;
+            buffered_file
+                .read_exact_at(
+                    &mut buffer.full_slice_mut()[buffered_start..requested_end],
+                    buffered_offset,
+                )
+                .with_context(|| {
+                    format!(
+                        "buffered-reading {} coalesced tail bytes at offset {buffered_offset}",
+                        requested_end - buffered_start
+                    )
+                })?;
+        }
+        Ok(buffer)
     }
 
     fn full_slice_mut(&mut self) -> &mut [u8] {
@@ -10550,8 +11524,15 @@ fn cooperative_weight_preload_expert_groups(
         .iter()
         .copied()
         .map(|expert_id| {
+            let suffix = if is_glm52_exl3_recipe(&catalog.facts.quantization_recipe)
+                && layer_id < catalog.facts.num_hidden_layers
+            {
+                "trellis"
+            } else {
+                "weight"
+            };
             let name = format!(
-                "{}.weight",
+                "{}.{suffix}",
                 routed_quant_projection_base_name(layer_id, expert_id, "gate_proj")
             );
             let info = catalog_tensor(catalog, &name)?;
@@ -11546,6 +12527,1512 @@ fn preload_routed_quant_projection_cuda_cache_contiguous_tp4(
     Ok(preload)
 }
 
+fn route_cuda_exl3_source_fd(
+    snapshot: &Path,
+    tensor: &TensorInfo,
+    files: &mut HashMap<PathBuf, Arc<File>>,
+) -> Result<RawFd> {
+    let path = snapshot.join(&tensor.file);
+    if let Some(file) = files.get(&path) {
+        return Ok(file.as_raw_fd());
+    }
+    let file = Arc::new(File::open(&path).with_context(|| format!("opening {}", path.display()))?);
+    let fd = file.as_raw_fd();
+    files.insert(path, file);
+    Ok(fd)
+}
+
+struct RouteCudaExl3ReadRequest<'a> {
+    // `store_layer_experts_direct` owns every source File in its `files` map
+    // until the entire request wave has completed, so retaining one raw fd per
+    // window avoids roughly 200K Arc increments/decrements per layer.
+    source_fd: RawFd,
+    source_offset: u64,
+    destination: *mut u8,
+    bytes: usize,
+    // The catalog outlives the per-layer I/O wave. Borrow its stable name;
+    // FC1 creates roughly 200K windows/layer, so cloning one String per window
+    // materially inflates request construction and allocator traffic.
+    label: &'a str,
+}
+
+fn queue_route_cuda_exl3_tensor_window<'a>(
+    snapshot: &Path,
+    tensor: &'a TensorInfo,
+    relative_offset: usize,
+    files: &mut HashMap<PathBuf, Arc<File>>,
+    destination: &mut [u8],
+    requests: &mut Vec<RouteCudaExl3ReadRequest<'a>>,
+) -> Result<()> {
+    let source_fd = route_cuda_exl3_source_fd(snapshot, tensor, files)?;
+    queue_route_cuda_exl3_tensor_window_from_fd(
+        tensor,
+        relative_offset,
+        source_fd,
+        destination,
+        requests,
+    )
+}
+
+fn queue_route_cuda_exl3_tensor_window_from_fd<'a>(
+    tensor: &'a TensorInfo,
+    relative_offset: usize,
+    source_fd: RawFd,
+    destination: &mut [u8],
+    requests: &mut Vec<RouteCudaExl3ReadRequest<'a>>,
+) -> Result<()> {
+    let end = relative_offset
+        .checked_add(destination.len())
+        .context("EXL3 queued tensor window overflow")?;
+    anyhow::ensure!(
+        end <= tensor.byte_length as usize,
+        "EXL3 queued tensor window {relative_offset}..{end} exceeds {} bytes for {}",
+        tensor.byte_length,
+        tensor.name
+    );
+    requests.push(RouteCudaExl3ReadRequest {
+        source_fd,
+        source_offset: tensor.byte_offset + relative_offset as u64,
+        destination: destination.as_mut_ptr(),
+        bytes: destination.len(),
+        label: tensor.name.as_str(),
+    });
+    Ok(())
+}
+
+fn queue_route_cuda_exl3_trellis_tp4<'a>(
+    snapshot: &Path,
+    projection: Glm52Exl3Projection<'a>,
+    shard: ExpertIntermediateShard,
+    local_intermediate_size: usize,
+    destination: &mut [u8],
+    files: &mut HashMap<PathBuf, Arc<File>>,
+    requests: &mut Vec<RouteCudaExl3ReadRequest<'a>>,
+) -> Result<()> {
+    let tile_bytes = EXL3_K3_TRELLIS_WORDS_PER_TILE
+        .checked_mul(std::mem::size_of::<i16>())
+        .context("EXL3 trellis tile byte count overflow")?;
+    let input_tiles = projection.input_features / EXL3_K3_TRELLIS_TILE;
+    let output_tiles = projection.output_features / EXL3_K3_TRELLIS_TILE;
+    let local_tiles = local_intermediate_size / EXL3_K3_TRELLIS_TILE;
+    let expected_bytes = (GLM52_HIDDEN_SIZE / EXL3_K3_TRELLIS_TILE)
+        .checked_mul(local_tiles)
+        .and_then(|tiles| tiles.checked_mul(tile_bytes))
+        .context("EXL3 compact trellis byte count overflow")?;
+    anyhow::ensure!(
+        destination.len() == expected_bytes,
+        "EXL3 compact trellis destination has {} bytes, expected {expected_bytes}",
+        destination.len()
+    );
+    if projection.input_features == GLM52_HIDDEN_SIZE {
+        anyhow::ensure!(
+            projection.output_features == local_intermediate_size * shard.count,
+            "EXL3 {:?} projection has unsupported {}x{} TP geometry",
+            projection.kind,
+            projection.input_features,
+            projection.output_features
+        );
+        let source_row_bytes = output_tiles
+            .checked_mul(tile_bytes)
+            .context("EXL3 FC1 source row byte count overflow")?;
+        let local_row_bytes = local_tiles
+            .checked_mul(tile_bytes)
+            .context("EXL3 FC1 local row byte count overflow")?;
+        // Resolve the descriptor once per projection rather than rebuilding
+        // and hashing the same path for all 384 rank-local row windows.
+        let source_fd = route_cuda_exl3_source_fd(snapshot, projection.trellis, files)?;
+        for input_tile in 0..input_tiles {
+            let source_offset = input_tile
+                .checked_mul(source_row_bytes)
+                .and_then(|offset| offset.checked_add(shard.rank * local_row_bytes))
+                .context("EXL3 FC1 source byte offset overflow")?;
+            let destination_offset = input_tile
+                .checked_mul(local_row_bytes)
+                .context("EXL3 FC1 destination byte offset overflow")?;
+            queue_route_cuda_exl3_tensor_window_from_fd(
+                projection.trellis,
+                source_offset,
+                source_fd,
+                &mut destination[destination_offset..destination_offset + local_row_bytes],
+                requests,
+            )?;
+        }
+        return Ok(());
+    }
+    anyhow::ensure!(
+        projection.input_features == local_intermediate_size * shard.count
+            && projection.output_features == GLM52_HIDDEN_SIZE,
+        "EXL3 {:?} projection has unsupported {}x{} TP geometry",
+        projection.kind,
+        projection.input_features,
+        projection.output_features
+    );
+    anyhow::ensure!(
+        input_tiles % shard.count == 0,
+        "EXL3 down input tiles are not TP divisible"
+    );
+    let local_bytes = (input_tiles / shard.count)
+        .checked_mul(output_tiles)
+        .and_then(|tiles| tiles.checked_mul(tile_bytes))
+        .context("EXL3 down compact byte count overflow")?;
+    anyhow::ensure!(
+        local_bytes == destination.len(),
+        "EXL3 down compact trellis byte mismatch"
+    );
+    let source_fd = route_cuda_exl3_source_fd(snapshot, projection.trellis, files)?;
+    queue_route_cuda_exl3_tensor_window_from_fd(
+        projection.trellis,
+        shard.rank * local_bytes,
+        source_fd,
+        destination,
+        requests,
+    )
+}
+
+const ROUTE_CUDA_EXL3_IO_URING_QUEUE_DEPTH: usize = 8_192;
+
+struct RouteCudaExl3ReadExecutor {
+    ring: Option<IoUring>,
+}
+
+impl RouteCudaExl3ReadExecutor {
+    fn new() -> Self {
+        let ring = match IoUring::new(ROUTE_CUDA_EXL3_IO_URING_QUEUE_DEPTH as u32) {
+            Ok(ring) => Some(ring),
+            Err(error) => {
+                eprintln!("real_exl3_io_uring_unavailable error={error}");
+                None
+            }
+        };
+        Self { ring }
+    }
+
+    fn execute(&mut self, requests: &[RouteCudaExl3ReadRequest<'_>]) -> Result<()> {
+        let Some(ring) = self.ring.as_mut() else {
+            for request in requests {
+                let destination =
+                    unsafe { slice::from_raw_parts_mut(request.destination, request.bytes) };
+                read_exact_at_fd(request.source_fd, destination, request.source_offset)
+                    .with_context(|| format!("reading compact EXL3 window {}", request.label))?;
+            }
+            return Ok(());
+        };
+
+        // A GLM FC1 projection contributes 384 rank-local row windows per expert.
+        // Keeping a full staging chunk in one io_uring wave is important: shallow
+        // waves serialize the small reads and leave the NVMe queue under-filled.
+        for (chunk_index, chunk) in requests
+            .chunks(ROUTE_CUDA_EXL3_IO_URING_QUEUE_DEPTH)
+            .enumerate()
+        {
+            let request_start = chunk_index * ROUTE_CUDA_EXL3_IO_URING_QUEUE_DEPTH;
+            for (local_index, request) in chunk.iter().enumerate() {
+                let length: u32 = request
+                    .bytes
+                    .try_into()
+                    .context("EXL3 io_uring read length exceeds u32")?;
+                let entry =
+                    opcode::Read::new(types::Fd(request.source_fd), request.destination, length)
+                        .offset(request.source_offset)
+                        .build()
+                        .user_data((request_start + local_index) as u64);
+                unsafe {
+                    ring.submission()
+                        .push(&entry)
+                        .map_err(|_| anyhow::anyhow!("EXL3 io_uring submission queue is full"))?;
+                }
+            }
+            ring.submit_and_wait(chunk.len())
+                .context("submitting compact EXL3 TP4 reads")?;
+            let mut completions = 0_usize;
+            for completion in ring.completion() {
+                let request_index: usize = completion
+                    .user_data()
+                    .try_into()
+                    .context("EXL3 io_uring completion index exceeds usize")?;
+                let request = requests
+                    .get(request_index)
+                    .context("EXL3 io_uring completion index is out of range")?;
+                let result = completion.result();
+                if result < 0 {
+                    return Err(std::io::Error::from_raw_os_error(-result))
+                        .with_context(|| format!("reading compact EXL3 window {}", request.label));
+                }
+                anyhow::ensure!(
+                    result as usize == request.bytes,
+                    "EXL3 io_uring short read for {}: {result}/{} bytes",
+                    request.label,
+                    request.bytes
+                );
+                completions += 1;
+            }
+            anyhow::ensure!(
+                completions == chunk.len(),
+                "EXL3 io_uring returned {completions}/{} completions",
+                chunk.len()
+            );
+        }
+        Ok(())
+    }
+}
+
+fn read_exact_at_fd(
+    source_fd: RawFd,
+    mut destination: &mut [u8],
+    mut source_offset: u64,
+) -> std::io::Result<()> {
+    while !destination.is_empty() {
+        let offset: libc::off_t = source_offset.try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "EXL3 source offset exceeds off_t",
+            )
+        })?;
+        let result = unsafe {
+            libc::pread(
+                source_fd,
+                destination.as_mut_ptr().cast(),
+                destination.len(),
+                offset,
+            )
+        };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if result == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "EXL3 source window ended early",
+            ));
+        }
+        let read = result as usize;
+        source_offset = source_offset.checked_add(read as u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "EXL3 source offset overflow",
+            )
+        })?;
+        destination = &mut destination[read..];
+    }
+    Ok(())
+}
+
+struct LoadedRouteCudaExl3ProjectionFull {
+    trellis: Vec<u8>,
+    suh: Vec<u8>,
+    svh: Vec<u8>,
+}
+
+struct LoadedRouteCudaExl3ExpertFull {
+    gate: LoadedRouteCudaExl3ProjectionFull,
+    up: LoadedRouteCudaExl3ProjectionFull,
+    down: LoadedRouteCudaExl3ProjectionFull,
+}
+
+const EXL3_FULL_GATE_TRELLIS: usize = 0;
+const EXL3_FULL_GATE_SUH: usize = 1;
+const EXL3_FULL_GATE_SVH: usize = 2;
+const EXL3_FULL_GATE_MCG: usize = 3;
+const EXL3_FULL_UP_TRELLIS: usize = 4;
+const EXL3_FULL_UP_SUH: usize = 5;
+const EXL3_FULL_UP_SVH: usize = 6;
+const EXL3_FULL_UP_MCG: usize = 7;
+const EXL3_FULL_DOWN_TRELLIS: usize = 8;
+const EXL3_FULL_DOWN_SUH: usize = 9;
+const EXL3_FULL_DOWN_SVH: usize = 10;
+const EXL3_FULL_DOWN_MCG: usize = 11;
+const EXL3_FULL_COMPONENTS: usize = 12;
+
+#[derive(Clone, Copy)]
+struct RouteCudaExl3FullComponentLocation {
+    span_index: usize,
+    start: usize,
+    end: usize,
+}
+
+impl RouteCudaExl3FullComponentLocation {
+    const MISSING: Self = Self {
+        span_index: usize::MAX,
+        start: 0,
+        end: 0,
+    };
+}
+
+#[derive(Clone)]
+struct RouteCudaExl3FullTensorWindow {
+    source_index: usize,
+    component: usize,
+    info: TensorInfo,
+}
+
+struct RouteCudaExl3FullPhysicalSpan {
+    file: String,
+    source_offset: u64,
+    bytes: usize,
+    window_indices: Vec<usize>,
+}
+
+enum LoadedRouteCudaExl3LayerBytes {
+    Individual(Vec<LoadedRouteCudaExl3ExpertFull>),
+    DirectSpans {
+        buffers: Vec<RouteCudaAlignedReadBuffer>,
+        component_locations: Vec<[RouteCudaExl3FullComponentLocation; EXL3_FULL_COMPONENTS]>,
+    },
+}
+
+struct LoadedRouteCudaExl3LayerFull {
+    expert_ids: Vec<usize>,
+    bytes: LoadedRouteCudaExl3LayerBytes,
+    source_bytes: u64,
+    source_requests: usize,
+    source_spans: usize,
+    direct_io: bool,
+}
+
+impl LoadedRouteCudaExl3LayerFull {
+    fn component(&self, source_index: usize, component: usize) -> Result<&[u8]> {
+        anyhow::ensure!(
+            source_index < self.expert_ids.len() && component < EXL3_FULL_COMPONENTS,
+            "EXL3 full-layer component index is out of range"
+        );
+        match &self.bytes {
+            LoadedRouteCudaExl3LayerBytes::Individual(experts) => {
+                let expert = experts
+                    .get(source_index)
+                    .context("EXL3 individual source expert is missing")?;
+                let bytes = match component {
+                    EXL3_FULL_GATE_TRELLIS => &expert.gate.trellis,
+                    EXL3_FULL_GATE_SUH => &expert.gate.suh,
+                    EXL3_FULL_GATE_SVH => &expert.gate.svh,
+                    EXL3_FULL_UP_TRELLIS => &expert.up.trellis,
+                    EXL3_FULL_UP_SUH => &expert.up.suh,
+                    EXL3_FULL_UP_SVH => &expert.up.svh,
+                    EXL3_FULL_DOWN_TRELLIS => &expert.down.trellis,
+                    EXL3_FULL_DOWN_SUH => &expert.down.suh,
+                    EXL3_FULL_DOWN_SVH => &expert.down.svh,
+                    _ => anyhow::bail!(
+                        "individual EXL3 source does not retain marker component {component}"
+                    ),
+                };
+                Ok(bytes)
+            }
+            LoadedRouteCudaExl3LayerBytes::DirectSpans {
+                buffers,
+                component_locations,
+            } => {
+                let location = component_locations[source_index][component];
+                let buffer = buffers
+                    .get(location.span_index)
+                    .context("EXL3 direct component is missing its source span")?;
+                Ok(&buffer.requested_slice()[location.start..location.end])
+            }
+        }
+    }
+}
+
+fn load_exl3_tensor_exact(
+    catalog: &TensorCatalog,
+    name: &str,
+    dtype: DType,
+    shape: &[usize],
+) -> Result<LoadedTensor> {
+    let loaded = load_tensor_bytes(catalog, name)
+        .with_context(|| format!("loading native EXL3 tensor {name}"))?;
+    anyhow::ensure!(
+        loaded.info.dtype == dtype && loaded.info.shape == shape,
+        "native EXL3 tensor {name} has dtype {:?} shape {:?}, expected {:?} {:?}",
+        loaded.info.dtype,
+        loaded.info.shape,
+        dtype,
+        shape
+    );
+    anyhow::ensure!(
+        loaded.bytes.len() as u64 == loaded.info.byte_length,
+        "native EXL3 tensor {name} loaded {} bytes, expected {}",
+        loaded.bytes.len(),
+        loaded.info.byte_length
+    );
+    Ok(loaded)
+}
+
+fn validate_exl3_mcg_bytes(bytes: &[u8], label: &str) -> Result<()> {
+    anyhow::ensure!(
+        bytes.len() == std::mem::size_of::<u32>(),
+        "native EXL3 MCG tensor {label} must be four bytes"
+    );
+    let marker = u32::from_le_bytes(
+        bytes[..4]
+            .try_into()
+            .expect("validated four-byte MCG tensor"),
+    );
+    anyhow::ensure!(
+        marker == EXL3_MCG_MARKER,
+        "native EXL3 tensor {label} has marker 0x{marker:08x}, expected 0x{EXL3_MCG_MARKER:08x}"
+    );
+    Ok(())
+}
+
+fn validate_exl3_mcg_marker(catalog: &TensorCatalog, base_name: &str) -> Result<()> {
+    let name = format!("{base_name}.mcg");
+    let loaded = load_exl3_tensor_exact(catalog, &name, DType::I32, &[])?;
+    validate_exl3_mcg_bytes(&loaded.bytes, &name)
+}
+
+fn compact_exl3_trellis_for_shard(
+    name: &str,
+    bytes: &[u8],
+    projection: &str,
+    shard: ExpertIntermediateShard,
+) -> Result<Vec<u8>> {
+    let local_bytes = GLM52_HIDDEN_SIZE
+        .checked_mul(shard.local_rows(GLM52_MOE_INTERMEDIATE_SIZE)?)
+        .and_then(|values| values.checked_mul(GLM52_EXL3_BITS))
+        .and_then(|bits| bits.checked_div(8))
+        .context("EXL3 local trellis byte count overflow")?;
+    let mut compact = vec![0_u8; local_bytes];
+    copy_exl3_trellis_for_shard(name, bytes, projection, shard, &mut compact)?;
+    Ok(compact)
+}
+
+fn copy_exl3_trellis_for_shard(
+    name: &str,
+    bytes: &[u8],
+    projection: &str,
+    shard: ExpertIntermediateShard,
+    destination: &mut [u8],
+) -> Result<()> {
+    let hidden_tiles = GLM52_HIDDEN_SIZE / EXL3_K3_TRELLIS_TILE;
+    let intermediate_tiles = GLM52_MOE_INTERMEDIATE_SIZE / EXL3_K3_TRELLIS_TILE;
+    let local_intermediate_tiles = shard.local_rows(intermediate_tiles)?;
+    let shard_start = shard.row_start(intermediate_tiles)?;
+    let word_bytes = std::mem::size_of::<i16>();
+    let tile_payload_bytes = EXL3_K3_TRELLIS_WORDS_PER_TILE
+        .checked_mul(word_bytes)
+        .context("EXL3 trellis tile byte count overflow")?;
+    let expected_bytes = hidden_tiles
+        .checked_mul(intermediate_tiles)
+        .and_then(|tiles| tiles.checked_mul(tile_payload_bytes))
+        .context("EXL3 source trellis byte count overflow")?;
+    anyhow::ensure!(
+        bytes.len() == expected_bytes,
+        "native EXL3 trellis {name} has {} bytes, expected {expected_bytes}",
+        bytes.len()
+    );
+    let local_bytes = hidden_tiles
+        .checked_mul(local_intermediate_tiles)
+        .and_then(|tiles| tiles.checked_mul(tile_payload_bytes))
+        .context("EXL3 local trellis byte count overflow")?;
+    anyhow::ensure!(
+        destination.len() == local_bytes,
+        "native EXL3 trellis destination for {name} has {} bytes, expected {local_bytes}",
+        destination.len()
+    );
+    if matches!(projection, "gate_proj" | "up_proj") {
+        let source_row_bytes = intermediate_tiles
+            .checked_mul(tile_payload_bytes)
+            .context("EXL3 FC1 source row byte count overflow")?;
+        let local_row_bytes = local_intermediate_tiles
+            .checked_mul(tile_payload_bytes)
+            .context("EXL3 FC1 local row byte count overflow")?;
+        let start_bytes = shard_start
+            .checked_mul(tile_payload_bytes)
+            .context("EXL3 FC1 shard byte offset overflow")?;
+        for (source, target) in bytes
+            .chunks_exact(source_row_bytes)
+            .zip(destination.chunks_exact_mut(local_row_bytes))
+        {
+            target.copy_from_slice(&source[start_bytes..start_bytes + local_row_bytes]);
+        }
+        return Ok(());
+    }
+    anyhow::ensure!(
+        projection == "down_proj",
+        "unsupported native EXL3 projection {projection}"
+    );
+    let start = shard_start
+        .checked_mul(hidden_tiles)
+        .and_then(|tiles| tiles.checked_mul(tile_payload_bytes))
+        .context("EXL3 FC2 shard byte offset overflow")?;
+    destination.copy_from_slice(&bytes[start..start + local_bytes]);
+    Ok(())
+}
+
+fn compact_exl3_intermediate_rotation_for_shard(
+    name: &str,
+    bytes: &[u8],
+    shard: ExpertIntermediateShard,
+) -> Result<Vec<u8>> {
+    let local_bytes = shard
+        .local_rows(GLM52_MOE_INTERMEDIATE_SIZE)?
+        .checked_mul(std::mem::size_of::<u16>())
+        .context("EXL3 local rotation byte count overflow")?;
+    let mut compact = vec![0_u8; local_bytes];
+    copy_exl3_intermediate_rotation_for_shard(name, bytes, shard, &mut compact)?;
+    Ok(compact)
+}
+
+fn copy_exl3_intermediate_rotation_for_shard(
+    name: &str,
+    bytes: &[u8],
+    shard: ExpertIntermediateShard,
+    destination: &mut [u8],
+) -> Result<()> {
+    let scalar_bytes = std::mem::size_of::<u16>();
+    let expected_bytes = GLM52_MOE_INTERMEDIATE_SIZE
+        .checked_mul(scalar_bytes)
+        .context("EXL3 rotation byte count overflow")?;
+    anyhow::ensure!(
+        bytes.len() == expected_bytes,
+        "native EXL3 rotation {name} has {} bytes, expected {expected_bytes}",
+        bytes.len()
+    );
+    let local_values = shard.local_rows(GLM52_MOE_INTERMEDIATE_SIZE)?;
+    let start = shard
+        .row_start(GLM52_MOE_INTERMEDIATE_SIZE)?
+        .checked_mul(scalar_bytes)
+        .context("EXL3 rotation shard byte offset overflow")?;
+    let local_bytes = local_values
+        .checked_mul(scalar_bytes)
+        .context("EXL3 local rotation byte count overflow")?;
+    anyhow::ensure!(
+        destination.len() == local_bytes,
+        "native EXL3 rotation destination for {name} has {} bytes, expected {local_bytes}",
+        destination.len()
+    );
+    destination.copy_from_slice(&bytes[start..start + local_bytes]);
+    Ok(())
+}
+
+struct RouteCudaExl3PackedExchangeRows {
+    bytes: Vec<u8>,
+    row_stride: usize,
+    trellis_stride: usize,
+    hidden_rotation_stride: usize,
+    intermediate_rotation_stride: usize,
+    gate_trellis_offset: usize,
+    up_trellis_offset: usize,
+    down_trellis_offset: usize,
+    gate_suh_offset: usize,
+    up_suh_offset: usize,
+    intermediate_rotations_offset: usize,
+    down_svh_offset: usize,
+}
+
+fn pack_route_cuda_exl3_exchange_rows(
+    loaded: &LoadedRouteCudaExl3LayerFull,
+    world_size: usize,
+) -> Result<RouteCudaExl3PackedExchangeRows> {
+    pack_route_cuda_exl3_exchange_rows_with_buffer(loaded, world_size, Vec::new())
+}
+
+fn pack_route_cuda_exl3_exchange_rows_with_buffer(
+    loaded: &LoadedRouteCudaExl3LayerFull,
+    world_size: usize,
+    mut bytes: Vec<u8>,
+) -> Result<RouteCudaExl3PackedExchangeRows> {
+    anyhow::ensure!(
+        world_size == 4 && !loaded.expert_ids.is_empty(),
+        "cooperative EXL3 packing requires four ranks and source experts"
+    );
+    let source_experts = loaded.expert_ids.len();
+    let local_intermediate = GLM52_MOE_INTERMEDIATE_SIZE / world_size;
+    let trellis_stride = GLM52_HIDDEN_SIZE
+        .checked_mul(local_intermediate)
+        .and_then(|values| values.checked_mul(GLM52_EXL3_BITS))
+        .and_then(|bits| bits.checked_div(8))
+        .context("cooperative EXL3 trellis stride overflow")?;
+    let hidden_rotation_stride = GLM52_HIDDEN_SIZE
+        .checked_mul(std::mem::size_of::<u16>())
+        .context("cooperative EXL3 hidden rotation stride overflow")?;
+    let intermediate_rotation_component_stride = local_intermediate
+        .checked_mul(std::mem::size_of::<u16>())
+        .context("cooperative EXL3 intermediate rotation stride overflow")?;
+    let intermediate_rotation_stride = intermediate_rotation_component_stride
+        .checked_mul(3)
+        .context("cooperative EXL3 combined intermediate rotation stride overflow")?;
+    let component_bytes = |stride: usize| -> Result<usize> {
+        stride
+            .checked_mul(source_experts)
+            .context("cooperative EXL3 component size overflow")
+    };
+    let gate_trellis_offset = 0;
+    let up_trellis_offset = gate_trellis_offset + component_bytes(trellis_stride)?;
+    let down_trellis_offset = up_trellis_offset + component_bytes(trellis_stride)?;
+    let gate_suh_offset = down_trellis_offset + component_bytes(trellis_stride)?;
+    let up_suh_offset = gate_suh_offset + component_bytes(hidden_rotation_stride)?;
+    let intermediate_rotations_offset = up_suh_offset + component_bytes(hidden_rotation_stride)?;
+    let down_svh_offset =
+        intermediate_rotations_offset + component_bytes(intermediate_rotation_stride)?;
+    let row_stride = down_svh_offset + component_bytes(hidden_rotation_stride)?;
+    let packed_bytes = row_stride
+        .checked_mul(world_size)
+        .context("cooperative EXL3 packed exchange size overflow")?;
+    bytes.resize(packed_bytes, 0_u8);
+
+    std::thread::scope(|scope| -> Result<()> {
+        let mut handles = Vec::with_capacity(world_size);
+        for (target_rank, row) in bytes.chunks_exact_mut(row_stride).enumerate() {
+            handles.push(scope.spawn(move || -> Result<()> {
+                let shard = ExpertIntermediateShard::new(world_size, target_rank)?;
+                for (source_index, &expert_id) in loaded.expert_ids.iter().enumerate() {
+                    let trellis_index = source_index * trellis_stride;
+                    copy_exl3_trellis_for_shard(
+                        &format!("expert {expert_id} gate trellis"),
+                        loaded.component(source_index, EXL3_FULL_GATE_TRELLIS)?,
+                        "gate_proj",
+                        shard,
+                        &mut row[gate_trellis_offset + trellis_index
+                            ..gate_trellis_offset + trellis_index + trellis_stride],
+                    )?;
+                    copy_exl3_trellis_for_shard(
+                        &format!("expert {expert_id} up trellis"),
+                        loaded.component(source_index, EXL3_FULL_UP_TRELLIS)?,
+                        "up_proj",
+                        shard,
+                        &mut row[up_trellis_offset + trellis_index
+                            ..up_trellis_offset + trellis_index + trellis_stride],
+                    )?;
+                    copy_exl3_trellis_for_shard(
+                        &format!("expert {expert_id} down trellis"),
+                        loaded.component(source_index, EXL3_FULL_DOWN_TRELLIS)?,
+                        "down_proj",
+                        shard,
+                        &mut row[down_trellis_offset + trellis_index
+                            ..down_trellis_offset + trellis_index + trellis_stride],
+                    )?;
+
+                    let hidden_index = source_index * hidden_rotation_stride;
+                    let gate_suh = loaded.component(source_index, EXL3_FULL_GATE_SUH)?;
+                    let up_suh = loaded.component(source_index, EXL3_FULL_UP_SUH)?;
+                    let down_svh = loaded.component(source_index, EXL3_FULL_DOWN_SVH)?;
+                    anyhow::ensure!(
+                        gate_suh.len() == hidden_rotation_stride
+                            && up_suh.len() == hidden_rotation_stride
+                            && down_svh.len() == hidden_rotation_stride,
+                        "cooperative EXL3 hidden rotation geometry differs from GLM-5.2"
+                    );
+                    row[gate_suh_offset + hidden_index
+                        ..gate_suh_offset + hidden_index + hidden_rotation_stride]
+                        .copy_from_slice(gate_suh);
+                    row[up_suh_offset + hidden_index
+                        ..up_suh_offset + hidden_index + hidden_rotation_stride]
+                        .copy_from_slice(up_suh);
+                    row[down_svh_offset + hidden_index
+                        ..down_svh_offset + hidden_index + hidden_rotation_stride]
+                        .copy_from_slice(down_svh);
+
+                    let intermediate_index = source_index * intermediate_rotation_stride;
+                    for (component_index, (name, component)) in [
+                        (format!("expert {expert_id} gate Svh"), EXL3_FULL_GATE_SVH),
+                        (format!("expert {expert_id} up Svh"), EXL3_FULL_UP_SVH),
+                        (format!("expert {expert_id} down Suh"), EXL3_FULL_DOWN_SUH),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let start = intermediate_rotations_offset
+                            + intermediate_index
+                            + component_index * intermediate_rotation_component_stride;
+                        copy_exl3_intermediate_rotation_for_shard(
+                            &name,
+                            loaded.component(source_index, component)?,
+                            shard,
+                            &mut row[start..start + intermediate_rotation_component_stride],
+                        )?;
+                    }
+                }
+                Ok(())
+            }));
+        }
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("cooperative EXL3 packing worker panicked"))??;
+        }
+        Ok(())
+    })?;
+
+    Ok(RouteCudaExl3PackedExchangeRows {
+        bytes,
+        row_stride,
+        trellis_stride,
+        hidden_rotation_stride,
+        intermediate_rotation_stride,
+        gate_trellis_offset,
+        up_trellis_offset,
+        down_trellis_offset,
+        gate_suh_offset,
+        up_suh_offset,
+        intermediate_rotations_offset,
+        down_svh_offset,
+    })
+}
+
+fn load_route_cuda_exl3_projection_full(
+    catalog: &TensorCatalog,
+    layer_id: usize,
+    expert_id: usize,
+    projection: &'static str,
+) -> Result<LoadedRouteCudaExl3ProjectionFull> {
+    let base_name = routed_quant_projection_base_name(layer_id, expert_id, projection);
+    let (trellis_shape, suh_width, svh_width) = match projection {
+        "gate_proj" | "up_proj" => (
+            [
+                GLM52_HIDDEN_SIZE / EXL3_K3_TRELLIS_TILE,
+                GLM52_MOE_INTERMEDIATE_SIZE / EXL3_K3_TRELLIS_TILE,
+                EXL3_K3_TRELLIS_WORDS_PER_TILE,
+            ],
+            GLM52_HIDDEN_SIZE,
+            GLM52_MOE_INTERMEDIATE_SIZE,
+        ),
+        "down_proj" => (
+            [
+                GLM52_MOE_INTERMEDIATE_SIZE / EXL3_K3_TRELLIS_TILE,
+                GLM52_HIDDEN_SIZE / EXL3_K3_TRELLIS_TILE,
+                EXL3_K3_TRELLIS_WORDS_PER_TILE,
+            ],
+            GLM52_MOE_INTERMEDIATE_SIZE,
+            GLM52_HIDDEN_SIZE,
+        ),
+        other => anyhow::bail!("unsupported native EXL3 projection {other}"),
+    };
+    let trellis_name = format!("{base_name}.trellis");
+    let suh_name = format!("{base_name}.suh");
+    let svh_name = format!("{base_name}.svh");
+    let trellis = load_exl3_tensor_exact(catalog, &trellis_name, DType::I16, &trellis_shape)?;
+    let suh = load_exl3_tensor_exact(catalog, &suh_name, DType::F16, &[suh_width])?;
+    let svh = load_exl3_tensor_exact(catalog, &svh_name, DType::F16, &[svh_width])?;
+    validate_exl3_mcg_marker(catalog, &base_name)?;
+    Ok(LoadedRouteCudaExl3ProjectionFull {
+        trellis: trellis.bytes,
+        suh: suh.bytes,
+        svh: svh.bytes,
+    })
+}
+
+fn load_route_cuda_exl3_expert_full(
+    catalog: &TensorCatalog,
+    layer_id: usize,
+    expert_id: usize,
+) -> Result<LoadedRouteCudaExl3ExpertFull> {
+    Ok(LoadedRouteCudaExl3ExpertFull {
+        gate: load_route_cuda_exl3_projection_full(catalog, layer_id, expert_id, "gate_proj")?,
+        up: load_route_cuda_exl3_projection_full(catalog, layer_id, expert_id, "up_proj")?,
+        down: load_route_cuda_exl3_projection_full(catalog, layer_id, expert_id, "down_proj")?,
+    })
+}
+
+fn load_route_cuda_exl3_layer_full_parallel(
+    catalog: &TensorCatalog,
+    layer_id: usize,
+    expert_ids: &[usize],
+) -> Result<Vec<LoadedRouteCudaExl3ExpertFull>> {
+    let workers = route_preload_io_workers().min(expert_ids.len());
+    let next = AtomicUsize::new(0);
+    let slots = (0..expert_ids.len())
+        .map(|_| Mutex::new(None))
+        .collect::<Vec<OptionSlot<LoadedRouteCudaExl3ExpertFull>>>();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&expert_id) = expert_ids.get(index) else {
+                    break;
+                };
+                *slots[index]
+                    .lock()
+                    .expect("EXL3 full preload result slot is poisoned") = Some(
+                    load_route_cuda_exl3_expert_full(catalog, layer_id, expert_id),
+                );
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            slot.into_inner()
+                .map_err(|_| anyhow::anyhow!("EXL3 full preload result slot is poisoned"))?
+                .with_context(|| {
+                    format!(
+                        "EXL3 full preload worker did not fill layer {layer_id} expert index {index}"
+                    )
+                })?
+        })
+        .collect()
+}
+
+fn load_route_cuda_exl3_layer_full(
+    catalog: &TensorCatalog,
+    layer_id: usize,
+    expert_ids: &[usize],
+) -> Result<LoadedRouteCudaExl3LayerFull> {
+    anyhow::ensure!(
+        !expert_ids.is_empty(),
+        "cooperative EXL3 layer {layer_id} has no source experts"
+    );
+    let mut windows = Vec::with_capacity(expert_ids.len() * EXL3_FULL_COMPONENTS);
+    for (source_index, &expert_id) in expert_ids.iter().enumerate() {
+        let expert = glm52_exl3_expert(catalog, layer_id, expert_id)?;
+        for (tensor, component) in [
+            (expert.gate.trellis, EXL3_FULL_GATE_TRELLIS),
+            (expert.gate.suh, EXL3_FULL_GATE_SUH),
+            (expert.gate.svh, EXL3_FULL_GATE_SVH),
+            (expert.gate.mcg, EXL3_FULL_GATE_MCG),
+            (expert.up.trellis, EXL3_FULL_UP_TRELLIS),
+            (expert.up.suh, EXL3_FULL_UP_SUH),
+            (expert.up.svh, EXL3_FULL_UP_SVH),
+            (expert.up.mcg, EXL3_FULL_UP_MCG),
+            (expert.down.trellis, EXL3_FULL_DOWN_TRELLIS),
+            (expert.down.suh, EXL3_FULL_DOWN_SUH),
+            (expert.down.svh, EXL3_FULL_DOWN_SVH),
+            (expert.down.mcg, EXL3_FULL_DOWN_MCG),
+        ] {
+            windows.push(RouteCudaExl3FullTensorWindow {
+                source_index,
+                component,
+                info: tensor.clone(),
+            });
+        }
+    }
+    let source_bytes = windows.iter().try_fold(0_u64, |total, window| {
+        total
+            .checked_add(window.info.byte_length)
+            .context("cooperative EXL3 source byte count overflow")
+    })?;
+    let mut physical_order = (0..windows.len()).collect::<Vec<_>>();
+    physical_order.sort_unstable_by(|&left, &right| {
+        windows[left]
+            .info
+            .file
+            .cmp(&windows[right].info.file)
+            .then_with(|| {
+                windows[left]
+                    .info
+                    .byte_offset
+                    .cmp(&windows[right].info.byte_offset)
+            })
+    });
+    let mut spans = Vec::<RouteCudaExl3FullPhysicalSpan>::new();
+    for index in physical_order {
+        let window = &windows[index];
+        let window_bytes: usize = window
+            .info
+            .byte_length
+            .try_into()
+            .context("EXL3 full-layer tensor length exceeds usize")?;
+        let append = spans.last().is_some_and(|span| {
+            span.file == window.info.file
+                && u64::try_from(span.bytes)
+                    .ok()
+                    .and_then(|bytes| span.source_offset.checked_add(bytes))
+                    .is_some_and(|expected| expected == window.info.byte_offset)
+        });
+        if append {
+            let span = spans
+                .last_mut()
+                .expect("EXL3 physical span exists after adjacency check");
+            span.bytes = span
+                .bytes
+                .checked_add(window_bytes)
+                .context("EXL3 physical span byte count overflow")?;
+            span.window_indices.push(index);
+        } else {
+            spans.push(RouteCudaExl3FullPhysicalSpan {
+                file: window.info.file.clone(),
+                source_offset: window.info.byte_offset,
+                bytes: window_bytes,
+                window_indices: vec![index],
+            });
+        }
+    }
+    anyhow::ensure!(
+        !spans.is_empty(),
+        "cooperative EXL3 layer {layer_id} produced no physical source spans"
+    );
+
+    // The canonical GLM-5.2 artifact writes each 64-expert source quarter as
+    // one extent, with at most one extra extent when a safetensors shard ends.
+    // Keep a bounded fallback for foreign-but-structurally-valid artifacts.
+    const DIRECT_SPAN_LIMIT: usize = 8;
+    let direct_io = route_preload_direct_io() && spans.len() <= DIRECT_SPAN_LIMIT;
+    if !direct_io {
+        let experts = load_route_cuda_exl3_layer_full_parallel(catalog, layer_id, expert_ids)?;
+        return Ok(LoadedRouteCudaExl3LayerFull {
+            expert_ids: expert_ids.to_vec(),
+            bytes: LoadedRouteCudaExl3LayerBytes::Individual(experts),
+            source_bytes,
+            source_requests: windows.len(),
+            source_spans: spans.len(),
+            direct_io: false,
+        });
+    }
+
+    let snapshot = Path::new(&catalog.snapshot_path);
+    let mut buffers = Vec::with_capacity(spans.len());
+    let mut component_locations =
+        vec![[RouteCudaExl3FullComponentLocation::MISSING; EXL3_FULL_COMPONENTS]; expert_ids.len()];
+    for (span_index, span) in spans.iter().enumerate() {
+        let source_path = snapshot.join(&span.file);
+        let direct_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(&source_path)
+            .with_context(|| {
+                format!("opening {} for coalesced direct I/O", source_path.display())
+            })?;
+        let file_bytes = direct_file
+            .metadata()
+            .with_context(|| format!("reading metadata for {}", source_path.display()))?
+            .len();
+        let buffered_file = File::open(&source_path).with_context(|| {
+            format!(
+                "opening {} for coalesced buffered tail I/O",
+                source_path.display()
+            )
+        })?;
+        let buffer = RouteCudaAlignedReadBuffer::new_with_buffered_tail(
+            &direct_file,
+            &buffered_file,
+            file_bytes,
+            span.source_offset,
+            span.bytes,
+        )?;
+        for &window_index in &span.window_indices {
+            let window = &windows[window_index];
+            let start: usize = window
+                .info
+                .byte_offset
+                .checked_sub(span.source_offset)
+                .context("EXL3 direct tensor precedes its physical span")?
+                .try_into()
+                .context("EXL3 direct tensor offset exceeds usize")?;
+            let bytes: usize = window
+                .info
+                .byte_length
+                .try_into()
+                .context("EXL3 direct tensor length exceeds usize")?;
+            let end = start
+                .checked_add(bytes)
+                .context("EXL3 direct tensor extent overflow")?;
+            anyhow::ensure!(
+                end <= span.bytes,
+                "EXL3 direct tensor exceeds its physical span"
+            );
+            component_locations[window.source_index][window.component] =
+                RouteCudaExl3FullComponentLocation {
+                    span_index,
+                    start,
+                    end,
+                };
+        }
+        buffers.push(buffer);
+    }
+    anyhow::ensure!(
+        buffers.len() == spans.len()
+            && component_locations
+                .iter()
+                .flatten()
+                .all(|location| location.span_index != usize::MAX),
+        "EXL3 direct source map is incomplete"
+    );
+    let loaded = LoadedRouteCudaExl3LayerFull {
+        expert_ids: expert_ids.to_vec(),
+        bytes: LoadedRouteCudaExl3LayerBytes::DirectSpans {
+            buffers,
+            component_locations,
+        },
+        source_bytes,
+        source_requests: windows.len(),
+        source_spans: spans.len(),
+        direct_io: true,
+    };
+    for source_index in 0..loaded.expert_ids.len() {
+        for (component, label) in [
+            (EXL3_FULL_GATE_MCG, "gate"),
+            (EXL3_FULL_UP_MCG, "up"),
+            (EXL3_FULL_DOWN_MCG, "down"),
+        ] {
+            validate_exl3_mcg_bytes(
+                loaded.component(source_index, component)?,
+                &format!(
+                    "layer {layer_id} expert {} {label}",
+                    loaded.expert_ids[source_index]
+                ),
+            )?;
+        }
+    }
+    Ok(loaded)
+}
+
+fn preload_routed_exl3_layer_cuda_cache_cooperative(
+    layer_id: usize,
+    expert_ids: &[usize],
+    expert_groups: &[Vec<usize>],
+    full: LoadedRouteCudaExl3LayerFull,
+    load_ms: f64,
+    packed_host_workspace: &mut Vec<u8>,
+    cuda_cache: &mut RouteCudaCache,
+    shard: ExpertIntermediateShard,
+    cuda_stream: *mut c_void,
+) -> Result<(u64, u64)> {
+    let communicator = cuda_cache
+        .weight_preload_communicator
+        .as_ref()
+        .context("cooperative EXL3 preload requires a communicator")?;
+    let world_size = communicator.world_size();
+    anyhow::ensure!(
+        world_size == shard.count && communicator.rank() == shard.rank,
+        "cooperative EXL3 communicator rank {}/{} differs from shard {}/{}",
+        communicator.rank(),
+        world_size,
+        shard.rank,
+        shard.count
+    );
+    let source_expert_ids = expert_groups
+        .get(shard.rank)
+        .context("cooperative EXL3 source expert group is missing")?;
+    let source_expert_count = source_expert_ids.len();
+    anyhow::ensure!(
+        full.expert_ids.as_slice() == source_expert_ids.as_slice(),
+        "cooperative EXL3 loaded source group differs for layer {layer_id} rank {}",
+        shard.rank
+    );
+    let source_bytes = full.source_bytes;
+    let source_requests = full.source_requests;
+    let source_spans = full.source_spans;
+    let direct_io = full.direct_io;
+    let pack_started = Instant::now();
+    let mut packed = pack_route_cuda_exl3_exchange_rows_with_buffer(
+        &full,
+        world_size,
+        std::mem::take(packed_host_workspace),
+    )?;
+    let pack_ms = elapsed_ms(pack_started);
+    drop(full);
+
+    let local_intermediate = shard.local_rows(GLM52_MOE_INTERMEDIATE_SIZE)?;
+    let allocation_started = Instant::now();
+    let final_slab = Arc::new(RouteCudaExl3LayerExpertSlab::new(
+        Arc::clone(&cuda_cache.library),
+        layer_id,
+        expert_ids.len(),
+        GLM52_HIDDEN_SIZE,
+        local_intermediate,
+    )?);
+    let receive_bytes = packed
+        .row_stride
+        .checked_mul(world_size - 1)
+        .context("cooperative EXL3 receive byte count overflow")?;
+    RouteCudaWorkspace::ensure_buffer(
+        &mut cuda_cache.workspace.startup_exl3_exchange_send,
+        Arc::clone(&cuda_cache.library),
+        packed.bytes.len(),
+        "cooperative EXL3 packed exchange send",
+    )?;
+    RouteCudaWorkspace::ensure_buffer(
+        &mut cuda_cache.workspace.startup_exl3_exchange_receive,
+        Arc::clone(&cuda_cache.library),
+        receive_bytes,
+        "cooperative EXL3 packed exchange receive",
+    )?;
+    let send = cuda_cache
+        .workspace
+        .startup_exl3_exchange_send
+        .as_ref()
+        .context("cooperative EXL3 send allocation is missing")?
+        .buffer();
+    let receive = cuda_cache
+        .workspace
+        .startup_exl3_exchange_receive
+        .as_ref()
+        .context("cooperative EXL3 receive allocation is missing")?
+        .buffer();
+    let allocation_ms = elapsed_ms(allocation_started);
+
+    let upload_started = Instant::now();
+    cuda_cache
+        .workspace
+        .upload_host_bytes_to_existing_device_buffer(
+            Arc::clone(&cuda_cache.library),
+            send,
+            &packed.bytes,
+            &format!("layer {layer_id} cooperative EXL3 packed exchange"),
+            RouteCudaProjectionStageSlot::Weight,
+            cuda_stream,
+        )?;
+    let upload_ms = elapsed_ms(upload_started);
+
+    struct Exl3PackedExchangeComponent {
+        label: &'static str,
+        row_offset: usize,
+        expert_stride: usize,
+        destination: GlmrtDeviceBuffer,
+        destination_base: usize,
+    }
+    let components = [
+        Exl3PackedExchangeComponent {
+            label: "gate trellis",
+            row_offset: packed.gate_trellis_offset,
+            expert_stride: packed.trellis_stride,
+            destination: final_slab.w13_trellis.buffer(),
+            destination_base: 0,
+        },
+        Exl3PackedExchangeComponent {
+            label: "up trellis",
+            row_offset: packed.up_trellis_offset,
+            expert_stride: packed.trellis_stride,
+            destination: final_slab.w13_trellis.buffer(),
+            destination_base: expert_ids.len() * packed.trellis_stride,
+        },
+        Exl3PackedExchangeComponent {
+            label: "down trellis",
+            row_offset: packed.down_trellis_offset,
+            expert_stride: packed.trellis_stride,
+            destination: final_slab.w2_trellis.buffer(),
+            destination_base: 0,
+        },
+        Exl3PackedExchangeComponent {
+            label: "gate Suh",
+            row_offset: packed.gate_suh_offset,
+            expert_stride: packed.hidden_rotation_stride,
+            destination: final_slab.gate_suh.buffer(),
+            destination_base: 0,
+        },
+        Exl3PackedExchangeComponent {
+            label: "up Suh",
+            row_offset: packed.up_suh_offset,
+            expert_stride: packed.hidden_rotation_stride,
+            destination: final_slab.up_suh.buffer(),
+            destination_base: 0,
+        },
+        Exl3PackedExchangeComponent {
+            label: "intermediate rotations",
+            row_offset: packed.intermediate_rotations_offset,
+            expert_stride: packed.intermediate_rotation_stride,
+            destination: final_slab.intermediate_rotations.buffer(),
+            destination_base: 0,
+        },
+        Exl3PackedExchangeComponent {
+            label: "down Svh",
+            row_offset: packed.down_svh_offset,
+            expert_stride: packed.hidden_rotation_stride,
+            destination: final_slab.down_svh.buffer(),
+            destination_base: 0,
+        },
+    ];
+    let exchange_started = Instant::now();
+    let receive_view = route_device_buffer_slice(receive, 0, receive_bytes)?;
+    unsafe {
+        communicator
+            .row_all_to_all_u8_async(
+                send,
+                receive_view,
+                world_size,
+                packed.row_stride,
+                cuda_stream,
+            )
+            .with_context(|| format!("exchanging layer {layer_id} cooperative packed EXL3"))?;
+    }
+    for source_rank in 0..world_size {
+        let segment = if source_rank == shard.rank {
+            route_device_buffer_slice(send, shard.rank * packed.row_stride, packed.row_stride)?
+        } else {
+            let receive_index = if source_rank < shard.rank {
+                source_rank
+            } else {
+                source_rank - 1
+            };
+            route_device_buffer_slice(
+                receive_view,
+                receive_index * packed.row_stride,
+                packed.row_stride,
+            )?
+        };
+        for (source_index, &expert_id) in expert_groups[source_rank].iter().enumerate() {
+            for component in &components {
+                let source_offset = component
+                    .row_offset
+                    .checked_add(source_index * component.expert_stride)
+                    .context("cooperative EXL3 packed source offset overflow")?;
+                let source =
+                    route_device_buffer_slice(segment, source_offset, component.expert_stride)?;
+                let destination_offset = component
+                    .destination_base
+                    .checked_add(expert_id * component.expert_stride)
+                    .context("cooperative EXL3 destination offset overflow")?;
+                let destination = route_device_buffer_slice(
+                    component.destination,
+                    destination_offset,
+                    component.expert_stride,
+                )?;
+                unsafe {
+                    cuda_cache
+                        .library
+                        .copy_d2d_async(
+                            destination,
+                            source,
+                            component.expert_stride,
+                            cuda_stream,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "scattering layer {layer_id} cooperative EXL3 {} expert {expert_id}",
+                                component.label
+                            )
+                        })?;
+                }
+            }
+        }
+    }
+    unsafe {
+        cuda_cache
+            .library
+            .cuda_stream_synchronize(cuda_stream)
+            .context("synchronizing packed cooperative EXL3 exchange")?;
+    }
+    let exchange_ms = elapsed_ms(exchange_started);
+    final_slab.upload_unit_global_scale(
+        Arc::clone(&cuda_cache.library),
+        &mut cuda_cache.workspace,
+        cuda_stream,
+    )?;
+    let resident_bytes = final_slab.resident_bytes() as u64;
+    anyhow::ensure!(
+        cuda_cache
+            .exl3_expert_slabs
+            .insert(layer_id, final_slab)
+            .is_none(),
+        "cooperative EXL3 preload inserted duplicate layer {layer_id}"
+    );
+    // Reusing this 916 MB allocation avoids one mmap/zero/free cycle per
+    // layer. Dropping it after every layer cost roughly 150 ms outside the
+    // phase timers on GB10.
+    *packed_host_workspace = std::mem::take(&mut packed.bytes);
+    let source_gbps = source_bytes as f64 / (load_ms * 1.0e6).max(1.0);
+    eprintln!(
+        "real_exl3_cuda_layer_preload layer_id={layer_id} experts={} source_experts={source_expert_count} cooperative=true packed_exchange=true source_bytes={source_bytes} source_requests={source_requests} source_spans={source_spans} direct_io={direct_io} source_gbps={source_gbps:.3} load_ms={load_ms:.3} pack_ms={pack_ms:.3} allocation_ms={allocation_ms:.3} upload_ms={upload_ms:.3} exchange_ms={exchange_ms:.3} resident_bytes={resident_bytes}",
+        expert_ids.len(),
+    );
+    Ok((source_bytes, resident_bytes))
+}
+
+pub(in crate::commands::real_full) fn preload_routed_exl3_projection_cuda_cache(
+    catalog: &TensorCatalog,
+    requests: &[RouteProjectionCachePreloadRequest],
+    cache: &mut RouteTensorCache,
+) -> Result<RouteCudaProjectionPreload> {
+    anyhow::ensure!(
+        is_glm52_exl3_recipe(&catalog.facts.quantization_recipe),
+        "native EXL3 preload requires the GLM-5.2 EXL3 recipe"
+    );
+    anyhow::ensure!(
+        !requests.is_empty(),
+        "native EXL3 resident preload requires projection requests"
+    );
+    let shard = spark_expert_intermediate_shard_from_env()?
+        .context("native EXL3 expert preload requires four intermediate shards")?;
+    anyhow::ensure!(
+        shard.count == 4,
+        "native EXL3 expert preload requires TP4, got TP{}",
+        shard.count
+    );
+    // Cooperative coalesced reads avoid seeking across every expert's rank
+    // window, then exchange directly into the one final TP4 resident slab.
+    // Direct rank-window reads remain available for controlled comparisons.
+    let cooperative_requested =
+        route_preload_cooperative_from_env(REAL_FULL_EXL3_ROUTE_PRELOAD_COOPERATIVE_ENV, true);
+    let cuda_cache = cache.cuda_cache_with_weight_preload(cooperative_requested)?;
+    anyhow::ensure!(
+        cuda_cache.b12x_aot_enabled,
+        "native EXL3 expert preload requires the SparkInfer AOT backend"
+    );
+    let stream = RouteCudaStream::new(Arc::clone(&cuda_cache.library))?;
+    let cuda_stream = stream.as_ptr();
+    let cooperative = cuda_cache.weight_preload_communicator.is_some();
+    anyhow::ensure!(
+        cooperative == cooperative_requested,
+        "native EXL3 cooperative preload request={cooperative_requested} initialized communicator={cooperative}"
+    );
+    let mut layers = requests
+        .iter()
+        .map(|request| request.layer_id)
+        .collect::<Vec<_>>();
+    layers.sort_unstable();
+    layers.dedup();
+    let mut layer_plans = Vec::with_capacity(layers.len());
+    for layer_id in layers {
+        let layer_requests = requests
+            .iter()
+            .filter(|request| request.layer_id == layer_id)
+            .collect::<Vec<_>>();
+        let mut expert_ids = layer_requests
+            .iter()
+            .map(|request| request.expert_id)
+            .collect::<Vec<_>>();
+        expert_ids.sort_unstable();
+        expert_ids.dedup();
+        anyhow::ensure!(
+            !expert_ids.is_empty()
+                && expert_ids.iter().copied().eq(0..expert_ids.len())
+                && layer_requests.len() == expert_ids.len() * 3,
+            "layer {layer_id} native EXL3 preload requires three projections for dense experts"
+        );
+        layer_plans.push((layer_id, expert_ids));
+    }
+    let mut preload = RouteCudaProjectionPreload::default();
+    if cooperative {
+        let cooperative_started = Instant::now();
+        let world_size = cuda_cache
+            .weight_preload_communicator
+            .as_ref()
+            .context("cooperative EXL3 preload requires a communicator")?
+            .world_size();
+        let cooperative_plans = layer_plans
+            .iter()
+            .map(|(layer_id, expert_ids)| {
+                Ok((
+                    *layer_id,
+                    expert_ids,
+                    cooperative_weight_preload_expert_groups(
+                        catalog, *layer_id, expert_ids, world_size,
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut packed_host_workspace = Vec::new();
+        let mut total_source_bytes = 0_u64;
+        std::thread::scope(|scope| -> Result<()> {
+            let first = cooperative_plans
+                .first()
+                .context("cooperative EXL3 preload has no layer plans")?;
+            let first_source_experts = first
+                .2
+                .get(shard.rank)
+                .context("cooperative EXL3 first source group is missing")?;
+            let mut pending = Some(scope.spawn(move || {
+                let started = Instant::now();
+                let loaded =
+                    load_route_cuda_exl3_layer_full(catalog, first.0, first_source_experts)?;
+                Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
+            }));
+            for (index, (layer_id, expert_ids, expert_groups)) in
+                cooperative_plans.iter().enumerate()
+            {
+                let (loaded, load_ms) = pending
+                    .take()
+                    .expect("cooperative EXL3 current layer preload handle exists")
+                    .join()
+                    .map_err(|_| {
+                        anyhow::anyhow!("cooperative EXL3 layer preload worker panicked")
+                    })??;
+                pending = cooperative_plans.get(index + 1).map(|next| {
+                    scope.spawn(move || {
+                        let source_experts = next.2.get(shard.rank).with_context(|| {
+                            format!("cooperative EXL3 layer {} source group is missing", next.0)
+                        })?;
+                        let started = Instant::now();
+                        let loaded =
+                            load_route_cuda_exl3_layer_full(catalog, next.0, source_experts)?;
+                        Ok::<_, anyhow::Error>((loaded, elapsed_ms(started)))
+                    })
+                });
+                let (source_bytes, resident_bytes) =
+                    preload_routed_exl3_layer_cuda_cache_cooperative(
+                        *layer_id,
+                        expert_ids,
+                        expert_groups,
+                        loaded,
+                        load_ms,
+                        &mut packed_host_workspace,
+                        cuda_cache,
+                        shard,
+                        cuda_stream,
+                    )?;
+                total_source_bytes = total_source_bytes
+                    .checked_add(source_bytes)
+                    .context("cooperative EXL3 source byte total overflow")?;
+                preload.projection_groups += expert_ids.len() * 3;
+                preload.weight_bytes += resident_bytes;
+                cuda_cache.projection_uploads += expert_ids.len() * 3;
+            }
+            Ok(())
+        })?;
+        let packed_workspace_bytes = packed_host_workspace.capacity();
+        drop(packed_host_workspace);
+        let total_ms = elapsed_ms(cooperative_started);
+        let effective_source_gbps = total_source_bytes as f64 / (total_ms * 1.0e6).max(1.0);
+        eprintln!(
+            "real_exl3_cooperative_preload_complete layers={} read_ahead_layers=1 packed_workspace_reused=true packed_workspace_bytes={packed_workspace_bytes} source_bytes={total_source_bytes} total_ms={total_ms:.3} effective_source_gbps={effective_source_gbps:.3}",
+            cooperative_plans.len(),
+        );
+    } else {
+        // One ring serves the entire direct preload. Recreating an 8K-entry
+        // ring for every layer can exhaust locked io_uring accounting late in
+        // startup and silently turn the final layers into serial `pread`.
+        let mut direct_source_reader = RouteCudaExl3ReadExecutor::new();
+        for (layer_id, expert_ids) in layer_plans {
+            let local_intermediate = shard.local_rows(GLM52_MOE_INTERMEDIATE_SIZE)?;
+            let allocation_started = Instant::now();
+            let slab = Arc::new(RouteCudaExl3LayerExpertSlab::new(
+                Arc::clone(&cuda_cache.library),
+                layer_id,
+                expert_ids.len(),
+                GLM52_HIDDEN_SIZE,
+                local_intermediate,
+            )?);
+            let allocation_ms = elapsed_ms(allocation_started);
+            let direct_started = Instant::now();
+            let source_bytes = slab.store_layer_experts_direct(
+                catalog,
+                &expert_ids,
+                shard,
+                &mut direct_source_reader,
+                Arc::clone(&cuda_cache.library),
+                &mut cuda_cache.workspace,
+                cuda_stream,
+            )?;
+            slab.upload_unit_global_scale(
+                Arc::clone(&cuda_cache.library),
+                &mut cuda_cache.workspace,
+                cuda_stream,
+            )?;
+            let direct_ms = elapsed_ms(direct_started);
+            let resident_bytes = slab.resident_bytes() as u64;
+            anyhow::ensure!(
+                cuda_cache
+                    .exl3_expert_slabs
+                    .insert(layer_id, slab)
+                    .is_none(),
+                "native EXL3 preload inserted duplicate layer {layer_id}"
+            );
+            preload.projection_groups += expert_ids.len() * 3;
+            preload.weight_bytes += resident_bytes;
+            cuda_cache.projection_uploads += expert_ids.len() * 3;
+            let source_gbps = source_bytes as f64 / (direct_ms * 1.0e6).max(1.0);
+            eprintln!(
+            "real_exl3_cuda_layer_preload layer_id={layer_id} experts={} cooperative=false direct_resident=true source_bytes={source_bytes} source_gbps={source_gbps:.3} allocation_ms={allocation_ms:.3} direct_ms={direct_ms:.3} resident_bytes={resident_bytes}",
+            expert_ids.len(),
+        );
+        }
+    }
+    if cooperative {
+        drop(cuda_cache.weight_preload_communicator.take());
+        // These are one-layer streaming workspaces, not alternate resident
+        // weights. Release them before service handoff so production retains
+        // only the final TP4 slab for each expert.
+        drop(cuda_cache.workspace.startup_exl3_exchange_send.take());
+        drop(cuda_cache.workspace.startup_exl3_exchange_receive.take());
+        drop(cuda_cache.workspace.pinned_projection_weight.take());
+        clear_route_cuda_aligned_read_pool();
+    }
+    Ok(preload)
+}
+
 pub(in crate::commands::real_full) fn preload_routed_quant_projection_cuda_cache(
     catalog: &TensorCatalog,
     requests: &[RouteProjectionCachePreloadRequest],
@@ -11918,10 +14405,12 @@ fn validate_packed_nvfp4_projection_shape(
 #[cfg(test)]
 mod tests {
     use super::{
+        b12x_exl3_k3_capacity_rows, b12x_exl3_k3_route_block_rows,
         b12x_projection_scale_shape_supported, b12x_spark_direct_route_shape_supported,
         b12x_w4a16_capacity_rows, b12x_w4a16_prefill_route_block_rows,
         canonical_spark_collective_request_id, coalesce_streaming_completion_slices,
-        collective_gap_ready, copy_loaded_route_cuda_tensor_compact,
+        collective_gap_ready, compact_exl3_intermediate_rotation_for_shard,
+        compact_exl3_trellis_for_shard, copy_loaded_route_cuda_tensor_compact,
         cuda_reference_kernels_enabled, cuda_reference_kernels_test_override,
         cuda_route_validation_test_override, execute_nvfp4_route_cached,
         execute_nvfp4_route_rows_bf16_accumulated_cached,
@@ -11929,17 +14418,22 @@ mod tests {
         execute_nvfp4_route_rows_bf16_accumulated_cached_device_output, f32_values_to_bf16_bytes,
         fused_fp8_reduction_eligible, load_bf16_route_projection_source,
         load_bf16_route_projections_for_group_cached, load_routed_projection_rows_for_shard,
-        native_library_path, native_library_path_candidates, packed_w4a16_topk8_prefill_eligible,
+        native_library_path, native_library_path_candidates, pack_route_cuda_exl3_exchange_rows,
+        packed_w4a16_topk8_prefill_eligible, plan_packed_exl3_k3_topk8_prefill_flat,
         plan_packed_w4a16_topk8_prefill, plan_packed_w4a16_topk8_prefill_flat,
-        route_cuda_graphs_test_override, routed_quant_scalar_metadata_from_loaded,
-        should_use_grouped_route_launches, Bf16RouteProjectionGroupKey, Bf16RouteProjections,
-        LoadedRouteCudaTensorRows, LoadedTensor, LoadedTensorRows, OwnedDeviceAllocation,
-        PackedW4a16Topk8Route, RouteCudaCache, RouteCudaEvent, RouteCudaStream,
-        RouteCudaTensorBytes, RouteCudaWorkspace, RouteStreamingOutputDtype, RouteTensorCache,
-        RoutedQuantProjection, RoutedQuantProjectionKey, ScoredRoute, SparkCollectiveLaunchOrder,
+        queue_route_cuda_exl3_trellis_tp4, read_exact_at_fd, route_cuda_graphs_test_override,
+        routed_quant_scalar_metadata_from_loaded, should_use_grouped_route_launches,
+        Bf16RouteProjectionGroupKey, Bf16RouteProjections, LoadedRouteCudaExl3ExpertFull,
+        LoadedRouteCudaExl3LayerBytes, LoadedRouteCudaExl3LayerFull,
+        LoadedRouteCudaExl3ProjectionFull, LoadedRouteCudaTensorRows, LoadedTensor,
+        LoadedTensorRows, OwnedDeviceAllocation, PackedW4a16Topk8Route, RouteCudaCache,
+        RouteCudaEvent, RouteCudaExl3ReadExecutor, RouteCudaStream, RouteCudaTensorBytes,
+        RouteCudaWorkspace, RouteStreamingOutputDtype, RouteTensorCache, RoutedQuantProjection,
+        RoutedQuantProjectionKey, ScoredRoute, SparkCollectiveLaunchOrder,
         CPU_REFERENCE_NVFP4_ROUTE_BACKEND, CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_BACKEND,
         CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_DEVICE_INPUT_BACKEND,
         CUDA_REFERENCE_NVFP4_ROUTE_BF16_ACCUMULATED_DEVICE_OUTPUT_BACKEND,
+        EXL3_K3_TRELLIS_WORDS_PER_TILE,
     };
     use crate::commands::real_full::coordinator_kernels::{
         device_bf16_output_from_bf16_bytes, device_bf16_output_uninitialized,
@@ -11948,10 +14442,11 @@ mod tests {
     use anyhow::Result;
     use glmrt_core::{
         plan_completion_first_routes, CompletionRoutePlanEntry, DType, ModelFacts, TensorCatalog,
-        TensorInfo, TensorRole,
+        TensorInfo, TensorRole, GLM52_HIDDEN_SIZE, GLM52_MOE_INTERMEDIATE_SIZE,
     };
     use glmrt_ffi::NativeLibrary;
-    use std::{collections::HashMap, fs::File, io::Write, time::Duration};
+    use glmrt_loader::{Glm52Exl3Projection, Glm52Exl3ProjectionKind};
+    use std::{collections::HashMap, fs::File, io::Write, os::fd::AsRawFd, time::Duration};
     use std::{path::Path, path::PathBuf, sync::Arc};
 
     #[test]
@@ -12005,6 +14500,279 @@ mod tests {
         copy_loaded_route_cuda_tensor_compact(&tensor, &mut compact)?;
 
         assert_eq!(compact, [2, 3, 4, 12, 13, 14]);
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_tp4_compaction_slices_fc1_output_and_fc2_input_axes() -> Result<()> {
+        let shard = ExpertIntermediateShard::new(4, 2)?;
+        let tile_bytes = EXL3_K3_TRELLIS_WORDS_PER_TILE * std::mem::size_of::<i16>();
+        let mut fc1 = vec![0_u8; 384 * 128 * tile_bytes];
+        for hidden_tile in 0..384 {
+            for intermediate_tile in 0..128 {
+                let offset = (hidden_tile * 128 + intermediate_tile) * tile_bytes;
+                let marker = (hidden_tile * 128 + intermediate_tile) as u16;
+                fc1[offset..offset + 2].copy_from_slice(&marker.to_le_bytes());
+            }
+        }
+        let compact_fc1 = compact_exl3_trellis_for_shard("gate", &fc1, "gate_proj", shard)?;
+        assert_eq!(compact_fc1.len(), 384 * 32 * tile_bytes);
+        for hidden_tile in [0, 1, 383] {
+            for local_tile in [0, 1, 31] {
+                let offset = (hidden_tile * 32 + local_tile) * tile_bytes;
+                let actual =
+                    u16::from_le_bytes(compact_fc1[offset..offset + 2].try_into().unwrap());
+                assert_eq!(actual, (hidden_tile * 128 + 64 + local_tile) as u16);
+            }
+        }
+
+        let mut fc2 = vec![0_u8; 128 * 384 * tile_bytes];
+        for intermediate_tile in 0..128 {
+            for hidden_tile in 0..384 {
+                let offset = (intermediate_tile * 384 + hidden_tile) * tile_bytes;
+                let marker = (intermediate_tile * 384 + hidden_tile) as u16;
+                fc2[offset..offset + 2].copy_from_slice(&marker.to_le_bytes());
+            }
+        }
+        let compact_fc2 = compact_exl3_trellis_for_shard("down", &fc2, "down_proj", shard)?;
+        assert_eq!(compact_fc2.len(), 32 * 384 * tile_bytes);
+        for local_tile in [0, 1, 31] {
+            for hidden_tile in [0, 1, 383] {
+                let offset = (local_tile * 384 + hidden_tile) * tile_bytes;
+                let actual =
+                    u16::from_le_bytes(compact_fc2[offset..offset + 2].try_into().unwrap());
+                assert_eq!(actual, ((64 + local_tile) * 384 + hidden_tile) as u16);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_cooperative_exchange_rows_match_each_tp4_compact_view() -> Result<()> {
+        let tile_bytes = EXL3_K3_TRELLIS_WORDS_PER_TILE * std::mem::size_of::<i16>();
+        let fc1_bytes = (0..384 * 128 * tile_bytes)
+            .map(|offset| (offset % 251) as u8)
+            .collect::<Vec<_>>();
+        let fc2_bytes = (0..128 * 384 * tile_bytes)
+            .map(|offset| 193_u8.wrapping_add((offset % 59) as u8))
+            .collect::<Vec<_>>();
+        let hidden_rotation = (0..GLM52_HIDDEN_SIZE as u16)
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let intermediate_rotation = (0..GLM52_MOE_INTERMEDIATE_SIZE as u16)
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let projection = |trellis: Vec<u8>, suh: Vec<u8>, svh: Vec<u8>| {
+            LoadedRouteCudaExl3ProjectionFull { trellis, suh, svh }
+        };
+        let expert = LoadedRouteCudaExl3ExpertFull {
+            gate: projection(
+                fc1_bytes.clone(),
+                hidden_rotation.clone(),
+                intermediate_rotation.clone(),
+            ),
+            up: projection(
+                fc1_bytes,
+                hidden_rotation.clone(),
+                intermediate_rotation.clone(),
+            ),
+            down: projection(fc2_bytes, intermediate_rotation, hidden_rotation),
+        };
+
+        let loaded = LoadedRouteCudaExl3LayerFull {
+            expert_ids: vec![0],
+            bytes: LoadedRouteCudaExl3LayerBytes::Individual(vec![expert]),
+            source_bytes: 0,
+            source_requests: 0,
+            source_spans: 0,
+            direct_io: false,
+        };
+        let packed = pack_route_cuda_exl3_exchange_rows(&loaded, 4)?;
+        let expert = match &loaded.bytes {
+            LoadedRouteCudaExl3LayerBytes::Individual(experts) => &experts[0],
+            LoadedRouteCudaExl3LayerBytes::DirectSpans { .. } => unreachable!(),
+        };
+        assert_eq!(packed.bytes.len(), packed.row_stride * 4);
+        for rank in 0..4 {
+            let shard = ExpertIntermediateShard::new(4, rank)?;
+            let row = &packed.bytes[rank * packed.row_stride..(rank + 1) * packed.row_stride];
+            let expected_gate =
+                compact_exl3_trellis_for_shard("gate", &expert.gate.trellis, "gate_proj", shard)?;
+            assert_eq!(
+                &row[packed.gate_trellis_offset
+                    ..packed.gate_trellis_offset + packed.trellis_stride],
+                expected_gate
+            );
+            let expected_down =
+                compact_exl3_trellis_for_shard("down", &expert.down.trellis, "down_proj", shard)?;
+            assert_eq!(
+                &row[packed.down_trellis_offset
+                    ..packed.down_trellis_offset + packed.trellis_stride],
+                expected_down
+            );
+            let expected_rotation =
+                compact_exl3_intermediate_rotation_for_shard("gate.svh", &expert.gate.svh, shard)?;
+            assert_eq!(
+                &row[packed.intermediate_rotations_offset
+                    ..packed.intermediate_rotations_offset + expected_rotation.len()],
+                expected_rotation
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_direct_preload_reads_only_rank_local_trellis_tiles() -> Result<()> {
+        const HIDDEN: usize = 6_144;
+        const INTERMEDIATE: usize = 2_048;
+        const LOCAL_INTERMEDIATE: usize = 512;
+        let tile_bytes = EXL3_K3_TRELLIS_WORDS_PER_TILE * std::mem::size_of::<i16>();
+        let tempdir = tempfile::tempdir()?;
+        let source_path = tempdir.path().join("trellis.bin");
+        let gate_bytes = (0..(HIDDEN / 16) * (INTERMEDIATE / 16) * tile_bytes)
+            .map(|offset| ((offset / tile_bytes) % 251) as u8)
+            .collect::<Vec<_>>();
+        let down_bytes = (0..(INTERMEDIATE / 16) * (HIDDEN / 16) * tile_bytes)
+            .map(|offset| 193_u8.wrapping_add(((offset / tile_bytes) % 59) as u8))
+            .collect::<Vec<_>>();
+        let mut source = File::create(&source_path)?;
+        source.write_all(&gate_bytes)?;
+        source.write_all(&down_bytes)?;
+        drop(source);
+        let tensor = |name: &str, byte_offset: usize, shape: Vec<usize>, bytes: usize| TensorInfo {
+            name: name.to_owned(),
+            file: "trellis.bin".to_owned(),
+            dtype: DType::I16,
+            shape,
+            byte_offset: byte_offset as u64,
+            byte_length: bytes as u64,
+            role: TensorRole::RoutedExpert,
+            layer_id: Some(3),
+            expert_id: Some(0),
+            is_quantization_metadata: false,
+        };
+        let gate = tensor(
+            "gate.trellis",
+            0,
+            vec![
+                HIDDEN / 16,
+                INTERMEDIATE / 16,
+                EXL3_K3_TRELLIS_WORDS_PER_TILE,
+            ],
+            gate_bytes.len(),
+        );
+        let down = tensor(
+            "down.trellis",
+            gate_bytes.len(),
+            vec![
+                INTERMEDIATE / 16,
+                HIDDEN / 16,
+                EXL3_K3_TRELLIS_WORDS_PER_TILE,
+            ],
+            down_bytes.len(),
+        );
+        let shard = ExpertIntermediateShard::new(4, 2)?;
+        fn projection<'a>(
+            kind: Glm52Exl3ProjectionKind,
+            trellis: &'a TensorInfo,
+            input_features: usize,
+            output_features: usize,
+        ) -> Glm52Exl3Projection<'a> {
+            Glm52Exl3Projection {
+                kind,
+                trellis,
+                suh: trellis,
+                svh: trellis,
+                mcg: trellis,
+                input_features,
+                output_features,
+            }
+        }
+        let compact_bytes = HIDDEN * LOCAL_INTERMEDIATE * 3 / 8;
+        let mut compact_gate = vec![0_u8; compact_bytes];
+        let mut compact_down = vec![0_u8; compact_bytes];
+        let mut files = HashMap::new();
+        let mut requests = Vec::new();
+        queue_route_cuda_exl3_trellis_tp4(
+            tempdir.path(),
+            projection(Glm52Exl3ProjectionKind::Gate, &gate, HIDDEN, INTERMEDIATE),
+            shard,
+            LOCAL_INTERMEDIATE,
+            &mut compact_gate,
+            &mut files,
+            &mut requests,
+        )?;
+        assert_eq!(requests.len(), HIDDEN / 16);
+        assert_eq!(
+            requests.iter().map(|request| request.bytes).sum::<usize>(),
+            compact_bytes
+        );
+        queue_route_cuda_exl3_trellis_tp4(
+            tempdir.path(),
+            projection(Glm52Exl3ProjectionKind::Down, &down, INTERMEDIATE, HIDDEN),
+            shard,
+            LOCAL_INTERMEDIATE,
+            &mut compact_down,
+            &mut files,
+            &mut requests,
+        )?;
+        assert_eq!(requests.len(), HIDDEN / 16 + 1);
+        let mut source_reader = RouteCudaExl3ReadExecutor::new();
+        source_reader.execute(&requests)?;
+        compact_gate.fill(0);
+        compact_down.fill(0);
+        source_reader.execute(&requests)?;
+
+        let source_row_bytes = (INTERMEDIATE / 16) * tile_bytes;
+        let local_row_bytes = (LOCAL_INTERMEDIATE / 16) * tile_bytes;
+        for input_tile in 0..HIDDEN / 16 {
+            let source_start = input_tile * source_row_bytes + shard.rank * local_row_bytes;
+            let compact_start = input_tile * local_row_bytes;
+            assert_eq!(
+                &compact_gate[compact_start..compact_start + local_row_bytes],
+                &gate_bytes[source_start..source_start + local_row_bytes]
+            );
+        }
+        assert_eq!(
+            compact_down,
+            down_bytes[shard.rank * compact_bytes..(shard.rank + 1) * compact_bytes]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_pread_fallback_reads_exact_window_and_rejects_eof() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let source_path = tempdir.path().join("source.bin");
+        let mut writer = File::create(&source_path)?;
+        writer.write_all(&[0, 1, 2, 3, 4, 5, 6, 7])?;
+        drop(writer);
+        let source = File::open(source_path)?;
+
+        let mut window = [0_u8; 4];
+        read_exact_at_fd(source.as_raw_fd(), &mut window, 2)?;
+        assert_eq!(window, [2, 3, 4, 5]);
+
+        let mut beyond_end = [0_u8; 4];
+        let error = read_exact_at_fd(source.as_raw_fd(), &mut beyond_end, 6)
+            .expect_err("a source window extending beyond EOF must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_tp4_compaction_slices_intermediate_rotations() -> Result<()> {
+        let shard = ExpertIntermediateShard::new(4, 3)?;
+        let values = (0..2048_u16).flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+
+        let compact = compact_exl3_intermediate_rotation_for_shard("svh", &values, shard)?;
+
+        assert_eq!(compact.len(), 512 * 2);
+        assert_eq!(u16::from_le_bytes(compact[..2].try_into().unwrap()), 1536);
+        assert_eq!(
+            u16::from_le_bytes(compact[compact.len() - 2..].try_into().unwrap()),
+            2047
+        );
         Ok(())
     }
 
@@ -12214,7 +14982,9 @@ mod tests {
         assert!(packed_w4a16_topk8_prefill_eligible(1, 8));
         assert!(!packed_w4a16_topk8_prefill_eligible(7, 55));
         assert!(packed_w4a16_topk8_prefill_eligible(1025, 8200));
-        assert!(!packed_w4a16_topk8_prefill_eligible(2049, 16392));
+        assert!(packed_w4a16_topk8_prefill_eligible(2049, 16392));
+        assert!(packed_w4a16_topk8_prefill_eligible(2064, 16512));
+        assert!(!packed_w4a16_topk8_prefill_eligible(2065, 16520));
     }
 
     #[test]
@@ -12227,6 +14997,28 @@ mod tests {
         assert_eq!(b12x_w4a16_capacity_rows(1024)?, 1024);
         assert_eq!(b12x_w4a16_capacity_rows(1025)?, 2048);
         assert_eq!(b12x_w4a16_capacity_rows(2048)?, 2048);
+        assert_eq!(b12x_w4a16_capacity_rows(2049)?, 2064);
+        assert_eq!(b12x_w4a16_capacity_rows(2064)?, 2064);
+        assert!(b12x_w4a16_capacity_rows(2065).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_k3_workspace_capacity_covers_the_combined_prefill_suffix() -> Result<()> {
+        assert_eq!(b12x_exl3_k3_capacity_rows(1)?, 1);
+        assert_eq!(b12x_exl3_k3_capacity_rows(3)?, 4);
+        assert_eq!(b12x_exl3_k3_capacity_rows(9)?, 9);
+        assert_eq!(b12x_exl3_k3_capacity_rows(10)?, 16);
+        assert_eq!(b12x_exl3_k3_capacity_rows(16)?, 16);
+        assert_eq!(b12x_exl3_k3_capacity_rows(17)?, 32);
+        assert_eq!(b12x_exl3_k3_capacity_rows(256)?, 256);
+        assert_eq!(b12x_exl3_k3_capacity_rows(257)?, 257);
+        assert_eq!(b12x_exl3_k3_capacity_rows(258)?, 512);
+        assert_eq!(b12x_exl3_k3_capacity_rows(1025)?, 2048);
+        assert_eq!(b12x_exl3_k3_capacity_rows(2048)?, 2048);
+        assert_eq!(b12x_exl3_k3_capacity_rows(2049)?, 2064);
+        assert_eq!(b12x_exl3_k3_capacity_rows(2064)?, 2064);
+        assert!(b12x_exl3_k3_capacity_rows(2065).is_err());
         Ok(())
     }
 
@@ -12239,6 +15031,102 @@ mod tests {
         assert_eq!(b12x_w4a16_prefill_route_block_rows(1024), 32);
         assert_eq!(b12x_w4a16_prefill_route_block_rows(2048), 32);
         assert_eq!(b12x_w4a16_prefill_route_block_rows(2049), 48);
+    }
+
+    #[test]
+    fn exl3_k3_route_blocks_match_sparkinfer_m_regimes() {
+        assert_eq!(b12x_exl3_k3_route_block_rows(1), 8);
+        assert_eq!(b12x_exl3_k3_route_block_rows(128), 8);
+        assert_eq!(b12x_exl3_k3_route_block_rows(129), 16);
+        assert_eq!(b12x_exl3_k3_route_block_rows(256), 16);
+        assert_eq!(b12x_exl3_k3_route_block_rows(257), 16);
+        assert_eq!(b12x_exl3_k3_route_block_rows(512), 32);
+        assert_eq!(b12x_exl3_k3_route_block_rows(513), 48);
+        assert_eq!(b12x_exl3_k3_route_block_rows(1024), 48);
+        assert_eq!(b12x_exl3_k3_route_block_rows(1025), 64);
+        assert_eq!(b12x_exl3_k3_route_block_rows(2048), 64);
+        assert_eq!(b12x_exl3_k3_route_block_rows(2064), 64);
+    }
+
+    #[test]
+    fn exl3_k3_planner_uses_generated_block_width() -> Result<()> {
+        let routes = (0..256 * 8)
+            .map(|_| PackedW4a16Topk8Route {
+                expert_id: 0,
+                weight: 0.125,
+            })
+            .collect::<Vec<_>>();
+
+        let exl3 = plan_packed_exl3_k3_topk8_prefill_flat(256, &routes)?;
+        let w4a16 = plan_packed_w4a16_topk8_prefill_flat(256, &routes)?;
+
+        assert_eq!(exl3.block_expert_ids.len(), 128);
+        assert_eq!(w4a16.block_expert_ids.len(), 64);
+        assert_eq!(exl3.packed_route_count, 2048);
+        assert_eq!(w4a16.packed_route_count, 2048);
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_k3_tail_bucket_covers_worst_case_route_padding() -> Result<()> {
+        let route_count = 2_064 * 8;
+        let routes = (0..route_count)
+            .map(|route_index| PackedW4a16Topk8Route {
+                // One route in each of the first 255 experts maximizes the
+                // number of partially occupied block-64 groups; all remaining
+                // routes occupy expert 255.
+                expert_id: u32::try_from(route_index.min(255)).unwrap(),
+                weight: 0.125,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = plan_packed_exl3_k3_topk8_prefill_flat(2_064, &routes)?;
+
+        assert_eq!(plan.packed_route_indices.len(), 32_640);
+        assert_eq!(plan.block_expert_ids.len(), 510);
+        assert_eq!(plan.packed_route_count, 32_640);
+        Ok(())
+    }
+
+    #[test]
+    fn w4a16_tail_bucket_covers_worst_case_route_padding() -> Result<()> {
+        let route_count = 2_064 * 8;
+        let routes = (0..route_count)
+            .map(|route_index| PackedW4a16Topk8Route {
+                expert_id: u32::try_from(route_index.min(255)).unwrap(),
+                weight: 0.125,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = plan_packed_w4a16_topk8_prefill_flat(2_064, &routes)?;
+
+        assert_eq!(plan.packed_route_indices.len(), 28_512);
+        assert_eq!(plan.block_expert_ids.len(), 594);
+        assert_eq!(plan.packed_route_count, 28_512);
+        Ok(())
+    }
+
+    #[test]
+    fn exl3_k3_m1_uses_packed_blocks_and_retains_direct_ids_for_sum() -> Result<()> {
+        let routes = (0..8)
+            .map(|expert_id| PackedW4a16Topk8Route {
+                expert_id,
+                weight: 0.125,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = plan_packed_exl3_k3_topk8_prefill_flat(1, &routes)?;
+
+        assert_eq!(plan.direct_topk_ids, (0..8).collect::<Vec<_>>());
+        assert_eq!(plan.block_expert_ids, (0..8).collect::<Vec<_>>());
+        assert_eq!(plan.packed_route_count, 64);
+        assert_eq!(plan.packed_route_indices.len(), 64);
+        for expert_id in 0..8_usize {
+            let block = &plan.packed_route_indices[expert_id * 8..(expert_id + 1) * 8];
+            assert_eq!(block[0], expert_id as u32);
+            assert!(block[1..].iter().all(|route| *route == 8));
+        }
+        Ok(())
     }
 
     #[test]

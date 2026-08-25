@@ -2,9 +2,10 @@ use anyhow::{bail, Context, Result};
 use glmrt_core::{
     owner_for_expert, plan_completion_first_routes, CompletionRoutePlanEntry, DType, KvCacheConfig,
     PlacementPolicy, TensorCatalog, TensorInfo, TensorRole, EXPERT_HOSTS, GLM52_HIDDEN_SIZE,
-    GLM52_MTP_LAYER_ID,
+    GLM52_MOE_INTERMEDIATE_SIZE, GLM52_MTP_LAYER_ID,
 };
 use glmrt_ffi::GlmrtDeviceBuffer;
+use glmrt_loader::is_glm52_exl3_recipe;
 use glmrt_transport::{
     protocol_v2_verbs_host_execution_lanes, ExpertProtocolV2DeviceResponseRef,
     ExpertProtocolV2FrameBuffer, ExpertProtocolV2Request, ExpertProtocolV2RequestView,
@@ -45,7 +46,8 @@ use crate::commands::real_full::sparse_mlp::route::{
     execute_nvfp4_route_rows_nvfp4_accumulated_cached_device_output,
     execute_nvfp4_route_rows_nvfp4_accumulated_streaming_cached,
     preload_bf16_route_projection_group_cache, preload_routed_bf16_projection_cuda_cache,
-    preload_routed_quant_projection_cuda_cache, preload_routed_quant_projection_host_cache,
+    preload_routed_exl3_projection_cuda_cache, preload_routed_quant_projection_cuda_cache,
+    preload_routed_quant_projection_host_cache,
     preload_routed_quant_projection_scalar_cache_parallel,
     preload_startup_quantized_bf16_projection_cuda_cache, reduce_mapped_route_shards_cached,
     reduce_mapped_route_shards_cached_host_output, try_begin_packed_w4a16_topk8_prefill_cached,
@@ -67,8 +69,8 @@ const REAL_NVFP4_PROTOCOL_V2_EXECUTOR_TIMING_ENV: &str =
 const REAL_NVFP4_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS_ENV: &str =
     "GLMRT_REAL_FULL_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS";
 const MIN_REAL_NVFP4_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS: usize = 8;
-const DEFAULT_REAL_NVFP4_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS: usize = 2048;
-const MAX_REAL_NVFP4_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS: usize = 2048;
+const DEFAULT_REAL_NVFP4_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS: usize = 2064;
+const MAX_REAL_NVFP4_PROTOCOL_V2_PACKED_DIRECT_MAX_ROWS: usize = 2064;
 const STRIPED_SPARK_COLLECTIVE_QUORUM_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 const REGULAR_SPARK_REDUCTION_MAX_GROUP_ROWS: usize = 256;
@@ -880,7 +882,8 @@ impl RealNvfp4ProtocolV2Executor {
         if !preload_host_projection_rows {
             let mut scalar_requests = Vec::with_capacity(specs.len());
             for spec in &specs {
-                if !retained_bf16_projection_spec(&self.catalog, spec)?
+                if !exl3_base_projection_spec(&self.catalog, spec)
+                    && !retained_bf16_projection_spec(&self.catalog, spec)?
                     && !startup_quantized_bf16_projection_spec(&self.catalog, spec)?
                 {
                     scalar_requests.push(RouteProjectionCachePreloadRequest {
@@ -907,6 +910,7 @@ impl RealNvfp4ProtocolV2Executor {
         }
 
         for spec in &specs {
+            let exl3_base = exl3_base_projection_spec(&self.catalog, spec);
             let retained_bf16 = retained_bf16_projection_spec(&self.catalog, spec)?;
             let startup_quantized_bf16 =
                 startup_quantized_bf16_projection_spec(&self.catalog, spec)?;
@@ -930,7 +934,11 @@ impl RealNvfp4ProtocolV2Executor {
                 "down_proj" => rows.2 = Some(spec.row_count),
                 projection => bail!("unsupported routed projection {projection}"),
             }
-            if !retained_bf16 && !startup_quantized_bf16 && preload_host_projection_rows {
+            if !exl3_base
+                && !retained_bf16
+                && !startup_quantized_bf16
+                && preload_host_projection_rows
+            {
                 let preload = preload_routed_quant_projection_host_cache(
                     &self.catalog,
                     spec.layer_id,
@@ -986,7 +994,16 @@ impl RealNvfp4ProtocolV2Executor {
                     row_count: gate_rows,
                 },
             )?;
-            if !retained_bf16 && !startup_quantized_bf16 {
+            let exl3_base = exl3_base_projection_spec(
+                &self.catalog,
+                &RouteProjectionPreloadSpec {
+                    layer_id,
+                    expert_id,
+                    projection: "gate_proj",
+                    row_count: gate_rows,
+                },
+            );
+            if !exl3_base && !retained_bf16 && !startup_quantized_bf16 {
                 preload_bf16_route_projection_group_cache(
                     &self.catalog,
                     layer_id,
@@ -1006,11 +1023,14 @@ impl RealNvfp4ProtocolV2Executor {
 
         let cuda_residency_started = Instant::now();
         if preload_cuda {
+            let mut exl3_specs = Vec::new();
             let mut retained_specs = Vec::new();
             let mut startup_quantized_specs = Vec::new();
             let mut quant_specs = Vec::new();
             for spec in &specs {
-                if retained_bf16_projection_spec(&self.catalog, spec)? {
+                if exl3_base_projection_spec(&self.catalog, spec) {
+                    exl3_specs.push(spec);
+                } else if retained_bf16_projection_spec(&self.catalog, spec)? {
                     retained_specs.push(spec);
                 } else if startup_quantized_bf16_projection_spec(&self.catalog, spec)? {
                     startup_quantized_specs.push(spec);
@@ -1029,16 +1049,27 @@ impl RealNvfp4ProtocolV2Executor {
                     })
                     .collect::<Vec<_>>()
             };
+            let exl3_requests = requests_for(exl3_specs);
             let quant_requests = requests_for(quant_specs);
             let retained_requests = requests_for(retained_specs);
             let startup_quantized_requests = requests_for(startup_quantized_specs);
             let mut cuda_preload = Default::default();
+            if !exl3_requests.is_empty() {
+                cuda_preload = preload_routed_exl3_projection_cuda_cache(
+                    &self.catalog,
+                    &exl3_requests,
+                    &mut route_cache,
+                )?;
+            }
             if !quant_requests.is_empty() {
-                cuda_preload = preload_routed_quant_projection_cuda_cache(
+                let quant_preload = preload_routed_quant_projection_cuda_cache(
                     &self.catalog,
                     &quant_requests,
                     &mut route_cache,
                 )?;
+                cuda_preload.projection_groups += quant_preload.projection_groups;
+                cuda_preload.weight_bytes += quant_preload.weight_bytes;
+                cuda_preload.weight_scale_bytes += quant_preload.weight_scale_bytes;
             }
             if !retained_requests.is_empty() {
                 let retained_preload = preload_routed_bf16_projection_cuda_cache(
@@ -2886,6 +2917,15 @@ fn projection_rows(
     expert_id: usize,
     projection: &str,
 ) -> Result<usize> {
+    if is_glm52_exl3_recipe(&catalog.facts.quantization_recipe)
+        && layer_id < catalog.facts.num_hidden_layers
+    {
+        return match projection {
+            "gate_proj" | "up_proj" => Ok(GLM52_MOE_INTERMEDIATE_SIZE),
+            "down_proj" => Ok(catalog.facts.hidden_size),
+            other => bail!("unsupported GLM-5.2 EXL3 projection {other}"),
+        };
+    }
     let tensor_name =
         format!("model.layers.{layer_id}.mlp.experts.{expert_id}.{projection}.weight");
     let tensor = catalog_tensor_opt(catalog, &tensor_name)
@@ -2960,6 +3000,11 @@ fn startup_quantized_bf16_projection_spec(
     Ok(catalog_tensor(catalog, &tensor_name)?.dtype == DType::Bf16)
 }
 
+fn exl3_base_projection_spec(catalog: &TensorCatalog, spec: &RouteProjectionPreloadSpec) -> bool {
+    is_glm52_exl3_recipe(&catalog.facts.quantization_recipe)
+        && spec.layer_id < catalog.facts.num_hidden_layers
+}
+
 fn retained_bf16_layer(catalog: &TensorCatalog, layer_id: usize) -> Result<bool> {
     if layer_id != GLM52_MTP_LAYER_ID || !mtp_bf16_experts_enabled()? {
         return Ok(false);
@@ -3006,11 +3051,44 @@ fn resident_preload_plan_for_specs(
             "model.layers.{}.mlp.experts.{}.{}",
             spec.layer_id, spec.expert_id, spec.projection
         );
+        let shard_count = intermediate_shard.map_or(1_u64, |shard| shard.count as u64);
+        if is_glm52_exl3_recipe(&catalog.facts.quantization_recipe)
+            && spec.layer_id < catalog.facts.num_hidden_layers
+        {
+            let trellis = require_tensor(&format!("{base_name}.trellis"))?;
+            let suh = require_tensor(&format!("{base_name}.suh"))?;
+            let svh = require_tensor(&format!("{base_name}.svh"))?;
+            let mcg = require_tensor(&format!("{base_name}.mcg"))?;
+            anyhow::ensure!(
+                trellis.dtype == DType::I16
+                    && suh.dtype == DType::F16
+                    && svh.dtype == DType::F16
+                    && mcg.dtype == DType::I32,
+                "GLM-5.2 EXL3 projection {base_name} has an invalid native tensor dtype"
+            );
+            plan.weight_bytes += trellis.byte_length / shard_count;
+            match spec.projection {
+                "gate_proj" | "up_proj" => {
+                    // H-side input rotations are replicated; I-side output
+                    // rotations follow the TP4 intermediate shard.
+                    plan.weight_scale_bytes += suh.byte_length + svh.byte_length / shard_count;
+                }
+                "down_proj" => {
+                    // The down input rotation follows I while the H-side
+                    // output rotation is replicated.
+                    plan.weight_scale_bytes += suh.byte_length / shard_count + svh.byte_length;
+                }
+                other => bail!("unsupported GLM-5.2 EXL3 projection {other}"),
+            }
+            // MCG is a validated recipe marker. The runtime keeps one codebook
+            // LUT, not 768 duplicate scalar tensors per layer.
+            plan.scalar_metadata_bytes += mcg.byte_length;
+            continue;
+        }
         let weight_name = format!("{base_name}.weight");
         let weight_scale_name = format!("{base_name}.weight_scale");
         let input_scale_name = format!("{base_name}.input_scale");
         let weight_scale_2_name = format!("{base_name}.weight_scale_2");
-        let shard_count = intermediate_shard.map_or(1_u64, |shard| shard.count as u64);
         let weight = require_tensor(&weight_name)?;
         if weight.dtype == DType::Bf16 && spec.layer_id == GLM52_MTP_LAYER_ID {
             let retained_bf16 = retained_bf16_projection_spec(catalog, spec)?;
@@ -3067,16 +3145,25 @@ fn routed_projection_preload_spec(
     let (Some(layer_id), Some(expert_id)) = (tensor.layer_id, tensor.expert_id) else {
         return Ok(None);
     };
-    let Some(projection) = routed_projection_name_from_weight_tensor(tensor, layer_id, expert_id)
-    else {
+    let projection = routed_projection_name_from_weight_tensor(tensor, layer_id, expert_id)
+        .or_else(|| routed_projection_name_from_exl3_trellis(tensor, layer_id, expert_id));
+    let Some(projection) = projection else {
         return Ok(None);
     };
-    let row_count = tensor.shape.first().copied().with_context(|| {
-        format!(
-            "real NVFP4 resident preload tensor {} has no row dimension",
-            tensor.name
-        )
-    })?;
+    let row_count = if tensor.name.ends_with(".trellis") {
+        match projection {
+            "gate_proj" | "up_proj" => GLM52_MOE_INTERMEDIATE_SIZE,
+            "down_proj" => GLM52_HIDDEN_SIZE,
+            _ => unreachable!("projection parser returned a known projection"),
+        }
+    } else {
+        tensor.shape.first().copied().with_context(|| {
+            format!(
+                "real NVFP4 resident preload tensor {} has no row dimension",
+                tensor.name
+            )
+        })?
+    };
     if row_count == 0 {
         bail!(
             "real NVFP4 resident preload tensor {} has zero projection rows",
@@ -3089,6 +3176,24 @@ fn routed_projection_preload_spec(
         projection,
         row_count,
     }))
+}
+
+fn routed_projection_name_from_exl3_trellis(
+    tensor: &TensorInfo,
+    layer_id: u32,
+    expert_id: u32,
+) -> Option<&'static str> {
+    let prefix = format!("model.layers.{layer_id}.mlp.experts.{expert_id}.");
+    let suffix = tensor
+        .name
+        .strip_prefix(&prefix)?
+        .strip_suffix(".trellis")?;
+    match suffix {
+        "gate_proj" => Some("gate_proj"),
+        "up_proj" => Some("up_proj"),
+        "down_proj" => Some("down_proj"),
+        _ => None,
+    }
 }
 
 fn routed_projection_name_from_weight_tensor(
@@ -3156,20 +3261,25 @@ mod tests {
     use super::{
         completion_slices_for_all_rows, parse_real_nvfp4_protocol_v2_packed_direct_max_rows,
         real_nvfp4_cuda_reference_kernels_enabled, regular_response_device_target,
+        resident_preload_plan_for_specs, routed_projection_preload_specs,
         validate_completion_slices, RealNvfp4ProtocolV2Executor, StreamedIngressState,
         REAL_NVFP4_PROTOCOL_V2_EXECUTOR,
     };
     use crate::cli::ExpertDaemonArgs;
     use crate::commands::expertd::run_expertd;
     use crate::commands::model_artifacts::{read_expert_owner_lookup, ExpertOwnerLookup};
+    use crate::commands::real_full::intermediate_sharding::{
+        spark_expert_intermediate_shard_from_env, ExpertIntermediateShard,
+    };
     use crate::commands::real_full::sparse_mlp::route::cuda_reference_kernels_test_override;
     use crate::commands::real_full::sparse_mlp::router::ScoredRoute;
     use glmrt_core::{
         DType, ExpertBatch, ExpertBatchRoute, ExpertHostBatch, ExpertHostBatchSet, GraphBucket,
         LayerId, ModelFacts, PlacementVersion, PositionId, RequestId, RowSourceKind, TensorCatalog,
-        TensorInfo, TensorRole, EXPERT_HOSTS,
+        TensorInfo, TensorRole, EXPERT_HOSTS, GLM52_HIDDEN_SIZE, GLM52_MOE_INTERMEDIATE_SIZE,
     };
     use glmrt_ffi::GlmrtDeviceBuffer;
+    use glmrt_loader::{validate_glm52_exl3_expert_catalog, GLM52_EXL3_RECIPE_K3_V1};
     use glmrt_transport::{
         expert_protocol_v2_compact_id, serve_protocol_v2_tcp_listener_with_executor,
         tcp_protocol_v2_host_batch_set_bf16_dispatch, tcp_protocol_v2_roundtrip,
@@ -3195,7 +3305,7 @@ mod tests {
     fn packed_direct_max_rows_defaults_to_full_prefill_and_accepts_diagnostic_range() {
         assert_eq!(
             parse_real_nvfp4_protocol_v2_packed_direct_max_rows(None).unwrap(),
-            2048
+            2064
         );
         assert_eq!(
             parse_real_nvfp4_protocol_v2_packed_direct_max_rows(Some("8")).unwrap(),
@@ -3209,7 +3319,7 @@ mod tests {
 
     #[test]
     fn packed_direct_max_rows_rejects_values_outside_diagnostic_range() {
-        for value in ["7", "2049", "invalid"] {
+        for value in ["7", "2065", "invalid"] {
             assert!(parse_real_nvfp4_protocol_v2_packed_direct_max_rows(Some(value)).is_err());
         }
     }
@@ -3669,6 +3779,141 @@ mod tests {
         assert_eq!(row_stats.loads, 6);
         assert_eq!(row_stats.hits, 1);
         assert_eq!(row_stats.evictions, 0);
+    }
+
+    #[test]
+    fn exl3_trellis_drives_logical_preload_without_nvfp4_weight_fallback() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let catalog = preload_exl3_catalog(tempdir.path());
+        let shard = ExpertIntermediateShard::new(4, 0).unwrap();
+
+        let specs = routed_projection_preload_specs(&catalog, Some(shard)).unwrap();
+        assert_eq!(specs.len(), 3);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.projection, spec.row_count))
+                .collect::<Vec<_>>(),
+            vec![
+                ("down_proj", GLM52_HIDDEN_SIZE),
+                ("gate_proj", GLM52_MOE_INTERMEDIATE_SIZE / 4),
+                ("up_proj", GLM52_MOE_INTERMEDIATE_SIZE / 4),
+            ]
+        );
+
+        // This catalog deliberately has no NVFP4 `.weight` tensors. A valid
+        // plan therefore also proves that format selection stayed on EXL3.
+        let plan = resident_preload_plan_for_specs(&catalog, &specs, Some(shard)).unwrap();
+        assert_eq!(plan.projection_groups, 3);
+        assert_eq!(plan.layers, 1);
+        assert_eq!(plan.experts, 1);
+        assert_eq!(plan.complete_expert_projection_sets, 1);
+        assert_eq!(plan.incomplete_expert_projection_sets, 0);
+        assert_eq!(plan.missing_metadata_tensors, 0);
+        assert_eq!(plan.weight_bytes, 48);
+        assert_eq!(plan.weight_scale_bytes, 96);
+        assert_eq!(plan.scalar_metadata_bytes, 12);
+    }
+
+    #[test]
+    fn calibrated_exl3_checkpoint_preloads_and_executes_packed_protocol_v2_when_requested() {
+        const CATALOG_ENV: &str = "GLMRT_EXL3_RUNTIME_TEST_CATALOG";
+        let Some(catalog_path) = std::env::var_os(CATALOG_ENV).map(PathBuf::from) else {
+            eprintln!("skipped: set {CATALOG_ENV} to a one-layer EXL3 projection catalog");
+            return;
+        };
+        let catalog: TensorCatalog = serde_json::from_reader(
+            File::open(&catalog_path)
+                .unwrap_or_else(|error| panic!("opening {}: {error}", catalog_path.display())),
+        )
+        .unwrap_or_else(|error| panic!("parsing {}: {error}", catalog_path.display()));
+        let summary = validate_glm52_exl3_expert_catalog(&catalog)
+            .expect("validating the calibrated one-layer EXL3 catalog");
+        assert_eq!(summary.base_routed_layers, 1);
+        assert_eq!(summary.experts_per_layer, 256);
+        assert_eq!(summary.expert_tensors, 256 * 3 * 4);
+
+        let layer_id = catalog.facts.first_k_dense_replace;
+        let shard = spark_expert_intermediate_shard_from_env()
+            .expect("parsing the calibrated EXL3 TP shard environment")
+            .expect("calibrated EXL3 hardware test requires a TP shard environment");
+        assert_eq!(shard.count, 4);
+        let _cuda_reference_override = cuda_reference_kernels_test_override(true);
+        let executor = RealNvfp4ProtocolV2Executor::new(catalog, Some(layer_id), None)
+            .with_intermediate_shard(shard);
+        let preload = executor
+            .preload_assigned_projections_with_cuda(true)
+            .expect("preloading the calibrated EXL3 layer into its TP4 resident slab");
+        assert_eq!(preload.layers, 1);
+        assert_eq!(preload.experts, 256);
+        assert_eq!(preload.projection_groups, 256 * 3);
+        assert_eq!(preload.cuda_projection_groups, 256 * 3);
+        assert_eq!(preload.cuda_projection_entries, 256 * 3);
+
+        let rows = vec![ExpertProtocolV2RowDescriptor {
+            row_id: 0,
+            source_kind: ExpertV2SourceKind::Decode,
+            source_request_id: 0xE3,
+            token_position: 0,
+            route_offset: 0,
+            route_count: 8,
+        }];
+        let routes = (0..8)
+            .map(|expert_id| ExpertProtocolV2RouteEntry {
+                row_index: 0,
+                expert_id,
+                gate_weight: 1.0 / 8.0,
+            })
+            .collect::<Vec<_>>();
+        let hidden_row_bytes = ExpertV2Dtype::Nvfp4E2m1Fp8E4m3
+            .row_bytes(GLM52_HIDDEN_SIZE)
+            .unwrap();
+        let packed_bytes = GLM52_HIDDEN_SIZE / 2;
+        let scale_bytes = GLM52_HIDDEN_SIZE / 16;
+        assert_eq!(hidden_row_bytes, packed_bytes + scale_bytes);
+        let mut hidden_payload = vec![0_u8; hidden_row_bytes];
+        for (packed_index, packed) in hidden_payload[..packed_bytes].iter_mut().enumerate() {
+            let code = |lane: usize| {
+                let pattern = packed_index.wrapping_mul(2).wrapping_add(lane);
+                let magnitude = 1 + pattern % 7;
+                (magnitude | (((pattern / 7) & 1) << 3)) as u8
+            };
+            *packed = code(0) | (code(1) << 4);
+        }
+        hidden_payload[packed_bytes..].fill(0x18);
+        let request = ExpertProtocolV2Request::new(
+            0xE3,
+            0x51CE,
+            layer_id as u32,
+            GLM52_HIDDEN_SIZE as u32,
+            ExpertV2Dtype::Nvfp4E2m1Fp8E4m3,
+            rows,
+            routes,
+            hidden_payload,
+        )
+        .unwrap();
+        let response = execute_request(&executor, &request)
+            .expect("executing the packed EXL3 ProtocolV2 route");
+        assert_eq!(response.header.request_id, request.header.request_id);
+        assert_eq!(response.header.output_dim as usize, GLM52_HIDDEN_SIZE);
+        assert_eq!(response.header.output_dtype, ExpertV2Dtype::Bf16);
+        assert_eq!(
+            response.partial_output_payload.len(),
+            GLM52_HIDDEN_SIZE * std::mem::size_of::<u16>()
+        );
+        let output = bf16_values(&response.partial_output_payload);
+        assert!(output.iter().all(|value| value.is_finite()));
+        assert!(output.iter().any(|value| *value != 0.0));
+        let checksum = output
+            .iter()
+            .enumerate()
+            .map(|(index, value)| *value as f64 * (1 + index % 251) as f64)
+            .sum::<f64>();
+        eprintln!(
+            "calibrated_exl3_protocol_v2_rank_pass tp_rank={} output_nonzero={} weighted_checksum={checksum:.9e}",
+            shard.rank,
+            output.iter().filter(|value| **value != 0.0).count(),
+        );
     }
 
     #[test]
@@ -4376,6 +4621,43 @@ mod tests {
             MINIMUM_PACKED_DIM,
             MINIMUM_PACKED_DIM,
         )
+    }
+
+    fn preload_exl3_catalog(root: &std::path::Path) -> TensorCatalog {
+        let mut tensors = Vec::new();
+        let mut byte_offset = 0_u64;
+        for projection in ["gate_proj", "up_proj", "down_proj"] {
+            for (suffix, dtype, shape, byte_length, is_quantization_metadata) in [
+                ("trellis", DType::I16, vec![32], 64_u64, false),
+                ("suh", DType::F16, vec![16], 32_u64, true),
+                ("svh", DType::F16, vec![8], 16_u64, true),
+                ("mcg", DType::I32, vec![], 4_u64, true),
+            ] {
+                tensors.push(TensorInfo {
+                    name: format!("model.layers.3.mlp.experts.0.{projection}.{suffix}"),
+                    file: "expert.safetensors".to_owned(),
+                    dtype,
+                    shape,
+                    byte_offset,
+                    byte_length,
+                    role: TensorRole::RoutedExpert,
+                    layer_id: Some(3),
+                    expert_id: Some(0),
+                    is_quantization_metadata,
+                });
+                byte_offset += byte_length;
+            }
+        }
+        tensors.sort_by(|left, right| left.name.cmp(&right.name));
+        TensorCatalog {
+            model_id: "test/glm52-exl3".to_owned(),
+            snapshot_path: root.display().to_string(),
+            facts: ModelFacts {
+                quantization_recipe: GLM52_EXL3_RECIPE_K3_V1.to_owned(),
+                ..ModelFacts::default()
+            },
+            tensors,
+        }
     }
 
     fn expert_catalog_for_layers_with_geometry(

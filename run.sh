@@ -233,21 +233,6 @@ jq -e . "$resolved_json" >/dev/null || release_die "profile resolver returned in
 
 blockers="$(jq -r '.blockers[]?' "$resolved_json")"
 [[ -z "$blockers" ]] || release_die "profile blockers:\n$blockers"
-deployment_fingerprint="$(
-  {
-    jq -S . "$resolved_json"
-    printf '%s\n' \
-      "$ADDR" "$EXPERT_PORT" \
-      "$coordinator_engine_commit" \
-      "$SPARKINFER_GLM_H64_QUERY_PROJECTION" \
-      "$DSPARK_FIXED_DRAFTS" \
-      "$SPARK_0_HOST" "$SPARK_0_LANE_A" "$SPARK_0_LANE_B" \
-      "$SPARK_1_HOST" "$SPARK_1_LANE_A" "$SPARK_1_LANE_B" \
-      "$SPARK_2_HOST" "$SPARK_2_LANE_A" "$SPARK_2_LANE_B" \
-      "$SPARK_3_HOST" "$SPARK_3_LANE_A" "$SPARK_3_LANE_B"
-  } | sha256sum | awk '{print $1}'
-)"
-
 check_model_cache_local() {
   local model_id="$1"
   local revision="${2:-}"
@@ -260,6 +245,7 @@ check_model_cache_local() {
   if find "$root/snapshots/$revision" -xtype l -print -quit | grep -q .; then
     release_die "coordinator model snapshot has unresolved blobs: $model_id@$revision"
   fi
+  printf '%s\n' "$revision"
 }
 
 check_model_cache_remote() {
@@ -277,19 +263,40 @@ test -d "$root/snapshots/$revision"
 if find "$root/snapshots/$revision" -xtype l -print -quit | grep -q .; then
   exit 1
 fi
+printf '%s\n' "$revision"
 REMOTE
 }
 
 echo "== checking model snapshots =="
-check_model_cache_local "$RELEASE_MODEL_ID"
+coordinator_model_revision="$(check_model_cache_local "$RELEASE_MODEL_ID")"
 if [[ "$SPECULATION" == "dspark" ]]; then
-  check_model_cache_local "$RELEASE_DSPARK_MODEL_ID" "$RELEASE_DSPARK_REVISION"
+  dspark_model_revision="$(
+    check_model_cache_local "$RELEASE_DSPARK_MODEL_ID" "$RELEASE_DSPARK_REVISION"
+  )"
 fi
 for host in "$SPARK_0_HOST" "$SPARK_1_HOST" "$SPARK_2_HOST" "$SPARK_3_HOST"; do
-  check_model_cache_remote "$host" "$RELEASE_MODEL_ID" ||
+  remote_model_revision="$(check_model_cache_remote "$host" "$RELEASE_MODEL_ID")" ||
     release_die "$host is missing the selected text model: $RELEASE_MODEL_ID"
+  [[ "$remote_model_revision" == "$coordinator_model_revision" ]] ||
+    release_die "$host selected $RELEASE_MODEL_ID@$remote_model_revision; coordinator selected @$coordinator_model_revision"
 done
-echo "  selected model snapshots are complete"
+echo "  selected model snapshots are complete and identical: $coordinator_model_revision"
+
+deployment_fingerprint="$(
+  {
+    jq -S . "$resolved_json"
+    printf '%s\n' \
+      "$ADDR" "$EXPERT_PORT" \
+      "$coordinator_engine_commit" \
+      "$coordinator_model_revision" \
+      "$SPARKINFER_GLM_H64_QUERY_PROJECTION" \
+      "$DSPARK_FIXED_DRAFTS" \
+      "$SPARK_0_HOST" "$SPARK_0_LANE_A" "$SPARK_0_LANE_B" \
+      "$SPARK_1_HOST" "$SPARK_1_LANE_A" "$SPARK_1_LANE_B" \
+      "$SPARK_2_HOST" "$SPARK_2_LANE_A" "$SPARK_2_LANE_B" \
+      "$SPARK_3_HOST" "$SPARK_3_LANE_A" "$SPARK_3_LANE_B"
+  } | sha256sum | awk '{print $1}'
+)"
 
 services_active=$((
   release_coordinator_running + stale_release_coordinator + host_api_running +
@@ -450,6 +457,22 @@ if [[ -n "${GLMRT_REAL_FULL_DSPARK_PROFILE_AT_STARTUP:-}" ]]; then
 fi
 if [[ -n "${GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES:-}" ]]; then
   echo "GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES=$GLMRT_REAL_FULL_DSPARK_PROFILE_SAMPLES" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS:-}" ]]; then
+  echo "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS=$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID:-}" ]]; then
+  [[ "$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] ||
+    release_die "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID must contain 1..128 alphanumeric, '.', '_', or '-' characters"
+  echo "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID=$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID" \
+    >>"$env_file"
+fi
+if [[ -n "${GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE:-}" ]]; then
+  [[ "$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE" =~ ^/[A-Za-z0-9_./-]{1,256}$ ]] ||
+    release_die "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE must be a simple absolute path"
+  echo "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE=$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE" \
     >>"$env_file"
 fi
 coordinator_image_id="$(docker image inspect -f '{{.Id}}' "$COORDINATOR_DOCKER_INFERENCE")"

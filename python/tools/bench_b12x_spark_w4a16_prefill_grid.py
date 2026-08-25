@@ -575,6 +575,15 @@ def main() -> None:
                 rotation_placeholder,
                 rotation_placeholder,
                 rotation_placeholder,
+                # The pinned SparkInfer ABI carries expert-map and two
+                # trellis-LUT pointers even for packed W4A16. They are
+                # compile-time inactive here but must still occupy their
+                # launch slots.
+                rotation_placeholder,
+                rotation_placeholder,
+                rotation_placeholder,
+                EXPERTS,
+                0,
                 args.rows,
                 grid,
                 cuda.CUstream(stream.cuda_stream),
@@ -651,6 +660,23 @@ def main() -> None:
             reference_output = fc1_out[: routed_rows * HIDDEN].clone()
 
         for grid in args.grid_sizes:
+            cooperative_cap = sms * int(fused.blocks_per_sm)
+            if grid > cooperative_cap:
+                print(
+                    json.dumps(
+                        {
+                            "benchmark": "b12x_spark_w4a16_prefill_grid_skipped",
+                            "block_size": block_size,
+                            "blocks_per_sm": int(fused.blocks_per_sm),
+                            "cooperative_cap": cooperative_cap,
+                            "grid_x": grid,
+                            "reason": "cooperative_launch_too_large",
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                continue
             if args.fused_topk_sum:
                 baseline = compile_w4a16_fused_moe(
                     size_m=args.rows,

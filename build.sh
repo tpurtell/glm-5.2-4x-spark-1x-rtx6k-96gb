@@ -54,9 +54,9 @@ prepare_pinned_source_dependencies() {
     "$(cd "$git_root" && pwd -P)" == "$(cd "$repo_root" && pwd -P)" ]]; then
     echo "== preparing pinned source dependencies =="
     git -C "$repo_root" submodule sync -- \
-      third_party/sparkinfer third_party/xgrammar
+      third_party/sparkinfer third_party/xgrammar third_party/gptqmodel
     git -C "$repo_root" submodule update --init --checkout -- \
-      third_party/sparkinfer third_party/xgrammar
+      third_party/sparkinfer third_party/xgrammar third_party/gptqmodel
     git -C "$repo_root/third_party/xgrammar" submodule sync -- \
       3rdparty/dlpack
     git -C "$repo_root/third_party/xgrammar" submodule update --init --checkout -- \
@@ -69,6 +69,8 @@ prepare_pinned_source_dependencies() {
     release_die "XGrammar source is missing; initialize third_party/xgrammar"
   [[ -f "$repo_root/third_party/xgrammar/3rdparty/dlpack/include/dlpack/dlpack.h" ]] ||
     release_die "XGrammar DLPack source is missing; initialize third_party/xgrammar/3rdparty/dlpack"
+  [[ -f "$repo_root/third_party/gptqmodel/gptqmodel/models/definitions/glm_moe_dsa.py" ]] ||
+    release_die "GPTQModel source is missing; initialize third_party/gptqmodel"
 }
 
 prepare_pinned_source_dependencies
@@ -126,6 +128,9 @@ sparkinfer_commit="$(
 python3 "$repo_root/scripts/verify-xgrammar-source.py" \
   --source "$repo_root/third_party/xgrammar" \
   --lock "$repo_root/third_party/xgrammar.lock.json"
+python3 "$repo_root/scripts/verify-gptqmodel-source.py" \
+  --source "$repo_root/third_party/gptqmodel" \
+  --lock "$repo_root/third_party/gptqmodel.lock.json"
 detected_engine_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)"
 engine_revision_override="${GLMRT_RELEASE_ENGINE_REVISION:-}"
 engine_source_dirty=0

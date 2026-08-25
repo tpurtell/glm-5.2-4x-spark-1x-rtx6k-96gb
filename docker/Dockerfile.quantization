@@ -1,0 +1,113 @@
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch@sha256:ca73b4795f0d3ae27e9cd81b1b1f1b7fc6c0a129f7d51a359d2326e95af48a3d
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+ENV UV_PYTHON_CACHE_DIR=/opt/uv/cache
+ENV VIRTUAL_ENV=/opt/glmrt/quant-venv
+ENV CARGO_HOME=/opt/cargo
+ENV RUSTUP_HOME=/opt/rustup
+ENV PATH=/opt/glmrt/quant-venv/bin:/opt/cargo/bin:${PATH}
+ENV PYTHON_GIL=0
+ENV TORCH_CUDA_ARCH_LIST=12.0
+ENV GLMRT_QUANT_BASE_IMAGE=${BASE_IMAGE}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      bash ca-certificates git jq tini build-essential ninja-build \
+      pkg-config libpcre2-dev pciutils && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir "uv==0.11.30" && \
+    uv python install 3.14.6t && \
+    uv venv --python 3.14.6t "${VIRTUAL_ENV}"
+
+ARG TARGETARCH
+ARG RUST_TOOLCHAIN=1.97.1
+ARG RUSTUP_INIT_AMD64_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+
+RUN [ "${TARGETARCH}" = "amd64" ] && \
+    curl -fsSL \
+      "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init" \
+      -o /tmp/rustup-init && \
+    echo "${RUSTUP_INIT_AMD64_SHA256}  /tmp/rustup-init" | sha256sum -c - && \
+    chmod +x /tmp/rustup-init && \
+    /tmp/rustup-init -y --no-modify-path --profile minimal \
+      --default-toolchain "${RUST_TOOLCHAIN}" && \
+    rm -f /tmp/rustup-init && \
+    rustc --version && cargo --version
+
+COPY quantization/requirements.amd64.lock /opt/glmrt/quantization/requirements.amd64.lock
+COPY quantization/build-requirements.lock /opt/glmrt/quantization/build-requirements.lock
+COPY quantization/normalize_nvidia_cusparselt.py /opt/glmrt/quantization/normalize_nvidia_cusparselt.py
+
+ARG GLMRT_QUANT_REQUIREMENTS_SHA256
+ARG GLMRT_QUANT_BUILD_REQUIREMENTS_SHA256
+ENV GLMRT_QUANT_ROLE=coordinator
+ENV GLMRT_QUANT_TARGET_PLATFORM=linux/amd64
+ENV GLMRT_QUANT_CUDA_ARCH=120
+ENV GLMRT_QUANT_MIN_GPUS=2
+ENV GLMRT_QUANT_PYTHON_VERSION=3.14.6
+ENV GLMRT_QUANT_REQUIREMENTS_SHA256=${GLMRT_QUANT_REQUIREMENTS_SHA256}
+ENV GLMRT_QUANT_BUILD_REQUIREMENTS_SHA256=${GLMRT_QUANT_BUILD_REQUIREMENTS_SHA256}
+ENV GLMRT_QUANT_REQUIREMENTS_LOCK=/opt/glmrt/quantization/requirements.amd64.lock
+ENV PYTHONPATH=/opt/glmrt/third_party/gptqmodel:/opt/glmrt/python
+
+LABEL org.opencontainers.image.title="GLMRT GLM-5.2 EXL3 quantization"
+LABEL io.glmrt.quantization.base_image=${BASE_IMAGE}
+LABEL io.glmrt.quantization.role="coordinator"
+LABEL io.glmrt.quantization.target_platform="linux/amd64"
+LABEL io.glmrt.quantization.cuda_arch="120"
+LABEL io.glmrt.quantization.requirements_sha256=${GLMRT_QUANT_REQUIREMENTS_SHA256}
+LABEL io.glmrt.quantization.build_requirements_sha256=${GLMRT_QUANT_BUILD_REQUIREMENTS_SHA256}
+
+RUN echo "${GLMRT_QUANT_REQUIREMENTS_SHA256}  ${GLMRT_QUANT_REQUIREMENTS_LOCK}" | sha256sum -c - && \
+    echo "${GLMRT_QUANT_BUILD_REQUIREMENTS_SHA256}  /opt/glmrt/quantization/build-requirements.lock" | sha256sum -c - && \
+    uv pip install --python "${VIRTUAL_ENV}/bin/python" \
+      --require-hashes \
+      --build-constraints /opt/glmrt/quantization/build-requirements.lock \
+      --index https://download.pytorch.org/whl/cu130 \
+      --index-strategy unsafe-best-match \
+      -r "${GLMRT_QUANT_REQUIREMENTS_LOCK}" && \
+    python /opt/glmrt/quantization/normalize_nvidia_cusparselt.py --apply && \
+    uv pip check --python "${VIRTUAL_ENV}/bin/python" && \
+    rm -rf "${UV_PYTHON_CACHE_DIR}"
+
+COPY scripts/verify-gptqmodel-source.py /opt/glmrt/scripts/verify-gptqmodel-source.py
+COPY third_party/gptqmodel.lock.json /opt/glmrt/third_party/gptqmodel.lock.json
+COPY third_party/gptqmodel /opt/glmrt/third_party/gptqmodel
+
+ARG GLMRT_GPTQMODEL_COMMIT
+LABEL io.glmrt.gptqmodel.revision=${GLMRT_GPTQMODEL_COMMIT}
+
+RUN python /opt/glmrt/scripts/verify-gptqmodel-source.py \
+      --source /opt/glmrt/third_party/gptqmodel \
+      --lock /opt/glmrt/third_party/gptqmodel.lock.json && \
+    locked_revision="$(python /opt/glmrt/scripts/verify-gptqmodel-source.py \
+      --source /opt/glmrt/third_party/gptqmodel \
+      --lock /opt/glmrt/third_party/gptqmodel.lock.json \
+      --print-revision)" && \
+    [ -n "${GLMRT_GPTQMODEL_COMMIT}" ] && \
+    [ "${GLMRT_GPTQMODEL_COMMIT}" = "${locked_revision}" ] && \
+    uv pip install --python "${VIRTUAL_ENV}/bin/python" --no-deps \
+      --editable /opt/glmrt/third_party/gptqmodel && \
+    uv pip check --python "${VIRTUAL_ENV}/bin/python" && \
+    python -c 'import importlib.util, pathlib, sys; assert sys._is_gil_enabled() is False; source = pathlib.Path("/opt/glmrt/third_party/gptqmodel").resolve(); module = pathlib.Path(importlib.util.find_spec("gptqmodel").origin).resolve(); assert module.is_relative_to(source), (module, source)'
+
+COPY python /opt/glmrt/python
+COPY quantization/preflight.py /opt/glmrt/quantization/preflight.py
+COPY quantization/glm52_execution_upgrade.py /opt/glmrt/quantization/glm52_execution_upgrade.py
+COPY quantization/glm52_layer_boundary_store.py /opt/glmrt/quantization/glm52_layer_boundary_store.py
+COPY quantization/quantize_glm52_gptqmodel.py /opt/glmrt/quantization/quantize_glm52_gptqmodel.py
+
+RUN chmod +x \
+      /opt/glmrt/quantization/preflight.py \
+      /opt/glmrt/quantization/quantize_glm52_gptqmodel.py && \
+    python -c 'import sys; sys.path.insert(0, "/opt/glmrt/quantization"); import quantize_glm52_gptqmodel'
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bash"]

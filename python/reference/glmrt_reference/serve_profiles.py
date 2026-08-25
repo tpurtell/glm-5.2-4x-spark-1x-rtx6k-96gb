@@ -36,6 +36,7 @@ KV_MTP_EXTRA_BYTES_PER_TOKEN = {
 MODEL_ALIASES = {
     "luke": "lukealonso/GLM-5.2-NVFP4",
     "nvidia": "nvidia/GLM-5.2-NVFP4",
+    "exl3": "wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1",
 }
 
 DEFAULT_DSPARK_MODEL_ID = "RedHatAI/GLM-5.2-speculator.dspark"
@@ -141,7 +142,7 @@ def normalize_model_id(model: str) -> str:
         return MODEL_ALIASES[model.lower()]
     except KeyError as error:
         raise ValueError(
-            f"unknown text checkpoint {model!r}; choose luke or nvidia"
+            f"unknown text checkpoint {model!r}; choose luke, nvidia, or exl3"
         ) from error
 
 
@@ -276,6 +277,12 @@ def resolve_serve_profile(
         and not nvidia_live_qualified
     ):
         qualification = "candidate"
+    exl3_candidate = model_id == MODEL_ALIASES["exl3"]
+    if exl3_candidate:
+        # The checkpoint is intentionally launchable so its paired serving
+        # gates can be run, but it cannot inherit the NVFP4 profile's live
+        # qualification merely because its coordinator/KV geometry matches.
+        qualification = "candidate"
     inherited = inherited_environment or {}
     hf_cache_root = hf_hub_cache_root(inherited)
     environment = {
@@ -332,6 +339,10 @@ def resolve_serve_profile(
     if model_id == MODEL_ALIASES["nvidia"] and not nvidia_live_qualified:
         warnings.append(
             "this NVIDIA profile/speculation combination has not passed its live gates"
+        )
+    if exl3_candidate:
+        warnings.append(
+            "the calibrated EXL3 checkpoint has not passed its paired live serving gates"
         )
 
     if speculation == "plain":

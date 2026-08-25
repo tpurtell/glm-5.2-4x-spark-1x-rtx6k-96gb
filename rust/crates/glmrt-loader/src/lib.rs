@@ -1,4 +1,5 @@
 mod catalog;
+mod exl3_format;
 mod placement;
 mod snapshot;
 mod tensors;
@@ -7,6 +8,13 @@ mod tokenizer;
 pub use catalog::{
     build_catalog, build_catalog_for_snapshot, classification_summary_markdown, read_model_facts,
     read_safetensors_metadata, SafetensorsTensorMetadata,
+};
+pub use exl3_format::{
+    glm52_exl3_expert, is_glm52_exl3_recipe, validate_glm52_exl3_expert_catalog,
+    Glm52Exl3CatalogSummary, Glm52Exl3Expert, Glm52Exl3Projection, Glm52Exl3ProjectionKind,
+    Glm52Exl3Tp4ResidentGeometry, GLM52_EXL3_BITS, GLM52_EXL3_CODEBOOK,
+    GLM52_EXL3_EXPERT_TP_WORLD_SIZE, GLM52_EXL3_MCG_MULTIPLIER, GLM52_EXL3_RECIPE_K3_V1,
+    GLM52_EXL3_T12_LUT_BYTES, GLM52_EXL3_TENSOR_FORMAT,
 };
 pub use placement::{assignments_by_owner, build_load_plan};
 pub use snapshot::{

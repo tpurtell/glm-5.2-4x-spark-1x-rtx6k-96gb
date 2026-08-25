@@ -327,7 +327,21 @@ fi
 sync_local_source() {
   docker exec "$coordinator_container" rm -rf /wip/source.next
   docker cp "$staging_dir/." "$coordinator_container:/wip/source.next"
-  docker exec "$coordinator_container" bash -lc 'rm -rf /wip/source && mv /wip/source.next /wip/source'
+  docker exec "$coordinator_container" bash -lc '
+set -euo pipefail
+if [[ -d /wip/source ]]; then
+  # Cargo and Ninja use source mtimes in their incremental fingerprints.  A
+  # frozen snapshot can legitimately contain changed bytes with an older
+  # preserved mtime (for example after switching branches or restoring a
+  # patch).  Compare content, retain unchanged files, and let only transferred
+  # files acquire the current mtime so cached objects cannot survive different
+  # source bytes.
+  rsync -a --checksum --delete --no-times /wip/source.next/ /wip/source/
+  rm -rf /wip/source.next
+else
+  mv /wip/source.next /wip/source
+fi
+'
 }
 
 sync_seed_source() {
@@ -344,7 +358,7 @@ sync_seed_source() {
     rsync -a --delete "$staging_dir/" "$seed_host:$remote_staging/"
   fi
   ssh -o BatchMode=yes "$seed_host" \
-    "docker exec '$spark_container' rm -rf /wip/source.next && docker cp '$remote_staging/.' '$spark_container:/wip/source.next' && docker exec '$spark_container' bash -lc 'rm -rf /wip/source && mv /wip/source.next /wip/source'"
+    "docker exec '$spark_container' rm -rf /wip/source.next && docker cp '$remote_staging/.' '$spark_container:/wip/source.next' && docker exec '$spark_container' bash -lc 'set -euo pipefail; if [[ -d /wip/source ]]; then rsync -a --checksum --delete --no-times /wip/source.next/ /wip/source/; rm -rf /wip/source.next; else mv /wip/source.next /wip/source; fi'"
 }
 
 build_coordinator() {
@@ -418,18 +432,22 @@ fi
 CONTAINER
 fi
 
-docker exec -i "$coordinator_container" bash -s -- "$slot" <<'CONTAINER'
+if [[ "$role" != expert ]]; then
+  docker exec -i "$coordinator_container" bash -s -- "$slot" <<'CONTAINER'
 set -euo pipefail
 slot="$1"
 test -s "/wip/slots/$slot/coordinator/FINGERPRINT"
 test -s "/wip/slots/$slot/coordinator/workspace/glmrt.config"
 CONTAINER
-ssh -o BatchMode=yes "$seed_host" docker exec -i "$spark_container" bash -s -- "$slot" <<'CONTAINER'
+fi
+if [[ "$role" != coordinator ]]; then
+  ssh -o BatchMode=yes "$seed_host" docker exec -i "$spark_container" bash -s -- "$slot" <<'CONTAINER'
 set -euo pipefail
 slot="$1"
 test -s "/wip/slots/$slot/spark-expert/FINGERPRINT"
 test -s "/wip/slots/$slot/spark-expert/workspace/glmrt.config"
 CONTAINER
+fi
 
 distribute_expert_slot() {
   ssh -o BatchMode=yes "$seed_host" \
@@ -463,5 +481,11 @@ distribute_expert_slot() {
   done
 }
 
-distribute_expert_slot
-echo "WIP slot '$slot' is ready. Launch it with: ./run.sh --wip --wip-slot '$slot' --restart"
+if [[ "$role" != coordinator || -n "$from_slot" ]]; then
+  distribute_expert_slot
+fi
+if [[ "$role" == both || -n "$from_slot" ]]; then
+  echo "WIP slot '$slot' is ready. Launch it with: ./run.sh --wip --wip-slot '$slot' --restart"
+else
+  echo "WIP $role artifact for slot '$slot' is ready; build the other role before launching the slot."
+fi

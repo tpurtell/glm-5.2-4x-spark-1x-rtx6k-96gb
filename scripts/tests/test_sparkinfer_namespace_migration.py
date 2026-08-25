@@ -35,6 +35,10 @@ CUTLASS_PACKAGES = (
     "nvidia-cutlass-dsl-libs-cu13",
 )
 QUALIFIED_CUTLASS_VERSION = "4.6.1"
+SPARKINFER_IMAGE_DOCKERFILES = (
+    ROOT / "docker" / "Dockerfile.dev",
+    ROOT / "docker" / "Dockerfile.release",
+)
 METADATA_FREE_PYTHON_CACHE_MARKERS = (
     ".mypy_cache",
     ".pytest_cache",
@@ -228,13 +232,19 @@ def test_fork_and_images_share_qualified_cutlass_pin() -> None:
     )
 
     image_pin = re.compile(r'nvidia-cutlass-dsl\[cu13\]==([^"]+)"')
-    for dockerfile in sorted((ROOT / "docker").glob("Dockerfile*")):
+    for dockerfile in SPARKINFER_IMAGE_DOCKERFILES:
         match = image_pin.search(dockerfile.read_text(encoding="utf-8"))
         assert match is not None, f"{dockerfile.relative_to(ROOT)} has no CUTLASS DSL pin"
         assert match.group(1) == QUALIFIED_CUTLASS_VERSION, (
             f"{dockerfile.relative_to(ROOT)} pins CUTLASS DSL {match.group(1)}, "
             f"expected {QUALIFIED_CUTLASS_VERSION} to match the fork"
         )
+
+
+def test_quantization_image_does_not_install_sparkinfer_runtime_dependencies() -> None:
+    text = (ROOT / "docker" / "Dockerfile.quantization").read_text(encoding="utf-8")
+    assert "third_party/sparkinfer" not in text
+    assert "nvidia-cutlass-dsl" not in text
 
 
 def test_fork_accepts_the_ngc_base_torch_prerelease() -> None:
@@ -390,7 +400,7 @@ def test_release_preflight_requires_matching_engine_revisions() -> None:
     assert '"$coordinator_engine_commit"' in fingerprint
 
 
-def test_packed_expert_warmups_use_bf16_wire() -> None:
+def test_packed_expert_warmups_use_model_appropriate_wire() -> None:
     for launcher_name in (
         "real-full-tcp-serve.sh",
         "real-full-tcp-live-smoke.sh",
@@ -401,10 +411,17 @@ def test_packed_expert_warmups_use_bf16_wire() -> None:
         )[0]
 
         assert "GLMRT_SPARK_MOE_MODE" not in warmup
-        assert "--nvfp4-fp8-roundtrip" not in warmup
         assert 'if [ "$warmup_layer_id" != "78" ]; then' not in warmup
         assert 'local wire_contract="bf16-in/bf16-out"' in warmup
         assert "local warmup_routes_per_row=1" in warmup
+        assert (
+            'if [ "$model_id" = '
+            '"wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1" ]; then'
+            in warmup
+        )
+        assert 'wire_contract="nvfp4-in/fp8-out"' in warmup
+        assert "warmup_routes_per_row=8" in warmup
+        assert "wire_args=(--nvfp4-fp8-roundtrip)" in warmup
         assert (
             'expert_ids="$(warmup_expert_ids_for_owner "$owner" '
             '"$warmup_routes_per_row")"'
@@ -439,6 +456,8 @@ def test_packed_expert_warmups_use_bf16_wire() -> None:
         )[0]
         assert ".owner == $owner" in expert_ids
         assert ".layer_id == $layer" in expert_ids
+        assert 'endswith(".gate_proj.weight")' in expert_ids
+        assert 'endswith(".gate_proj.trellis")' in expert_ids
         assert "select(length >= $count)" in expert_ids
         assert ".[:$count]" in expert_ids
         assert 'join(",")' in expert_ids

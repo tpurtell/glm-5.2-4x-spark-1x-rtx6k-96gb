@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -47,11 +49,81 @@ def load_config(tmp_path: Path, extra: str = "") -> subprocess.CompletedProcess[
     )
 
 
+def load_model_id(tmp_path: Path, model: str) -> subprocess.CompletedProcess[str]:
+    config = tmp_path / f"glmrt-{model}.config"
+    config.write_text(
+        BASE_CONFIG.replace("MODEL=luke", f"MODEL={model}"), encoding="utf-8"
+    )
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; release_load_config "$2"; printf "%s\\n" "$RELEASE_MODEL_ID"',
+            "bash",
+            str(RELEASE_COMMON),
+            str(config),
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
 def test_release_ab_controls_have_safe_defaults(tmp_path: Path) -> None:
     result = load_config(tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["auto", ""]
+
+
+def test_release_model_selector_accepts_calibrated_exl3(tmp_path: Path) -> None:
+    result = load_model_id(tmp_path, "exl3")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1"
+
+
+def test_profile_resolver_accepts_the_release_exl3_selector() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(ROOT / "python" / "reference")
+    result = subprocess.run(
+        [
+            "python3",
+            str(ROOT / "python" / "tools" / "resolve_serve_profile.py"),
+            "--repo-root",
+            str(ROOT),
+            "--model",
+            "exl3",
+            "--speculation",
+            "plain",
+            "--gpu-total-mib",
+            "97887",
+            "--dry-run",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr
+    resolved = json.loads(result.stdout)
+    assert resolved["model_id"] == (
+        "wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1"
+    )
+    assert resolved["environment"]["GLMRT_MODEL_ID"] == resolved["model_id"]
+
+
+def test_standard_launcher_binds_and_compares_exact_model_revision() -> None:
+    launcher = (ROOT / "run.sh").read_text(encoding="utf-8")
+
+    assert 'remote_model_revision="$(check_model_cache_remote' in launcher
+    assert 'remote_model_revision" == "$coordinator_model_revision' in launcher
+    assert '"$coordinator_model_revision" \\' in launcher
 
 
 def test_release_ab_controls_accept_explicit_qualification_values(
@@ -118,6 +190,23 @@ def test_run_fingerprints_and_explicitly_sets_both_ab_controls() -> None:
     )
 
 
+def test_route_profile_capture_identity_is_launcher_scoped() -> None:
+    for relative_path in ("run.sh", "scripts/run-wip.sh"):
+        launcher = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert (
+            "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS="
+            "$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_STATS"
+        ) in launcher
+        assert (
+            "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID="
+            "$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_CAPTURE_ID"
+        ) in launcher
+        assert (
+            "GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE="
+            "$GLMRT_PROTOCOL_V2_EXPERT_QUEUE_ROW_ROUTES_GATE_FILE"
+        ) in launcher
+
+
 def test_release_and_wip_containers_never_auto_start_on_boot() -> None:
     release_launcher = (ROOT / "run.sh").read_text(encoding="utf-8")
     wip_builder = (ROOT / "wip.sh").read_text(encoding="utf-8")
@@ -139,3 +228,10 @@ def test_parallel_wip_builds_fail_before_finalizing_stale_outputs() -> None:
     assert (
         "/wip/source expert 121 /wip/build/expert /wip/output/expert \\\n    || return $?"
     ) in wip_builder
+
+
+def test_coordinator_only_wip_clone_fans_out_unchanged_expert_slot() -> None:
+    wip_builder = (ROOT / "wip.sh").read_text(encoding="utf-8")
+
+    assert 'if [[ "$role" != coordinator || -n "$from_slot" ]]; then' in wip_builder
+    assert "distribute_expert_slot" in wip_builder

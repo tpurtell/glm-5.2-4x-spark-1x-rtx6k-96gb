@@ -233,7 +233,8 @@ if(GLMRT_ENABLE_SPARKINFER_AOT)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   set(GLMRT_B12X_AOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/b12x_aot")
   set(GLMRT_B12X_AOT_REGIMES 1 2 4 8 16 32 64 128 256)
-  set(GLMRT_B12X_AOT_TOPK8_PREFILL_REGIMES 2 4 8 16 32 64 128 256 512 1024 2048)
+  set(GLMRT_B12X_AOT_TOPK8_PREFILL_REGIMES 2 4 8 16 32 64 128 256 512 1024 2048 2064)
+  set(GLMRT_B12X_EXL3_K3_REGIMES 1 2 4 8 9 16 32 64 128 256 257 512 1024 2048 2064)
   set(GLMRT_B12X_AOT_OBJECTS)
   set(GLMRT_B12X_AOT_HEADERS)
   list(APPEND GLMRT_B12X_AOT_OBJECTS
@@ -250,6 +251,15 @@ if(GLMRT_ENABLE_SPARKINFER_AOT)
       "${GLMRT_B12X_AOT_DIR}/moe_tp4_w4a16_top1_m${regime}.o"
     )
   endforeach()
+  foreach(regime IN LISTS GLMRT_B12X_EXL3_K3_REGIMES)
+    list(APPEND GLMRT_B12X_AOT_OBJECTS
+      "${GLMRT_B12X_AOT_DIR}/moe_tp4_exl3_k3_m${regime}_topk8.o"
+    )
+  endforeach()
+  list(APPEND GLMRT_B12X_AOT_OBJECTS
+    "${GLMRT_B12X_AOT_DIR}/moe_tp4_exl3_k3_topk_sum.o"
+    "${GLMRT_B12X_AOT_DIR}/moe_tp4_exl3_k3_topk_sum_bf16.o"
+  )
   list(APPEND GLMRT_B12X_AOT_HEADERS
     "${GLMRT_B12X_AOT_DIR}/moe_tp4_w4a16_decode_m1.h"
     "${GLMRT_B12X_AOT_DIR}/moe_tp4_w4a16_decode_m1_fused_sum.h"
@@ -265,6 +275,15 @@ if(GLMRT_ENABLE_SPARKINFER_AOT)
       "${GLMRT_B12X_AOT_DIR}/moe_tp4_w4a16_top1_m${regime}.h"
     )
   endforeach()
+  foreach(regime IN LISTS GLMRT_B12X_EXL3_K3_REGIMES)
+    list(APPEND GLMRT_B12X_AOT_HEADERS
+      "${GLMRT_B12X_AOT_DIR}/moe_tp4_exl3_k3_m${regime}_topk8.h"
+    )
+  endforeach()
+  list(APPEND GLMRT_B12X_AOT_HEADERS
+    "${GLMRT_B12X_AOT_DIR}/moe_tp4_exl3_k3_topk_sum.h"
+    "${GLMRT_B12X_AOT_DIR}/moe_tp4_exl3_k3_topk_sum_bf16.h"
+  )
   add_custom_command(
     OUTPUT
       "${GLMRT_B12X_AOT_DIR}/b12x_spark_aot.stamp"
@@ -282,6 +301,7 @@ if(GLMRT_ENABLE_SPARKINFER_AOT)
       "${GLMRT_B12X_AOT_DIR}/b12x_spark_aot.stamp"
     DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/../python/tools/export_b12x_spark_moe_aot.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../python/tools/_b12x_exl3_k3_profile.py"
       ${GLMRT_SPARKINFER_PROVENANCE_INPUTS}
       ${GLMRT_SPARKINFER_EXPORT_INPUTS}
     COMMENT "Exporting Spark-side SparkInfer AOT kernels"

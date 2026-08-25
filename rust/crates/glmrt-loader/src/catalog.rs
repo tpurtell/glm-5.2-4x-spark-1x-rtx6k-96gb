@@ -1,14 +1,23 @@
+use crate::exl3_format::{
+    exl3_recipe_from_quantization_config, is_glm52_exl3_recipe, validate_glm52_exl3_expert_catalog,
+};
 use crate::snapshot::resolve_snapshot;
 use anyhow::{Context, Result};
-use glmrt_core::{DType, ModelFacts, TensorCatalog, TensorInfo, TensorRole};
+use glmrt_core::{
+    DType, ModelFacts, TensorCatalog, TensorInfo, TensorRole, GLM52_MOE_INTERMEDIATE_SIZE,
+};
 use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+const EXTERNAL_QUANTIZATION_CONFIG_FILES: [&str; 2] =
+    ["quantize_config.json", "quantization_config.json"];
 
 #[derive(Debug, Deserialize)]
 struct SafetensorsIndex {
@@ -38,6 +47,7 @@ struct ConfigFile {
     first_k_dense_replace: Option<usize>,
     n_routed_experts: Option<usize>,
     num_experts_per_tok: Option<usize>,
+    moe_intermediate_size: Option<usize>,
     quantization_config: Option<Value>,
 }
 
@@ -131,12 +141,17 @@ pub fn build_catalog_for_snapshot(model_id: &str, snapshot_path: &Path) -> Resul
     }
     tensors.sort_by(|a, b| a.name.cmp(&b.name));
 
-    Ok(TensorCatalog {
+    let catalog = TensorCatalog {
         model_id: model_id.to_owned(),
         snapshot_path: snapshot_path.display().to_string(),
         facts,
         tensors,
-    })
+    };
+    if is_glm52_exl3_recipe(&catalog.facts.quantization_recipe) {
+        validate_glm52_exl3_expert_catalog(&catalog)
+            .context("validating calibrated GLM-5.2 EXL3 routed experts")?;
+    }
+    Ok(catalog)
 }
 
 type OptionSlot<T> = Mutex<Option<Result<T>>>;
@@ -161,19 +176,33 @@ pub fn read_model_facts(model_id: &str, snapshot_path: &Path) -> Result<ModelFac
         File::open(&config_path).with_context(|| format!("opening {}", config_path.display()))?,
     )
     .with_context(|| format!("parsing {}", config_path.display()))?;
-    let recipe = config
-        .quantization_config
-        .as_ref()
-        .and_then(|value| value.get("quant_algo"))
-        .and_then(Value::as_str)
-        .map(|algo| {
-            if algo.eq_ignore_ascii_case("NVFP4") {
-                "glm52_nvfp4_lukealonso_v1".to_owned()
-            } else {
-                format!("unknown_{algo}")
-            }
-        })
-        .unwrap_or_else(|| "glm52_nvfp4_lukealonso_v1".to_owned());
+    anyhow::ensure!(
+        config
+            .moe_intermediate_size
+            .unwrap_or(GLM52_MOE_INTERMEDIATE_SIZE)
+            == GLM52_MOE_INTERMEDIATE_SIZE,
+        "unsupported GLM-5.2 MoE intermediate size for {model_id}"
+    );
+    let quantization_config =
+        resolve_model_quantization_config(snapshot_path, config.quantization_config.as_ref())?;
+    let recipe = if let Some(recipe) =
+        exl3_recipe_from_quantization_config(quantization_config.as_deref())?
+    {
+        recipe.to_owned()
+    } else {
+        quantization_config
+            .as_deref()
+            .and_then(|value| value.get("quant_algo"))
+            .and_then(Value::as_str)
+            .map(|algo| {
+                if algo.eq_ignore_ascii_case("NVFP4") {
+                    "glm52_nvfp4_lukealonso_v1".to_owned()
+                } else {
+                    format!("unknown_{algo}")
+                }
+            })
+            .unwrap_or_else(|| "glm52_nvfp4_lukealonso_v1".to_owned())
+    };
     Ok(ModelFacts {
         model_id: model_id.to_owned(),
         hidden_size: config.hidden_size.unwrap_or(glmrt_core::GLM52_HIDDEN_SIZE),
@@ -191,6 +220,68 @@ pub fn read_model_facts(model_id: &str, snapshot_path: &Path) -> Result<ModelFac
             .unwrap_or(glmrt_core::GLM52_TOP_K),
         quantization_recipe: recipe,
     })
+}
+
+fn resolve_model_quantization_config<'a>(
+    snapshot_path: &Path,
+    embedded: Option<&'a Value>,
+) -> Result<Option<Cow<'a, Value>>> {
+    let Some(embedded) = embedded else {
+        return Ok(None);
+    };
+    let quant_method = embedded
+        .get("quant_method")
+        .or_else(|| embedded.get("quant_algo"))
+        .and_then(Value::as_str)
+        .unwrap_or("unquantized");
+    let compact_exl3 =
+        quant_method.eq_ignore_ascii_case("exl3") && embedded.get("tensor_storage").is_none();
+    if !compact_exl3 {
+        return Ok(Some(Cow::Borrowed(embedded)));
+    }
+    let embedded_object = embedded
+        .as_object()
+        .context("config.json quantization_config must be a JSON object")?;
+    let mut resolved: Option<(String, Value)> = None;
+    for filename in EXTERNAL_QUANTIZATION_CONFIG_FILES {
+        let path = snapshot_path.join(filename);
+        if !path.is_file() {
+            continue;
+        }
+        let full: Value = serde_json::from_reader(
+            File::open(&path).with_context(|| format!("opening {}", path.display()))?,
+        )
+        .with_context(|| format!("parsing {}", path.display()))?;
+        let full_object = full.as_object().with_context(|| {
+            format!("external EXL3 config {} must be an object", path.display())
+        })?;
+        anyhow::ensure!(
+            full_object.get("tensor_storage").is_some()
+                && full_object.len() == embedded_object.len() + 1
+                && embedded_object
+                    .iter()
+                    .all(|(key, value)| full_object.get(key) == Some(value)),
+            "config.json quantization_config differs from compact {}",
+            path.display()
+        );
+        if let Some((prior_filename, prior)) = resolved.as_ref() {
+            anyhow::ensure!(
+                prior == &full,
+                "external EXL3 configs {prior_filename} and {filename} differ"
+            );
+        } else {
+            resolved = Some((filename.to_owned(), full));
+        }
+    }
+    let (_, full) = resolved.with_context(|| {
+        format!(
+            "compact GLM-5.2 EXL3 config requires {} or {} in {}",
+            EXTERNAL_QUANTIZATION_CONFIG_FILES[0],
+            EXTERNAL_QUANTIZATION_CONFIG_FILES[1],
+            snapshot_path.display()
+        )
+    })?;
+    Ok(Some(Cow::Owned(full)))
 }
 
 fn parse_safetensors_header(path: &Path) -> Result<BTreeMap<String, SafetensorsTensorHeader>> {
@@ -265,6 +356,9 @@ pub(crate) fn is_quantization_tensor(name: &str) -> bool {
         || name.ends_with(".weight_scale_2")
         || name.contains(".input_scale.")
         || name.contains(".weight_scale.")
+        || name.ends_with(".suh")
+        || name.ends_with(".svh")
+        || name.ends_with(".mcg")
 }
 
 pub(crate) fn classify_tensor(
@@ -367,4 +461,54 @@ pub fn classification_summary_markdown(catalog: &TensorCatalog) -> String {
     ));
     out.push_str(&format!("- Shared expert tensors: `{shared}`\n"));
     out
+}
+
+#[cfg(test)]
+mod quantization_config_tests {
+    use super::resolve_model_quantization_config;
+
+    #[test]
+    fn compact_exl3_config_resolves_only_an_exact_external_storage_extension() {
+        let temporary = tempfile::tempdir().unwrap();
+        let embedded = serde_json::json!({
+            "method": "exl3",
+            "quant_method": "exl3",
+            "format": "exl3",
+            "checkpoint_format": "exl3",
+            "bits": 3.0,
+            "codebook": "mcg",
+            "out_scales": "auto",
+            "group_size": -1,
+            "desc_act": false,
+            "module_include": [
+                "^model\\.layers\\.(?:[3-9]|[1-6][0-9]|7[0-7])\\.mlp\\.experts\\.\\d+\\.(?:gate_proj|up_proj|down_proj)$"
+            ],
+            "meta": {"quantizer": "pinned"}
+        });
+        let mut full = embedded.as_object().unwrap().clone();
+        full.insert(
+            "tensor_storage".to_owned(),
+            serde_json::json!({"model.layers.3.mlp.experts.0.gate_proj": {}}),
+        );
+        std::fs::write(
+            temporary.path().join("quantize_config.json"),
+            serde_json::to_vec(&full).unwrap(),
+        )
+        .unwrap();
+
+        let resolved = resolve_model_quantization_config(temporary.path(), Some(&embedded))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.as_ref(), &serde_json::Value::Object(full.clone()));
+
+        full.insert("bits".to_owned(), serde_json::json!(2.0));
+        std::fs::write(
+            temporary.path().join("quantize_config.json"),
+            serde_json::to_vec(&full).unwrap(),
+        )
+        .unwrap();
+        let error =
+            resolve_model_quantization_config(temporary.path(), Some(&embedded)).unwrap_err();
+        assert!(error.to_string().contains("differs from compact"));
+    }
 }

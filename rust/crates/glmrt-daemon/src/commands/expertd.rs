@@ -4,7 +4,7 @@ use glmrt_core::{
     GLM52_MTP_LAYER_ID,
 };
 use serde::Serialize;
-use std::{fs::File, path::Path, sync::Arc, time::Instant};
+use std::{env, fs::File, path::Path, sync::Arc, time::Instant};
 
 use crate::cli::ExpertDaemonArgs;
 use crate::commands::model_artifacts::{
@@ -72,12 +72,15 @@ pub(crate) async fn run_expertd(args: ExpertDaemonArgs) -> Result<()> {
         None => None,
     };
     report_expertd_startup_phase("loadplan", startup_started, &mut phase_started);
+    let runtime_identity =
+        env::var("GLMRT_RELEASE_CONFIG_SHA256").unwrap_or_else(|_| "unset".to_owned());
     println!(
-        "starting expertd synthetic_weights={} transport={} listen={} model_id={} loadplan={:?} catalog_source={:?} real_layer={:?} role={:?}",
+        "starting expertd synthetic_weights={} transport={} listen={} model_id={} runtime_identity={} loadplan={:?} catalog_source={:?} real_layer={:?} role={:?}",
         args.synthetic_weights,
         args.transport,
         args.listen,
         args.model_id,
+        runtime_identity,
         args.loadplan,
         catalog_source,
         args.real_layer,

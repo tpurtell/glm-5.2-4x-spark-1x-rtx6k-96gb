@@ -76,6 +76,7 @@ use super::scheduler::{
     RealFullSchedulerSparseDispatchTransport, RealFullSchedulerSparseTcpDispatchProbe,
     RealFullSchedulerSparseTcpDispatchWorker,
 };
+use super::sparse_mlp::route::B12X_EXL3_K3_TOPK8_CAPACITY_ROWS;
 use super::types::{
     RealFullCoordinatorResidentPreloadPlan, RealFullSchedulerExecutionDryRun,
     RealFullSchedulerTerminalLmHeadSample, RealGlmFullPreflightReport,
@@ -2344,6 +2345,8 @@ impl RealFullSchedulerRequestExecutor {
             .map(|plan| plan.proposal_token_ids.clone())
             .unwrap_or_default();
         let mtp_rows = pending_dspark_draft_token_ids.len();
+        real_full_validate_sparse_wave_capacity(prefill_chunk_tokens, decode_rows, mtp_rows)
+            .map_err(format_error_chain)?;
         let dspark_target_hidden_tap_rows =
             if request.decode_budget.saturating_sub(generated_tokens) > 1 {
                 decode_rows + mtp_rows
@@ -3196,6 +3199,8 @@ impl RealFullSchedulerRequestExecutor {
         } else {
             synthetic_mtp_rows
         };
+        real_full_validate_sparse_wave_capacity(prefill_chunk_tokens, decode_rows, mtp_rows)
+            .map_err(format_error_chain)?;
         let run_mtp_probe = !mtp_enabled
             && ((real_full_mtp_probe_enabled()
                 && !sequence_id.starts_with("real-full-startup-prewarm-"))
@@ -5973,6 +5978,22 @@ fn real_full_request_prefill_chunk_tokens_for_sequence(
 
 fn real_full_prefill_chunk_tokens_for_direct_dsa(planned_chunk_tokens: usize) -> usize {
     planned_chunk_tokens.min(GLM_DSA_PREFILL_MAX_QUERY_ROWS)
+}
+
+fn real_full_validate_sparse_wave_capacity(
+    prefill_rows: usize,
+    decode_rows: usize,
+    mtp_rows: usize,
+) -> Result<()> {
+    let physical_rows = prefill_rows
+        .checked_add(decode_rows)
+        .and_then(|rows| rows.checked_add(mtp_rows))
+        .context("real-full sparse wave row count overflow")?;
+    anyhow::ensure!(
+        physical_rows <= B12X_EXL3_K3_TOPK8_CAPACITY_ROWS,
+        "real-full sparse wave rows prefill={prefill_rows} decode={decode_rows} mtp={mtp_rows} total={physical_rows} exceed the EXL3 AOT capacity {B12X_EXL3_K3_TOPK8_CAPACITY_ROWS}"
+    );
+    Ok(())
 }
 
 fn real_full_mtp_prefill_chunk_tokens() -> usize {
@@ -9668,12 +9689,13 @@ mod tests {
         real_full_sparse_tcp_targets_from_args, real_full_startup_target_radix_evict_tokens,
         real_full_startup_target_radix_publish_tokens,
         real_full_startup_workspace_is_final_capture_set,
-        real_full_startup_workspace_sizing_sequence, request_prompt_token_ids,
-        retain_graph_bound_scheduler_arena, DsparkConfidenceCalibrator, DsparkConfidenceResidual,
-        DsparkRequestCacheSnapshot, RealFullContextTokenBudget, RealFullContextTokenExtent,
-        RealFullDsparkConfidencePolicy, RealFullDsparkTailCache, RealFullDsparkTailEntry,
-        RealFullDsparkTailKey, TargetKvRadixManager, REAL_FULL_MAX_ACTIVE_REQUESTS,
-        REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS, REAL_FULL_SHARED_KV_PAGE_TOKENS,
+        real_full_startup_workspace_sizing_sequence, real_full_validate_sparse_wave_capacity,
+        request_prompt_token_ids, retain_graph_bound_scheduler_arena, DsparkConfidenceCalibrator,
+        DsparkConfidenceResidual, DsparkRequestCacheSnapshot, RealFullContextTokenBudget,
+        RealFullContextTokenExtent, RealFullDsparkConfidencePolicy, RealFullDsparkTailCache,
+        RealFullDsparkTailEntry, RealFullDsparkTailKey, TargetKvRadixManager,
+        REAL_FULL_MAX_ACTIVE_REQUESTS, REAL_FULL_SERVE_NVFP4_SHORT_K_PREFILL_QUERY_ROWS,
+        REAL_FULL_SHARED_KV_PAGE_TOKENS,
     };
     use crate::cli::CoordinatorArgs;
     use crate::commands::real_full::coordinator_kernels::{
@@ -10212,6 +10234,13 @@ mod tests {
         assert_eq!(real_full_prefill_chunk_tokens_for_direct_dsa(2_048), 2_048);
         assert_eq!(real_full_prefill_chunk_tokens_for_direct_dsa(1_024), 1_024);
         assert_eq!(real_full_prefill_chunk_tokens_for_direct_dsa(512), 512);
+    }
+
+    #[test]
+    fn combined_prefill_and_maximum_dspark_suffix_fit_the_exl3_tail_bucket() {
+        assert!(real_full_validate_sparse_wave_capacity(2_048, 1, 15).is_ok());
+        assert!(real_full_validate_sparse_wave_capacity(2_048, 1, 16).is_err());
+        assert!(real_full_validate_sparse_wave_capacity(0, 1, 15).is_ok());
     }
 
     #[test]

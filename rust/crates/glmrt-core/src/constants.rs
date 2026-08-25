@@ -1,6 +1,7 @@
 pub const DEFAULT_MODEL_ID: &str = "lukealonso/GLM-5.2-NVFP4";
 pub const NVIDIA_MODEL_ID: &str = "nvidia/GLM-5.2-NVFP4";
-pub const SUPPORTED_MODEL_IDS: [&str; 2] = [DEFAULT_MODEL_ID, NVIDIA_MODEL_ID];
+pub const EXL3_MODEL_ID: &str = "wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1";
+pub const SUPPORTED_MODEL_IDS: [&str; 3] = [DEFAULT_MODEL_ID, NVIDIA_MODEL_ID, EXL3_MODEL_ID];
 pub const COORDINATOR_HOST: &str = "coordinator";
 pub const EXPERT_HOSTS: [&str; 4] = ["spark-0", "spark-1", "spark-2", "spark-3"];
 pub const GLM52_HIDDEN_SIZE: usize = 6144;
@@ -11,6 +12,7 @@ pub const GLM52_TOTAL_LAYERS_WITH_MTP: usize = GLM52_NUM_HIDDEN_LAYERS + GLM52_N
 pub const GLM52_FIRST_K_DENSE_REPLACE: usize = 3;
 pub const GLM52_ROUTED_EXPERTS: usize = 256;
 pub const GLM52_TOP_K: usize = 8;
+pub const GLM52_MOE_INTERMEDIATE_SIZE: usize = 2048;
 pub const GLM52_ROUTED_SCALING_FACTOR: f32 = 2.5;
 pub const GLM52_HIDDEN_BF16_BYTES: usize = GLM52_HIDDEN_SIZE * 2;
 pub const GLM52_MLA_KV_LORA_RANK: usize = 512;

@@ -33,6 +33,7 @@
 #include "moe_tp4_w4a16_prefill_m256_topk8.h"
 #include "moe_tp4_w4a16_prefill_m1024_topk8.h"
 #include "moe_tp4_w4a16_prefill_m2048_topk8.h"
+#include "moe_tp4_w4a16_prefill_m2064_topk8.h"
 #include "moe_tp4_w4a16_prefill_m512_topk8.h"
 #include "moe_tp4_w4a16_top1_m1.h"
 #include "moe_tp4_w4a16_top1_m128.h"
@@ -43,6 +44,23 @@
 #include "moe_tp4_w4a16_top1_m4.h"
 #include "moe_tp4_w4a16_top1_m64.h"
 #include "moe_tp4_w4a16_top1_m8.h"
+#include "moe_tp4_exl3_k3_m1_topk8.h"
+#include "moe_tp4_exl3_k3_m2_topk8.h"
+#include "moe_tp4_exl3_k3_m4_topk8.h"
+#include "moe_tp4_exl3_k3_m8_topk8.h"
+#include "moe_tp4_exl3_k3_m9_topk8.h"
+#include "moe_tp4_exl3_k3_m16_topk8.h"
+#include "moe_tp4_exl3_k3_m32_topk8.h"
+#include "moe_tp4_exl3_k3_m64_topk8.h"
+#include "moe_tp4_exl3_k3_m128_topk8.h"
+#include "moe_tp4_exl3_k3_m256_topk8.h"
+#include "moe_tp4_exl3_k3_m257_topk8.h"
+#include "moe_tp4_exl3_k3_m512_topk8.h"
+#include "moe_tp4_exl3_k3_m1024_topk8.h"
+#include "moe_tp4_exl3_k3_m2048_topk8.h"
+#include "moe_tp4_exl3_k3_m2064_topk8.h"
+#include "moe_tp4_exl3_k3_topk_sum.h"
+#include "moe_tp4_exl3_k3_topk_sum_bf16.h"
 #include "b12x_spark_moe_aot_config.h"
 #include "b12x_spark_w4a16_m1_parity_aot_config.h"
 
@@ -55,7 +73,9 @@
 
 namespace {
 
-constexpr size_t kB12xW4a16MaxRows = 2048;
+constexpr size_t kB12xPowerOfTwoMaxRows = 2048;
+constexpr size_t kB12xW4a16MaxRows = 2064;
+constexpr size_t kB12xExl3K3MaxRows = 2064;
 constexpr size_t kB12xHidden = 6144;
 constexpr size_t kB12xTp4Intermediate = 512;
 constexpr size_t kB12xOutput = 6144;
@@ -117,6 +137,8 @@ glmrt_b12x_moe_tp4_w4a16_prefill_m1024_topk8_Kernel_Module_t
     moe_tp4_w4a16_prefill_m1024_topk8_module;
 glmrt_b12x_moe_tp4_w4a16_prefill_m2048_topk8_Kernel_Module_t
     moe_tp4_w4a16_prefill_m2048_topk8_module;
+glmrt_b12x_moe_tp4_w4a16_prefill_m2064_topk8_Kernel_Module_t
+    moe_tp4_w4a16_prefill_m2064_topk8_module;
 glmrt_b12x_moe_tp4_w4a16_prefill_m512_topk8_Kernel_Module_t
     moe_tp4_w4a16_prefill_m512_topk8_module;
 glmrt_b12x_moe_tp4_w4a16_top1_m1_Kernel_Module_t moe_tp4_w4a16_top1_m1_module;
@@ -128,8 +150,33 @@ glmrt_b12x_moe_tp4_w4a16_top1_m32_Kernel_Module_t moe_tp4_w4a16_top1_m32_module;
 glmrt_b12x_moe_tp4_w4a16_top1_m64_Kernel_Module_t moe_tp4_w4a16_top1_m64_module;
 glmrt_b12x_moe_tp4_w4a16_top1_m128_Kernel_Module_t moe_tp4_w4a16_top1_m128_module;
 glmrt_b12x_moe_tp4_w4a16_top1_m256_Kernel_Module_t moe_tp4_w4a16_top1_m256_module;
+#define GLMRT_DEFINE_EXL3_K3_MODULE(M)                                         \
+  glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Kernel_Module_t                    \
+      moe_tp4_exl3_k3_m##M##_topk8_module;
+GLMRT_DEFINE_EXL3_K3_MODULE(1)
+GLMRT_DEFINE_EXL3_K3_MODULE(2)
+GLMRT_DEFINE_EXL3_K3_MODULE(4)
+GLMRT_DEFINE_EXL3_K3_MODULE(8)
+GLMRT_DEFINE_EXL3_K3_MODULE(9)
+GLMRT_DEFINE_EXL3_K3_MODULE(16)
+GLMRT_DEFINE_EXL3_K3_MODULE(32)
+GLMRT_DEFINE_EXL3_K3_MODULE(64)
+GLMRT_DEFINE_EXL3_K3_MODULE(128)
+GLMRT_DEFINE_EXL3_K3_MODULE(256)
+GLMRT_DEFINE_EXL3_K3_MODULE(257)
+GLMRT_DEFINE_EXL3_K3_MODULE(512)
+GLMRT_DEFINE_EXL3_K3_MODULE(1024)
+GLMRT_DEFINE_EXL3_K3_MODULE(2048)
+GLMRT_DEFINE_EXL3_K3_MODULE(2064)
+#undef GLMRT_DEFINE_EXL3_K3_MODULE
+glmrt_b12x_moe_tp4_exl3_k3_topk_sum_Kernel_Module_t
+    moe_tp4_exl3_k3_topk_sum_module;
+glmrt_b12x_moe_tp4_exl3_k3_topk_sum_bf16_Kernel_Module_t
+    moe_tp4_exl3_k3_topk_sum_bf16_module;
 std::once_flag b12x_module_init_once;
 glmrt_status_t b12x_module_init_status = GLMRT_STATUS_OK;
+std::once_flag b12x_exl3_module_init_once;
+glmrt_status_t b12x_exl3_module_init_status = GLMRT_STATUS_OK;
 constexpr size_t kB12xW4a16LockElements = 48 * 4 + 2;
 constexpr int kB12xW4a16DecodeMaxGridX =
     static_cast<int>((kB12xW4a16LockElements - 2) / 2);
@@ -441,6 +488,8 @@ void initialize_b12x_modules() {
       &moe_tp4_w4a16_prefill_m1024_topk8_module);
   glmrt_b12x_moe_tp4_w4a16_prefill_m2048_topk8_Kernel_Module_Load(
       &moe_tp4_w4a16_prefill_m2048_topk8_module);
+  glmrt_b12x_moe_tp4_w4a16_prefill_m2064_topk8_Kernel_Module_Load(
+      &moe_tp4_w4a16_prefill_m2064_topk8_module);
   glmrt_b12x_moe_tp4_w4a16_prefill_m512_topk8_Kernel_Module_Load(
       &moe_tp4_w4a16_prefill_m512_topk8_module);
   glmrt_b12x_moe_tp4_w4a16_top1_m1_Kernel_Module_Load(
@@ -466,6 +515,42 @@ void initialize_b12x_modules() {
     glmrt_set_last_error_message(cudaGetErrorString(error));
     b12x_module_init_status = GLMRT_STATUS_INTERNAL_ERROR;
   }
+}
+
+void initialize_b12x_exl3_modules() {
+#define GLMRT_LOAD_EXL3_K3_MODULE(M)                                           \
+  glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Kernel_Module_Load(                 \
+      &moe_tp4_exl3_k3_m##M##_topk8_module);
+  GLMRT_LOAD_EXL3_K3_MODULE(1)
+  GLMRT_LOAD_EXL3_K3_MODULE(2)
+  GLMRT_LOAD_EXL3_K3_MODULE(4)
+  GLMRT_LOAD_EXL3_K3_MODULE(8)
+  GLMRT_LOAD_EXL3_K3_MODULE(9)
+  GLMRT_LOAD_EXL3_K3_MODULE(16)
+  GLMRT_LOAD_EXL3_K3_MODULE(32)
+  GLMRT_LOAD_EXL3_K3_MODULE(64)
+  GLMRT_LOAD_EXL3_K3_MODULE(128)
+  GLMRT_LOAD_EXL3_K3_MODULE(256)
+  GLMRT_LOAD_EXL3_K3_MODULE(257)
+  GLMRT_LOAD_EXL3_K3_MODULE(512)
+  GLMRT_LOAD_EXL3_K3_MODULE(1024)
+  GLMRT_LOAD_EXL3_K3_MODULE(2048)
+  GLMRT_LOAD_EXL3_K3_MODULE(2064)
+#undef GLMRT_LOAD_EXL3_K3_MODULE
+  glmrt_b12x_moe_tp4_exl3_k3_topk_sum_Kernel_Module_Load(
+      &moe_tp4_exl3_k3_topk_sum_module);
+  glmrt_b12x_moe_tp4_exl3_k3_topk_sum_bf16_Kernel_Module_Load(
+      &moe_tp4_exl3_k3_topk_sum_bf16_module);
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    glmrt_set_last_error_message(cudaGetErrorString(error));
+    b12x_exl3_module_init_status = GLMRT_STATUS_INTERNAL_ERROR;
+  }
+}
+
+glmrt_status_t initialize_b12x_exl3_aot() {
+  std::call_once(b12x_exl3_module_init_once, initialize_b12x_exl3_modules);
+  return b12x_exl3_module_init_status;
 }
 
 glmrt_status_t check_aot_launch(int result, const char* label) {
@@ -613,6 +698,11 @@ GLMRT_DEFINE_W4A16_LAUNCH(
     moe_tp4_w4a16_prefill_m2048_topk8_module,
     GLMRT_B12X_W4A16_PREFILL_M2048_TOPK8_GRID_X)
 GLMRT_DEFINE_W4A16_LAUNCH(
+    launch_w4a16_prefill_m2064_topk8,
+    glmrt_b12x_moe_tp4_w4a16_prefill_m2064_topk8,
+    moe_tp4_w4a16_prefill_m2064_topk8_module,
+    GLMRT_B12X_W4A16_PREFILL_M2064_TOPK8_GRID_X)
+GLMRT_DEFINE_W4A16_LAUNCH(
     launch_w4a16_top1_m1, glmrt_b12x_moe_tp4_w4a16_top1_m1,
     moe_tp4_w4a16_top1_m1_module, kB12xW4a16Top1M1GridX)
 GLMRT_DEFINE_W4A16_LAUNCH(
@@ -642,6 +732,67 @@ GLMRT_DEFINE_W4A16_LAUNCH(
 
 #undef GLMRT_DEFINE_W4A16_LAUNCH
 
+#define GLMRT_DEFINE_EXL3_K3_LAUNCH(M)                                         \
+  int launch_exl3_k3_m##M##_topk8(                                             \
+      const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,                  \
+      size_t active_m, int grid_x, cudaStream_t stream) {                      \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_fc1_bf16_flat_t fc1{       \
+        buffers->fc1_output.ptr};                                              \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_activated_bf16_flat_t      \
+        activated{buffers->activated.ptr};                                     \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_fc2_bf16_flat_t fc2{       \
+        buffers->fc2_output.ptr};                                              \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_packed_route_indices_t     \
+        packed_routes{buffers->packed_route_indices.ptr};                     \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_block_expert_ids_t         \
+        block_experts{buffers->block_expert_ids.ptr};                         \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_packed_route_count_t       \
+        route_count{buffers->packed_route_count.ptr};                          \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_activation_amax_flat_t     \
+        activation_amax{buffers->w13_trellis.ptr};                            \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_fc1_c_tmp_f32_flat_t       \
+        fc1_scratch{buffers->fc1_scratch.ptr};                                \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_fc2_c_tmp_f32_flat_t       \
+        fc2_scratch{buffers->fc2_scratch.ptr};                                \
+    glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_Tensor_locks_i32_flat_t locks{    \
+        buffers->locks.ptr};                                                   \
+    return cute_dsl_glmrt_b12x_moe_tp4_exl3_k3_m##M##_topk8_wrapper(          \
+        &moe_tp4_exl3_k3_m##M##_topk8_module, buffers->rotation_a_gate.ptr,    \
+        buffers->rotation_a_up.ptr, buffers->input_bf16.ptr,                  \
+        buffers->w13_trellis.ptr, buffers->w2_trellis.ptr, &fc1, &activated,  \
+        &fc2, buffers->w13_trellis.ptr, buffers->w2_trellis.ptr,              \
+        buffers->unit_global_scale.ptr, buffers->unit_global_scale.ptr,       \
+        &packed_routes,                                                       \
+        &block_experts, &route_count, &activation_amax, 0,                    \
+        buffers->topk_weights.ptr, &fc1_scratch, &fc2_scratch, &locks,        \
+        buffers->intermediate_rotations.ptr, buffers->gate_suh.ptr,           \
+        buffers->up_suh.ptr, buffers->w13_trellis.ptr,                        \
+        buffers->w13_trellis.ptr, buffers->w2_trellis.ptr,                    \
+        static_cast<int32_t>(kB12xExperts), 0,                                \
+        static_cast<int32_t>(active_m),                                       \
+        static_cast<int32_t>(grid_x == 0                                      \
+                                 ? GLMRT_B12X_EXL3_K3_M##M##_TOPK8_GRID_X     \
+                                 : grid_x),                                   \
+        stream);                                                               \
+  }
+
+GLMRT_DEFINE_EXL3_K3_LAUNCH(1)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(2)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(4)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(8)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(9)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(16)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(32)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(64)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(128)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(256)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(257)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(512)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(1024)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(2048)
+GLMRT_DEFINE_EXL3_K3_LAUNCH(2064)
+#undef GLMRT_DEFINE_EXL3_K3_LAUNCH
+
 glmrt_status_t validate_w4a16_moe_buffers(
     const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers, size_t capacity_rows,
     size_t top_k) {
@@ -655,9 +806,9 @@ glmrt_status_t validate_w4a16_moe_buffers(
       kB12xExperts * kB12xOutput * kB12xTp4Intermediate / 16;
   constexpr size_t expert_scalars_bytes = kB12xExperts * sizeof(float);
   constexpr size_t max_packed_route_slots =
-      GLMRT_B12X_W4A16_PREFILL_M2048_TOPK8_PACKED_ROUTE_SLOTS;
+      GLMRT_B12X_W4A16_PREFILL_M2064_TOPK8_PACKED_ROUTE_SLOTS;
   constexpr size_t max_route_blocks =
-      GLMRT_B12X_W4A16_PREFILL_M2048_TOPK8_MAX_M_BLOCKS;
+      GLMRT_B12X_W4A16_PREFILL_M2064_TOPK8_MAX_M_BLOCKS;
   constexpr size_t max_scratch_elements = 1572864;
   if (buffers == nullptr || capacity_rows == 0 || capacity_rows > kB12xW4a16MaxRows ||
       (top_k != 1 && top_k != kB12xTopK)) {
@@ -695,6 +846,155 @@ glmrt_status_t reset_w4a16_locks_async(
     const glmrt_b12x_spark_w4a16_moe_buffers_t* buffers, cudaStream_t stream) {
   return status_from_cuda(
       cudaMemsetAsync(buffers->locks.ptr, 0, kB12xW4a16LockElements * sizeof(int32_t), stream));
+}
+
+glmrt_status_t validate_exl3_k3_moe_buffers(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    size_t capacity_rows) {
+  constexpr size_t trellis_tile = 16;
+  constexpr size_t trellis_words_per_tile = 48;
+  constexpr size_t trellis_expert_bytes =
+      (kB12xHidden / trellis_tile) *
+      (kB12xTp4Intermediate / trellis_tile) * trellis_words_per_tile *
+      sizeof(int16_t);
+  constexpr size_t w13_bytes =
+      kB12xExperts * 2 * trellis_expert_bytes;
+  constexpr size_t w2_bytes = kB12xExperts * trellis_expert_bytes;
+  constexpr size_t hidden_rotation_bytes =
+      kB12xExperts * kB12xHidden * sizeof(uint16_t);
+  constexpr size_t intermediate_rotation_bytes =
+      kB12xExperts * 3 * kB12xTp4Intermediate * sizeof(uint16_t);
+  constexpr size_t max_packed_route_slots =
+      GLMRT_B12X_EXL3_K3_M2064_TOPK8_PACKED_ROUTE_SLOTS;
+  constexpr size_t max_route_blocks =
+      GLMRT_B12X_EXL3_K3_M2064_TOPK8_MAX_M_BLOCKS;
+  constexpr size_t max_scratch_elements = 3145728;
+  if (buffers == nullptr || capacity_rows == 0 ||
+      capacity_rows > kB12xExl3K3MaxRows) {
+    return GLMRT_STATUS_INVALID_ARGUMENT;
+  }
+  const size_t routed_rows = capacity_rows * kB12xTopK;
+  const auto require = [](glmrt_device_buffer_t buffer, size_t bytes,
+                          const char* label) {
+    if (buffer_has_bytes(buffer, bytes)) {
+      return true;
+    }
+    char message[192];
+    snprintf(message, sizeof(message),
+             "EXL3 buffer too small: %s has %zu bytes, needs %zu", label,
+             buffer.bytes, bytes);
+    glmrt_set_last_error_message(message);
+    return false;
+  };
+#define GLMRT_REQUIRE_EXL3_BUFFER(field, bytes)                                \
+  if (!require(buffers->field, bytes, #field)) {                              \
+    return GLMRT_STATUS_BUFFER_TOO_SMALL;                                     \
+  }
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      input_bf16, capacity_rows * kB12xHidden * sizeof(uint16_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      rotation_a_gate, routed_rows * kB12xHidden * sizeof(uint16_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      rotation_a_up, routed_rows * kB12xHidden * sizeof(uint16_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(w13_trellis, w13_bytes);
+  GLMRT_REQUIRE_EXL3_BUFFER(w2_trellis, w2_bytes);
+  GLMRT_REQUIRE_EXL3_BUFFER(unit_global_scale,
+                            kB12xExperts * sizeof(float));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      fc1_output,
+      routed_rows * 2 * kB12xTp4Intermediate * sizeof(uint16_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      activated, routed_rows * kB12xTp4Intermediate * sizeof(uint16_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      fc2_output, routed_rows * kB12xHidden * sizeof(uint16_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      output_f32, capacity_rows * kB12xHidden * sizeof(float));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      packed_route_indices, max_packed_route_slots * sizeof(int32_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(block_expert_ids,
+                            max_route_blocks * sizeof(int32_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(packed_route_count, sizeof(int32_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(topk_ids, routed_rows * sizeof(int32_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(topk_weights, routed_rows * sizeof(float));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      fc1_scratch, max_scratch_elements * sizeof(float));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      fc2_scratch, max_scratch_elements * sizeof(float));
+  GLMRT_REQUIRE_EXL3_BUFFER(
+      locks, kB12xW4a16LockElements * sizeof(int32_t));
+  GLMRT_REQUIRE_EXL3_BUFFER(intermediate_rotations,
+                            intermediate_rotation_bytes);
+  GLMRT_REQUIRE_EXL3_BUFFER(gate_suh, hidden_rotation_bytes);
+  GLMRT_REQUIRE_EXL3_BUFFER(up_suh, hidden_rotation_bytes);
+  GLMRT_REQUIRE_EXL3_BUFFER(down_svh, hidden_rotation_bytes);
+#undef GLMRT_REQUIRE_EXL3_BUFFER
+  return GLMRT_STATUS_OK;
+}
+
+using Exl3K3LaunchFn = int (*)(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t*, size_t, int, cudaStream_t);
+
+Exl3K3LaunchFn exl3_k3_launcher(size_t capacity_rows) {
+  switch (capacity_rows) {
+    case 1:
+      return &launch_exl3_k3_m1_topk8;
+    case 2:
+      return &launch_exl3_k3_m2_topk8;
+    case 4:
+      return &launch_exl3_k3_m4_topk8;
+    case 8:
+      return &launch_exl3_k3_m8_topk8;
+    case 9:
+      return &launch_exl3_k3_m9_topk8;
+    case 16:
+      return &launch_exl3_k3_m16_topk8;
+    case 32:
+      return &launch_exl3_k3_m32_topk8;
+    case 64:
+      return &launch_exl3_k3_m64_topk8;
+    case 128:
+      return &launch_exl3_k3_m128_topk8;
+    case 256:
+      return &launch_exl3_k3_m256_topk8;
+    case 257:
+      return &launch_exl3_k3_m257_topk8;
+    case 512:
+      return &launch_exl3_k3_m512_topk8;
+    case 1024:
+      return &launch_exl3_k3_m1024_topk8;
+    case 2048:
+      return &launch_exl3_k3_m2048_topk8;
+    case 2064:
+      return &launch_exl3_k3_m2064_topk8;
+    default:
+      return nullptr;
+  }
+}
+
+int exl3_k3_max_grid_x(size_t capacity_rows) {
+  switch (capacity_rows) {
+#define GLMRT_EXL3_K3_GRID_CASE(M)                                             \
+  case M:                                                                     \
+    return GLMRT_B12X_EXL3_K3_M##M##_TOPK8_MAX_GRID_X;
+    GLMRT_EXL3_K3_GRID_CASE(1)
+    GLMRT_EXL3_K3_GRID_CASE(2)
+    GLMRT_EXL3_K3_GRID_CASE(4)
+    GLMRT_EXL3_K3_GRID_CASE(8)
+    GLMRT_EXL3_K3_GRID_CASE(9)
+    GLMRT_EXL3_K3_GRID_CASE(16)
+    GLMRT_EXL3_K3_GRID_CASE(32)
+    GLMRT_EXL3_K3_GRID_CASE(64)
+    GLMRT_EXL3_K3_GRID_CASE(128)
+    GLMRT_EXL3_K3_GRID_CASE(256)
+    GLMRT_EXL3_K3_GRID_CASE(257)
+    GLMRT_EXL3_K3_GRID_CASE(512)
+    GLMRT_EXL3_K3_GRID_CASE(1024)
+    GLMRT_EXL3_K3_GRID_CASE(2048)
+    GLMRT_EXL3_K3_GRID_CASE(2064)
+#undef GLMRT_EXL3_K3_GRID_CASE
+    default:
+      return 0;
+  }
 }
 
 using W4A16LaunchFn = int (*)(const glmrt_b12x_spark_w4a16_moe_buffers_t*, size_t,
@@ -839,6 +1139,8 @@ W4A16GridLaunchFn w4a16_prefill_grid_launcher(size_t capacity_rows) {
       return &launch_w4a16_prefill_m1024_topk8_grid;
     case 2048:
       return &launch_w4a16_prefill_m2048_topk8_grid;
+    case 2064:
+      return &launch_w4a16_prefill_m2064_topk8_grid;
     default:
       return nullptr;
   }
@@ -1270,8 +1572,9 @@ static glmrt_status_t launch_w4a16_prefill_topk8_nvfp4(
     size_t rows, glmrt_device_buffer_t output_fp8,
     size_t output_fp8_row_stride_bytes, bool fuse_fp8_response,
     int grid_x, void* cuda_stream) {
-  size_t capacity_rows = 2;
-  while (capacity_rows < rows && capacity_rows < kB12xW4a16MaxRows) {
+  size_t capacity_rows =
+      rows > kB12xPowerOfTwoMaxRows ? kB12xW4a16MaxRows : 2;
+  while (capacity_rows < rows && capacity_rows < kB12xPowerOfTwoMaxRows) {
     capacity_rows *= 2;
   }
   constexpr size_t input_payload_bytes = kB12xHidden / 2 + kB12xHidden / 16;
@@ -1329,7 +1632,9 @@ static glmrt_status_t launch_w4a16_prefill_topk8_nvfp4(
   if (status != GLMRT_STATUS_OK) {
     return status;
   }
-  W4A16LaunchFn launcher = &launch_w4a16_prefill_m2048_topk8;
+  W4A16LaunchFn launcher = rows > kB12xPowerOfTwoMaxRows
+                               ? &launch_w4a16_prefill_m2064_topk8
+                               : &launch_w4a16_prefill_m2048_topk8;
   if (capacity_rows == 2) {
     launcher = &launch_w4a16_prefill_m2_topk8;
   } else if (capacity_rows == 4) {
@@ -1350,6 +1655,8 @@ static glmrt_status_t launch_w4a16_prefill_topk8_nvfp4(
     launcher = &launch_w4a16_prefill_m512_topk8;
   } else if (capacity_rows == 1024) {
     launcher = &launch_w4a16_prefill_m1024_topk8;
+  } else if (capacity_rows == 2064) {
+    launcher = &launch_w4a16_prefill_m2064_topk8;
   }
   const W4A16GridLaunchFn grid_launcher =
       grid_x > 0 ? w4a16_prefill_grid_launcher(capacity_rows) : nullptr;
@@ -1377,6 +1684,133 @@ static glmrt_status_t launch_w4a16_prefill_topk8_nvfp4(
         static_cast<uint16_t*>(buffers->input.ptr), rows, kB12xHidden);
   }
   return status_from_cuda(cudaGetLastError());
+}
+
+static glmrt_status_t launch_exl3_k3_topk8_nvfp4(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, size_t capacity_rows, int grid_x, bool output_bf16,
+    void* cuda_stream) {
+  constexpr size_t input_payload_bytes =
+      kB12xHidden / 2 + kB12xHidden / 16;
+  if (rows == 0 || rows > capacity_rows ||
+      input_payload_stride_bytes < input_payload_bytes ||
+      !buffer_has_bytes(input_payload, rows * input_payload_stride_bytes)) {
+    return GLMRT_STATUS_INVALID_ARGUMENT;
+  }
+  glmrt_status_t status =
+      validate_exl3_k3_moe_buffers(buffers, capacity_rows);
+  if (status != GLMRT_STATUS_OK) {
+    return status;
+  }
+  status = initialize_b12x_exl3_aot();
+  if (status != GLMRT_STATUS_OK) {
+    return status;
+  }
+  Exl3K3LaunchFn launcher = exl3_k3_launcher(capacity_rows);
+  const int max_grid_x = exl3_k3_max_grid_x(capacity_rows);
+  if (launcher == nullptr || max_grid_x <= 0 || grid_x < 0 ||
+      grid_x > max_grid_x) {
+    return GLMRT_STATUS_INVALID_ARGUMENT;
+  }
+
+  cudaStream_t stream = reinterpret_cast<cudaStream_t>(cuda_stream);
+  status = status_from_cuda(cudaMemsetAsync(
+      buffers->locks.ptr, 0,
+      kB12xW4a16LockElements * sizeof(int32_t), stream));
+  if (status != GLMRT_STATUS_OK) {
+    return status;
+  }
+  constexpr size_t threads = 256;
+  const size_t values = rows * kB12xHidden;
+  const size_t blocks = (values + threads - 1) / threads;
+  dequantize_nvfp4_row_payloads_bf16_kernel<<<
+      static_cast<unsigned int>(blocks), threads, 0, stream>>>(
+      static_cast<const uint8_t*>(input_payload.ptr), input_payload_stride_bytes,
+      static_cast<uint16_t*>(buffers->input_bf16.ptr), rows, kB12xHidden);
+  status = status_from_cuda(cudaGetLastError());
+  if (status != GLMRT_STATUS_OK) {
+    return status;
+  }
+  status = check_aot_launch(
+      launcher(buffers, rows, grid_x, stream),
+      "B12X Spark EXL3 K3 full-rotation MoE launch failed");
+  if (status != GLMRT_STATUS_OK) {
+    return status;
+  }
+  const int sum_status = output_bf16
+      ? cute_dsl_glmrt_b12x_moe_tp4_exl3_k3_topk_sum_bf16_wrapper(
+            &moe_tp4_exl3_k3_topk_sum_bf16_module, buffers->fc2_output.ptr,
+            buffers->input_bf16.ptr, buffers->topk_weights.ptr,
+            buffers->topk_ids.ptr, buffers->w13_trellis.ptr,
+            buffers->down_svh.ptr, static_cast<int32_t>(kB12xExperts), 0,
+            static_cast<int32_t>(rows), stream)
+      : cute_dsl_glmrt_b12x_moe_tp4_exl3_k3_topk_sum_wrapper(
+            &moe_tp4_exl3_k3_topk_sum_module, buffers->fc2_output.ptr,
+            buffers->output_f32.ptr, buffers->topk_weights.ptr,
+            buffers->topk_ids.ptr, buffers->w13_trellis.ptr,
+            buffers->down_svh.ptr, static_cast<int32_t>(kB12xExperts), 0,
+            static_cast<int32_t>(rows), stream);
+  return check_aot_launch(
+      sum_status, "B12X Spark EXL3 K3 full-rotation top-k sum launch failed");
+}
+
+extern "C" glmrt_status_t glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, void* cuda_stream) {
+  size_t capacity_rows = (rows == 9 || rows == 257)
+                             ? rows
+                             : rows > kB12xPowerOfTwoMaxRows
+                                   ? kB12xExl3K3MaxRows
+                                   : 1;
+  while (capacity_rows < rows && capacity_rows < kB12xPowerOfTwoMaxRows) {
+    capacity_rows *= 2;
+  }
+  return launch_exl3_k3_topk8_nvfp4(
+      buffers, input_payload, input_payload_stride_bytes, rows, capacity_rows, 0,
+      false, cuda_stream);
+}
+
+extern "C" glmrt_status_t
+glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_bf16_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, void* cuda_stream) {
+  size_t capacity_rows = (rows == 9 || rows == 257)
+                             ? rows
+                             : rows > kB12xPowerOfTwoMaxRows
+                                   ? kB12xExl3K3MaxRows
+                                   : 1;
+  while (capacity_rows < rows && capacity_rows < kB12xPowerOfTwoMaxRows) {
+    capacity_rows *= 2;
+  }
+  return launch_exl3_k3_topk8_nvfp4(
+      buffers, input_payload, input_payload_stride_bytes, rows, capacity_rows, 0,
+      true, cuda_stream);
+}
+
+extern "C" glmrt_status_t
+glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_capacity_candidate_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, size_t capacity_rows, void* cuda_stream) {
+  return launch_exl3_k3_topk8_nvfp4(
+      buffers, input_payload, input_payload_stride_bytes, rows, capacity_rows, 0,
+      false, cuda_stream);
+}
+
+extern "C" glmrt_status_t
+glmrt_cuda_b12x_spark_exl3_k3_topk8_nvfp4_capacity_grid_candidate_async(
+    const glmrt_b12x_spark_exl3_k3_moe_buffers_t* buffers,
+    glmrt_device_buffer_t input_payload, size_t input_payload_stride_bytes,
+    size_t rows, size_t capacity_rows, int grid_x, void* cuda_stream) {
+  if (grid_x <= 0) {
+    return GLMRT_STATUS_INVALID_ARGUMENT;
+  }
+  return launch_exl3_k3_topk8_nvfp4(
+      buffers, input_payload, input_payload_stride_bytes, rows, capacity_rows,
+      grid_x, false, cuda_stream);
 }
 
 extern "C" glmrt_status_t glmrt_cuda_b12x_spark_w4a16_prefill_topk8_nvfp4_async(

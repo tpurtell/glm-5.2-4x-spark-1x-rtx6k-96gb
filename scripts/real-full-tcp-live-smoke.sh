@@ -345,7 +345,10 @@ warmup_expert_ids_for_owner() {
             .owner == $owner
             and .layer_id == $layer
             and .expert_id != null
-            and (.tensor_name | endswith(".gate_proj.weight"))
+            and (
+              (.tensor_name | endswith(".gate_proj.weight"))
+              or (.tensor_name | endswith(".gate_proj.trellis"))
+            )
           )
         | .expert_id
       ]
@@ -372,6 +375,13 @@ warmup_protocol_v2_experts() {
   local wire_contract="bf16-in/bf16-out"
   local warmup_routes_per_row=1
   local -a wire_args=()
+  if [ "$model_id" = "wrldsuksgo2mars/GLM-5.2-EXL3-K3-calibrated-v1" ]; then
+    # Match the fused EXL3 production ABI. Its catalog has trellis tensors,
+    # not the legacy W4A16 `.weight` tensor used by a BF16 single-route probe.
+    wire_contract="nvfp4-in/fp8-out"
+    warmup_routes_per_row=8
+    wire_args=(--nvfp4-fp8-roundtrip)
+  fi
 
   echo "== warming Spark experts with binary ProtocolV2 precompile frames transport=${coordinator_transport} wire=${wire_contract} ==" >&2
   IFS=',' read -r -a entries <<< "$expert_hosts"

@@ -7,6 +7,13 @@ import argparse
 import os
 from pathlib import Path
 
+from _b12x_exl3_k3_profile import (
+    EXL3_K3_AOT_REGIMES,
+    exl3_k3_grid_x,
+    exl3_k3_route_block_rows,
+    exl3_k3_tile_config,
+)
+
 
 PREFILL_REGIMES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 DECODE_GRID_X = 32
@@ -39,6 +46,7 @@ def export_kernels(output_dir: Path, target_sms: int) -> None:
         W4A16FusedMoeKernel,
         _w4a16_fused_persistent_grid_x,
         compile_w4a16_fused_moe,
+        compile_w4a16_topk_sum,
     )
 
     w4a16_launch = W4A16FusedMoeKernel.__call__
@@ -148,6 +156,12 @@ def export_kernels(output_dir: Path, target_sms: int) -> None:
             persistent_grid = DECODE_GRID_X
         elif label == "prefill_m2048_topk8":
             persistent_grid = 80
+        elif label == "prefill_m2064_topk8":
+            # The 96-block auto choice falls off a scheduling cliff on GB10.
+            # A complete native-call sweep (including input dequantization and
+            # top-k reduction) puts 92 blocks within ~1% of the M=2048 kernel
+            # while retaining the dedicated 2049..2064 tail bucket.
+            persistent_grid = 92
         elif top_k == 1:
             persistent_grid = (
                 TOP1_M1_GRID_X if rows == 1 else TOP1_MULTIROW_GRID_X
@@ -168,6 +182,105 @@ def export_kernels(output_dir: Path, target_sms: int) -> None:
             f"tc_decode_fused_sum:{int(tc_decode_fused_sum)}"
         )
 
+    def export_exl3_k3(*, rows: int) -> None:
+        """Export checkpoint-native EXL3 K3 with exact full rotations.
+
+        EXL3 keeps FP16 rotation scratch even though the layer input on the
+        Spark wire is BF16.  The raw BF16 input, the two routed FP16 A
+        scratch planes, and the projection rotation tables are distinct
+        arguments in the generated ABI.  Keep route packing enabled here;
+        direct-route candidates are performance-gated separately so the
+        initial production path matches SparkInfer's planned Trellis path.
+        """
+
+        top_k = 8
+        block_size = select_route_block_size_m(rows, top_k, 256)
+        expected_block_size = exl3_k3_route_block_rows(rows)
+        if block_size != expected_block_size:
+            raise ValueError(
+                f"SparkInfer EXL3 M={rows} route ABI changed: "
+                f"profile={expected_block_size}, source={block_size}"
+            )
+        packed_route_slots = max_packed_route_slots(
+            rows * top_k,
+            block_size,
+            256,
+        )
+        max_m_blocks = (packed_route_slots + block_size - 1) // block_size
+        fused = compile_w4a16_fused_moe(
+            size_m=rows,
+            hidden_size=6144,
+            intermediate_size=512,
+            num_experts=256,
+            top_k=top_k,
+            activation="silu",
+            apply_router_weight_on_input=False,
+            zero_fc2_output=False,
+            moe_block_size=block_size,
+            max_m_blocks=max_m_blocks,
+            element_dtype="fp16",
+            fast_math=True,
+            sms=sms,
+            max_shared_mem=max_shared_mem,
+            weight_layout="trellis3_t256",
+            scale_format="e4m3_k32",
+            w13_layout="trellis3_t256_proj",
+            trellis_bits=3,
+            trellis_codebook="mcg",
+            direct_topk_routes=False,
+            tc_decode_fused_sum=False,
+            force_tile_config=exl3_k3_tile_config(rows),
+            intermediate_rotation=True,
+            full_rotation=True,
+            rotation_input_dtype="bf16",
+        )
+        label = f"exl3_k3_m{rows}_topk8"
+        export_name = f"moe_tp4_{label}"
+        fused.compiled.export_to_c(
+            str(output_dir),
+            export_name,
+            f"glmrt_b12x_{export_name}",
+        )
+        automatic_grid = _w4a16_fused_persistent_grid_x(
+            fused=fused,
+            m=rows,
+            topk=top_k,
+            intermediate_size=512,
+            activation="silu",
+            direct_topk_routes=False,
+            sms=sms,
+        )
+        persistent_grid = exl3_k3_grid_x(rows)
+        if persistent_grid <= 0 or persistent_grid > automatic_grid:
+            raise ValueError(
+                f"EXL3 M={rows} grid {persistent_grid} is outside the safe "
+                f"cooperative range 1..{automatic_grid} for its selected tiles"
+            )
+        macro = label.upper()
+        config_lines.extend(
+            [
+                f"#define GLMRT_B12X_{macro}_GRID_X {persistent_grid}",
+                f"#define GLMRT_B12X_{macro}_MAX_GRID_X {automatic_grid}",
+                f"#define GLMRT_B12X_{macro}_BLOCK_SIZE {block_size}",
+                f"#define GLMRT_B12X_{macro}_PACKED_ROUTE_SLOTS {packed_route_slots}",
+                f"#define GLMRT_B12X_{macro}_MAX_M_BLOCKS {max_m_blocks}",
+                f"#define GLMRT_B12X_{macro}_FC1_TILE_K {int(fused.fc1_tile_k)}",
+                f"#define GLMRT_B12X_{macro}_FC1_TILE_N {int(fused.fc1_tile_n)}",
+                f"#define GLMRT_B12X_{macro}_FC2_TILE_K {int(fused.fc2_tile_k)}",
+                f"#define GLMRT_B12X_{macro}_FC2_TILE_N {int(fused.fc2_tile_n)}",
+            ]
+        )
+        metadata_lines.append(
+            f"{label}=grid:{persistent_grid},auto_grid:{automatic_grid},"
+            f"block:{block_size},"
+            f"route_slots:{packed_route_slots},max_m_blocks:{max_m_blocks},"
+            f"tiles:{int(fused.fc1_tile_k)}x{int(fused.fc1_tile_n)}+"
+            f"{int(fused.fc2_tile_k)}x{int(fused.fc2_tile_n)},"
+            "layout:trellis3_t256,w13_layout:trellis3_t256_proj,"
+            "bits:3,codebook:mcg,full_rotation:1,rotation_input:bf16,"
+            "direct_topk:0"
+        )
+
     export_w4a16(rows=1, top_k=8, label="decode_m1")
     export_w4a16(
         rows=1,
@@ -181,8 +294,54 @@ def export_kernels(output_dir: Path, target_sms: int) -> None:
     export_w4a16(rows=512, top_k=8, label="prefill_m512_topk8")
     export_w4a16(rows=1024, top_k=8, label="prefill_m1024_topk8")
     export_w4a16(rows=2048, top_k=8, label="prefill_m2048_topk8")
+    export_w4a16(rows=2064, top_k=8, label="prefill_m2064_topk8")
     for rows in PREFILL_REGIMES:
         export_w4a16(rows=rows, top_k=1, label=f"top1_m{rows}")
+    for rows in EXL3_K3_AOT_REGIMES:
+        export_exl3_k3(rows=rows)
+    exl3_topk_sum = compile_w4a16_topk_sum(
+        m=1,
+        topk=8,
+        hidden_size=6144,
+        element_dtype="fp16",
+        full_rotation=True,
+        num_experts=256,
+        route_num_experts=0,
+        route_ids_dtype=torch.int32,
+        use_expert_map=False,
+        broadcast_svh=False,
+    )
+    exl3_topk_sum.compiled.export_to_c(
+        str(output_dir),
+        "moe_tp4_exl3_k3_topk_sum",
+        "glmrt_b12x_moe_tp4_exl3_k3_topk_sum",
+    )
+    metadata_lines.append(
+        "exl3_k3_topk_sum=topk:8,hidden:6144,element:fp16,"
+        "output:fp32,full_rotation:1,route_ids:int32"
+    )
+    exl3_topk_sum_bf16 = compile_w4a16_topk_sum(
+        m=1,
+        topk=8,
+        hidden_size=6144,
+        element_dtype="fp16",
+        full_rotation=True,
+        full_rotation_output_dtype="bf16",
+        num_experts=256,
+        route_num_experts=0,
+        route_ids_dtype=torch.int32,
+        use_expert_map=False,
+        broadcast_svh=False,
+    )
+    exl3_topk_sum_bf16.compiled.export_to_c(
+        str(output_dir),
+        "moe_tp4_exl3_k3_topk_sum_bf16",
+        "glmrt_b12x_moe_tp4_exl3_k3_topk_sum_bf16",
+    )
+    metadata_lines.append(
+        "exl3_k3_topk_sum_bf16=topk:8,hidden:6144,element:fp16,"
+        "output:bf16,full_rotation:1,route_ids:int32"
+    )
 
     (output_dir / "b12x_spark_moe_aot_config.h").write_text(
         "\n".join(config_lines) + "\n",

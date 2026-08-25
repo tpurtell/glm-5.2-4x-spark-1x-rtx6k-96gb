@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import statistics
 import sys
 import time
@@ -19,8 +20,8 @@ import urllib.request
 from tokenizers import Tokenizer
 
 
-MODEL = "lukealonso/GLM-5.2-NVFP4-full"
-ENDPOINT = "http://127.0.0.1:8000/v1/chat/completions"
+DEFAULT_MODEL = "lukealonso/GLM-5.2-NVFP4-full"
+DEFAULT_ENDPOINT = "http://127.0.0.1:8000/v1/chat/completions"
 GLM_PREFIX = "[gMASK]<sop>"
 ASSISTANT_SUFFIX = "<|assistant|><think></think>"
 TEXT_SUFFIXES = {
@@ -51,6 +52,27 @@ IGNORED_PATH_PARTS = {
     "venv",
 }
 MAX_CORPUS_CHARACTERS = 2_000_000
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+
+
+def canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+
+
+def hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while block := source.read(8 * 1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def tokenizer_path() -> Path:
@@ -194,11 +216,15 @@ def fit_corpus_content(
 
 
 def request(
-    messages: list[dict[str, str]], timeout: float
+    messages: list[dict[str, str]],
+    timeout: float,
+    *,
+    endpoint: str = DEFAULT_ENDPOINT,
+    model: str = DEFAULT_MODEL,
 ) -> tuple[dict[str, Any], str]:
     payload = json.dumps(
         {
-            "model": MODEL,
+            "model": model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -208,7 +234,7 @@ def request(
         }
     ).encode()
     req = urllib.request.Request(
-        ENDPOINT,
+        endpoint,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -237,22 +263,71 @@ def request(
     return metrics, "".join(content)
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--tokenizer", type=Path)
+    parser.add_argument("--corpus-root", type=Path)
+    parser.add_argument(
+        "--profile", choices=("balanced", "long", "accuracy"), default="balanced"
+    )
+    parser.add_argument(
+        "--run-id",
+        help="fixed prompt identity for an exact cross-model comparison",
+    )
     parser.add_argument("--base", type=int, action="append")
     parser.add_argument("--suffix", type=int, action="append")
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=1800.0)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="optional JSONL evidence path; refuses to overwrite an existing file",
+    )
+    args = parser.parse_args(argv)
+    if not args.model or not args.endpoint:
+        parser.error("model and endpoint must be nonempty")
+    if args.run_id is not None and RUN_ID_RE.fullmatch(args.run_id) is None:
+        parser.error("run ID contains unsafe characters")
+    if args.repeats < 1 or args.timeout <= 0.0:
+        parser.error("repeats and timeout must be positive")
+    if args.output is not None and args.output.exists():
+        parser.error(f"refusing to overwrite output: {args.output}")
+    return args
+
+
+def main() -> int:
+    args = parse_args()
     bases = args.base or [0, 32_768, 65_536, 131_072, 262_144]
     suffixes = args.suffix or [1_024, 2_048, 4_096, 8_192, 16_384, 32_768]
+    if any(value < 0 for value in bases) or any(value <= 0 for value in suffixes):
+        raise SystemExit("base sizes must be nonnegative and suffix sizes positive")
 
     root = Path(__file__).resolve().parents[2]
-    tokenizer = Tokenizer.from_file(str(tokenizer_path()))
-    corpus_ids, corpus_sha256 = load_corpus(root, tokenizer)
+    tokenizer_source = (args.tokenizer or tokenizer_path()).expanduser().resolve(
+        strict=True
+    )
+    corpus_root = (args.corpus_root or root).expanduser().resolve(strict=True)
+    if not corpus_root.is_dir() or corpus_root.is_symlink():
+        raise SystemExit("corpus root must be a regular directory")
+    tokenizer = Tokenizer.from_file(str(tokenizer_source))
+    tokenizer_sha256 = hash_file(tokenizer_source)
+    corpus_ids, corpus_sha256 = load_corpus(corpus_root, tokenizer)
     markers = iter(printable_markers(tokenizer, 512))
-    run_id = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_id = args.run_id or dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     records: list[dict[str, Any]] = []
+    destination = None
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        destination = args.output.open("x", encoding="utf-8")
+
+    def emit(value: dict[str, Any]) -> None:
+        line = json.dumps(value, sort_keys=True)
+        print(line)
+        if destination is not None:
+            destination.write(line + "\n")
+            destination.flush()
 
     print(
         f"prefill run={run_id} corpus_tokens={len(corpus_ids)}",
@@ -281,6 +356,8 @@ def main() -> int:
                     {"role": "user", "content": base_content},
                 ],
                 args.timeout,
+                endpoint=args.endpoint,
+                model=args.model,
             )
             print(
                 "prime"
@@ -334,7 +411,12 @@ def main() -> int:
                             {"role": "system", "content": system},
                             {"role": "user", "content": branch_content},
                         ]
-                    metrics, content = request(messages, args.timeout)
+                    metrics, content = request(
+                        messages,
+                        args.timeout,
+                        endpoint=args.endpoint,
+                        model=args.model,
+                    )
                     actual = int(metrics.get("layerwave_prefill_rows") or 0)
                     print(
                         "measure"
@@ -360,11 +442,11 @@ def main() -> int:
                 real_full = metrics.get("real_full") or {}
                 records.append(
                     {
-                        "schema": "glmrt-release-prefill-v1",
+                        "schema": "glmrt-release-prefill-v2",
                         "run_id": run_id,
                         "timestamp_utc": dt.datetime.now(dt.UTC).isoformat(),
-                        "profile": "balanced",
-                        "model": MODEL,
+                        "profile": args.profile,
+                        "model": args.model,
                         "base_context_tokens": base,
                         "suffix_tokens": suffix,
                         "repeat": repeat,
@@ -400,13 +482,17 @@ def main() -> int:
                             )
                         ),
                         "marker": marker,
+                        "prompt_sha256": canonical_sha256(messages),
                         "content": content,
                         "corpus_sha256": corpus_sha256,
+                        "corpus_root": str(corpus_root),
+                        "tokenizer": str(tokenizer_source),
+                        "tokenizer_sha256": tokenizer_sha256,
                     }
                 )
 
     for record in records:
-        print(json.dumps(record, sort_keys=True))
+        emit(record)
     summary = []
     for base in bases:
         for suffix in suffixes:
@@ -435,7 +521,33 @@ def main() -> int:
                     ),
                 }
             )
-    print(json.dumps({"schema": "glmrt-release-prefill-summary-v1", "cells": summary}))
+    emit(
+        {
+                "schema": "glmrt-release-prefill-summary-v3",
+                "run_id": run_id,
+                "profile": args.profile,
+                "model": args.model,
+                "endpoint": args.endpoint,
+                "corpus_root": str(corpus_root),
+                "corpus_sha256": corpus_sha256,
+                "tokenizer": str(tokenizer_source),
+                "tokenizer_sha256": tokenizer_sha256,
+                "prompt_contract_sha256": canonical_sha256(
+                    [
+                        {
+                            "base_context_tokens": record["base_context_tokens"],
+                            "suffix_tokens": record["suffix_tokens"],
+                            "repeat": record["repeat"],
+                            "prompt_sha256": record["prompt_sha256"],
+                        }
+                        for record in records
+                    ]
+                ),
+                "cells": summary,
+        }
+    )
+    if destination is not None:
+        destination.close()
     return 0
 
 

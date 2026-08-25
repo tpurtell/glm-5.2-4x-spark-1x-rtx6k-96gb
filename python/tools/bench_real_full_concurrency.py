@@ -79,7 +79,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--timeout", type=float, default=300.0)
-    return parser.parse_args()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="optional JSONL evidence path; refuses to overwrite an existing file",
+    )
+    args = parser.parse_args()
+    if args.output is not None and args.output.exists():
+        parser.error(f"refusing to overwrite output: {args.output}")
+    return args
 
 
 def payload(model: str, fixture: Fixture, prompt_prefix: str = "") -> bytes:
@@ -378,6 +386,18 @@ def main() -> None:
             prompt_nonces,
         )
 
+    destination = None
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        destination = args.output.open("x", encoding="utf-8")
+
+    def emit(value: dict[str, Any]) -> None:
+        line = json.dumps(value, ensure_ascii=False)
+        print(line, flush=True)
+        if destination is not None:
+            destination.write(line + "\n")
+            destination.flush()
+
     warmups = []
     for warmup in range(1, args.warmups + 1):
         request_payloads, prompt_nonces = next_batch_inputs()
@@ -397,7 +417,7 @@ def main() -> None:
             **batch,
         }
         warmups.append(batch)
-        print(json.dumps(batch, ensure_ascii=False), flush=True)
+        emit(batch)
 
     batches = []
     for repeat in range(1, args.repeats + 1):
@@ -418,7 +438,7 @@ def main() -> None:
             **batch,
         }
         batches.append(batch)
-        print(json.dumps(batch, ensure_ascii=False), flush=True)
+        emit(batch)
 
     samples = [batch["aggregate_decode_tps"] for batch in batches]
     response_window_samples = [
@@ -461,7 +481,9 @@ def main() -> None:
             batch["all_zero_runtime_captures"] for batch in warmups
         ),
     }
-    print(json.dumps({"aggregate": summary}, ensure_ascii=False))
+    emit({"aggregate": summary})
+    if destination is not None:
+        destination.close()
     if not all(
         (
             summary["all_correct"],

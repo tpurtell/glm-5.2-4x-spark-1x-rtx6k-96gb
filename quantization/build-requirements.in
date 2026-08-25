@@ -1,0 +1,6 @@
+# PEP 517 build tools for the small source-only packages in requirements.lock.
+# These constraints make their wheel builds reproducible on amd64 and arm64.
+cmake>=3.27
+ninja==1.13.0
+setuptools>=77.0.1,<83
+wheel
